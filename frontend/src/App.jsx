@@ -480,13 +480,17 @@ export default function App() {
 
     if (downloading && jobId && !isSelected) {
       try {
-        await fetch(`${API_BASE}/download/${jobId}/interfaces`, {
+        const resp = await fetch(`${API_BASE}/download/${jobId}/interfaces`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ interface_ips: [ip] })
         });
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          setToast("Could not add interface to active download: " + (errData.detail || resp.statusText));
+        }
       } catch (err) {
-        setToast("Failed to add interface: " + err.message);
+        setToast("Could not add interface to active download: " + err.message);
       }
     }
 
@@ -517,11 +521,13 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ interface_ip: newIfacePrompt.ip })
       });
-      if (!resp.ok) throw new Error(await resp.text());
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || "Failed to add interface");
       setSelectedIps((prev) => [...prev, newIfacePrompt.ip]);
-      setToast(`${newIfacePrompt.name} added to download!`);
+      console.log("[ADD_IFACE] Response:", data);
+      setToast(`${newIfacePrompt.name} added to download — worker spawned!`);
     } catch (err) {
-      setToast("Failed to add interface: " + err.message);
+      setToast("Could not add interface to active download: " + err.message);
     }
     setNewIfacePrompt(null);
   };

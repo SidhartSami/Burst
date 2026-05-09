@@ -371,7 +371,7 @@ class DownloadManager:
     # ------------------------------------------------------------------
     # Add interface mid-download (hot-swap)
     # ------------------------------------------------------------------
-    async def add_interface(self, job_id: str, interface: Dict[str, str]) -> None:
+    async def add_interface(self, job_id: str, interface: Dict[str, str]) -> Dict[str, Any]:
         job = self.get_job(job_id)
         if not job or job.status not in ("downloading", "waiting_reconnect") or job._queue is None:
             raise ValueError("Job is not in a state to accept new interfaces")
@@ -382,7 +382,7 @@ class DownloadManager:
             prog = job.progress[ip]
             existing_task = job._workers.get(ip)
             if existing_task and not existing_task.done():
-                return  # Already actively working
+                return {"reused": True}  # Already actively working
             # Reset state and respawn worker
             prog.status = "pending"
             prog.consecutive_failures = 0
@@ -400,9 +400,38 @@ class DownloadManager:
             job.status = "downloading"
             job.error = None
 
+        # If queue is empty, steal work from the busiest interface by
+        # cancelling its worker so its current chunk gets re-queued on retry
+        if job._queue.empty():
+            busiest_ip = None
+            busiest_remaining = -1
+            for other_ip, prog in job.progress.items():
+                if other_ip == ip:
+                    continue
+                if prog.status == "downloading":
+                    remaining = (prog.chunk_end - prog.chunk_start) - prog.downloaded
+                    if remaining > busiest_remaining:
+                        busiest_remaining = remaining
+                        busiest_ip = other_ip
+            if busiest_ip:
+                # Cancel the busiest worker — the monitor loop will restart it
+                # and it will re-grab from queue alongside the new worker
+                old_task = job._workers.get(busiest_ip)
+                if old_task and not old_task.done():
+                    old_task.cancel()
+                    try:
+                        await old_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    # Reset state so monitor restarts it
+                    job.progress[busiest_ip].status = "pending"
+                    print(f"[ADD_IFACE] Cancelled worker for {busiest_ip} to redistribute work to {ip}")
+
+        print(f"[ADD_IFACE] Spawning new download worker for {ip} (queue size: {job._queue.qsize()})")
         self._rebalance_weights(job)
         task = asyncio.create_task(self._worker(job, interface, job._queue, job._chunk_files))
         job._workers[ip] = task
+        return {"spawned": True, "queue_size": job._queue.qsize()}
 
     # ------------------------------------------------------------------
     # Parallel download with latency-aware chunking
