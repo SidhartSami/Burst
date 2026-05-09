@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Vite / frontend outputs
+frontend/dist/
+frontend/.vite/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Download temp data
+downloads/
+tmp/
+*.part
