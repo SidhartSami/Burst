@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { closestCenter, DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -61,6 +61,31 @@ function shortName(name, type) {
   if (lowered.includes("usb") || lowered.includes("rndis")) return "Phone";
   if (String(type || "").toLowerCase().includes("ethernet")) return "Ethernet";
   return name || "Adapter";
+}
+
+function toneFor(name) {
+  const lowered = String(name || "").toLowerCase();
+  if (/(wi-?fi|wireless|wlan)/i.test(lowered)) {
+    return { dot: "var(--wifi-color)", bar: "var(--wifi-color)" };
+  }
+  if (/(phone|usb|rndis|mobile|samsung|huawei|xiaomi)/i.test(lowered)) {
+    return { dot: "var(--ethernet-color)", bar: "var(--ethernet-color)" };
+  }
+  return { dot: "var(--extra-color)", bar: "var(--extra-color)" };
+}
+
+class HistoryErrorBoundary extends React.Component {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) return (
+      <div style={{ padding: 20, color: 'red' }}>
+        History failed to load.
+        <button onClick={() => { localStorage.removeItem('burst_history'); window.location.reload(); }} style={{ marginLeft: 8, padding: '4px 8px', cursor: 'pointer' }}>Clear &amp; Reset</button>
+      </div>
+    );
+    return this.props.children;
+  }
 }
 
 function readDroppedUrl(event) {
@@ -308,9 +333,26 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-      if (Array.isArray(saved)) setHistory(saved.slice(0, 8));
+      const raw = localStorage.getItem(HISTORY_KEY);
+      const saved = JSON.parse(raw || "[]");
+      if (Array.isArray(saved)) {
+        // Sanitize each item with null-safe defaults
+        const sanitized = saved.map(item => ({
+          ...item,
+          id: item.id ?? crypto.randomUUID(),
+          filename: item.filename ?? 'Unknown file',
+          size: item.size ?? 0,
+          avgSpeed: item.avgSpeed ?? 0,
+          time_saved: item.time_saved ?? 0,
+          interfaces_used: Array.isArray(item.interfaces_used) ? item.interfaces_used : [],
+          timestamp: item.timestamp ?? Date.now(),
+          status: item.status ?? 'completed',
+        }));
+        setHistory(sanitized.slice(0, 8));
+      }
     } catch {
+      // Corrupted localStorage — reset
+      localStorage.removeItem(HISTORY_KEY);
       setHistory([]);
     }
   }, []);
@@ -387,16 +429,16 @@ export default function App() {
         );
         const actualTimeSaved = ifaceUsed.length > 1 ? timeSaved : 0;
         const historyItem = {
-          id: payload.job_id,
+          id: payload.job_id || crypto.randomUUID(),
           filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-          output_path: payload.output_path,
-          size: payload.expected_size,
+          output_path: payload.output_path || "",
+          size: payload.expected_size || 0,
           timestamp: Date.now(),
-          avgSpeed: avgCombinedSpeed,
-          interfaces_used: ifaceUsed,
-          estimated_single_time: estimatedSingleTime,
-          total_time: duration,
-          time_saved: actualTimeSaved,
+          avgSpeed: avgCombinedSpeed || 0,
+          interfaces_used: Array.isArray(ifaceUsed) ? ifaceUsed : [],
+          estimated_single_time: estimatedSingleTime || 0,
+          total_time: duration || 0,
+          time_saved: actualTimeSaved || 0,
           status: "completed"
         };
         setHistory((prev) => [historyItem, ...prev].slice(0, 10));
@@ -409,10 +451,10 @@ export default function App() {
       } else if (payload.status === "failed") {
         setDownloading(false);
         const historyItem = {
-          id: payload.job_id,
+          id: payload.job_id || crypto.randomUUID(),
           filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-          output_path: payload.output_path,
-          size: payload.expected_size,
+          output_path: payload.output_path || "",
+          size: payload.expected_size || 0,
           timestamp: Date.now(),
           avgSpeed: 0,
           interfaces_used: Object.values(payload.interfaces || {}).map((i) => i.ip_address),
@@ -1174,50 +1216,60 @@ export default function App() {
               </div>
             </div>
             <div className="settings-modal-body" style={{ padding: 0 }}>
-              {history.length > 0 ? (
-                <div className="recent-list">
-                  {history.map((item) => (
-                    <article key={item.id} className="recent-item fade-in" style={{ borderTop: 'none', borderBottom: '1px solid var(--border)' }}>
-                      <div className="recent-main">
-                        <div className="file-icon">
-                          <Folder size={14} />
-                        </div>
-                        <div className="recent-copy">
-                          <p>{item.filename}</p>
-                          <span>
-                            {formatBytes(item.size)}
-                            <div className="iface-dots-row" title={`Downloaded via ${item.interfaces_used?.length || 1} connections`}>
-                              {item.interfaces_used?.map((ip, idx) => {
-                                const iface = interfaces.find((i) => i.ip_address === ip);
-                                return <span key={idx} className="iface-history-dot" style={{ background: iface ? toneFor(shortName(iface.name, iface.interface_type)).dot : 'var(--text-muted)' }} />;
-                              })}
+              <HistoryErrorBoundary>
+                {history.length > 0 ? (
+                  <div className="recent-list">
+                    {history.map((item) => {
+                      const safeFilename = item.filename ?? 'Unknown file';
+                      const safeSize = item.size ?? 0;
+                      const safeAvgSpeed = item.avgSpeed ?? 0;
+                      const safeTimeSaved = item.time_saved ?? 0;
+                      const safeInterfaces = Array.isArray(item.interfaces_used) ? item.interfaces_used : [];
+                      const safeStatus = item.status ?? 'completed';
+                      return (
+                        <article key={item.id ?? Math.random()} className="recent-item fade-in" style={{ borderTop: 'none', borderBottom: '1px solid var(--border)' }}>
+                          <div className="recent-main">
+                            <div className="file-icon">
+                              <Folder size={14} />
                             </div>
-                          </span>
-                        </div>
-                      </div>
-                      <div className="recent-meta">
-                        {item.status === "failed" ? (
-                          <>
-                            <span className="recent-metric failed-tag">Failed</span>
-                            <span className="error-reason" title={item.error_reason}>{item.error_reason}</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="recent-metric">{formatSpeed(item.avgSpeed)}</span>
-                            {item.time_saved > 0 && (
-                              <span className="saved-badge">Saved {formatEta(item.time_saved)}</span>
+                            <div className="recent-copy">
+                              <p>{safeFilename}</p>
+                              <span>
+                                {formatBytes(safeSize)}
+                                <div className="iface-dots-row" title={`Downloaded via ${safeInterfaces.length || 1} connections`}>
+                                  {safeInterfaces.map((ip, idx) => {
+                                    const iface = interfaces.find((i) => i.ip_address === ip);
+                                    return <span key={idx} className="iface-history-dot" style={{ background: iface ? toneFor(shortName(iface.name, iface.interface_type)).dot : 'var(--text-muted)' }} />;
+                                  })}
+                                </div>
+                              </span>
+                            </div>
+                          </div>
+                          <div className="recent-meta">
+                            {safeStatus === "failed" ? (
+                              <>
+                                <span className="recent-metric failed-tag">Failed</span>
+                                <span className="error-reason" title={item.error_reason ?? ''}>{item.error_reason ?? 'Unknown error'}</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="recent-metric">{formatSpeed(safeAvgSpeed)}</span>
+                                {safeTimeSaved > 0 && (
+                                  <span className="saved-badge">Saved {formatEta(safeTimeSaved)}</span>
+                                )}
+                              </>
                             )}
-                          </>
-                        )}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
-                  No recent downloads
-                </div>
-              )}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                    No recent downloads
+                  </div>
+                )}
+              </HistoryErrorBoundary>
             </div>
           </div>
         </div>,
