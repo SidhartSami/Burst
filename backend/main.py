@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from downloader import DownloadManager, analyze_url
 from interfaces import get_active_interfaces_dict
+from torrent import start_torrent_download, active_torrents
 from speedtest import benchmark_interfaces
 import config
 
@@ -19,6 +20,7 @@ class DownloadRequest(BaseModel):
     url: str = Field(min_length=5)
     output_path: str = Field(min_length=1)
     interface_ips: List[str]
+    bandwidth_limits: Optional[Dict[str, int]] = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -31,6 +33,12 @@ class AddInterfacesRequest(BaseModel):
 
 class AddInterfaceRequest(BaseModel):
     interface_ip: str
+
+class TorrentStartRequest(BaseModel):
+    magnet_uri: str
+    output_path: str
+    interface_ips: List[str]
+    bandwidth_limits: Optional[Dict[str, int]] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -95,7 +103,7 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
     if not selected:
         raise HTTPException(status_code=400, detail="No valid interfaces selected")
     try:
-        job = await manager.create_job(payload.url, payload.output_path, selected)
+        job = await manager.create_job(payload.url, payload.output_path, selected, payload.bandwidth_limits)
         return {"job_id": job.job_id, "status": job.status}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -161,11 +169,18 @@ async def websocket_progress(websocket: WebSocket, job_id: str) -> None:
         while True:
             job = manager.get_job(job_id)
             if not job:
-                await websocket.send_json({"error": "Job not found"})
-                break
-            await websocket.send_json(job.to_dict())
-            if job.status in {"completed", "failed"}:
-                break
+                tjob = active_torrents.get(job_id)
+                if tjob:
+                    await websocket.send_json(tjob.to_dict())
+                    if tjob.status in {"completed", "failed"}:
+                        break
+                else:
+                    await websocket.send_json({"error": "Job not found"})
+                    break
+            else:
+                await websocket.send_json(job.to_dict())
+                if job.status in {"completed", "failed"}:
+                    break
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         pass
@@ -250,6 +265,23 @@ async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", "added": payload.interface_ip}
+
+@app.post("/torrent/start")
+async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
+    if not req.interface_ips:
+        raise HTTPException(status_code=400, detail="No interfaces selected")
+    try:
+        job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, getattr(req, "bandwidth_limits", None))
+        return {"job_id": job.job_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/torrent/{job_id}")
+async def get_torrent_status(job_id: str) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job.to_dict()
 
 
 if __name__ == "__main__":

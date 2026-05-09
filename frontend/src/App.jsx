@@ -11,6 +11,7 @@ import {
   Clock,
   Folder,
   GripVertical,
+  Magnet,
   Pause,
   Settings,
   Settings2,
@@ -136,6 +137,8 @@ export default function App() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [hotplugBanners, setHotplugBanners] = useState([]);
   const [contextMenu, setContextMenu] = useState(null);
+  const [limitPopover, setLimitPopover] = useState(null);
+  const [bandwidthLimits, setBandwidthLimits] = useState({});
   const [downloadOnlyIps, setDownloadOnlyIps] = useState([]);
   const [ignoredInterfaces, setIgnoredInterfaces] = useState([]);
 
@@ -146,6 +149,11 @@ export default function App() {
 
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
+    const isTorrent = newUrl.trim().startsWith("magnet:?") || newUrl.trim().endsWith(".torrent");
+    if (isTorrent) {
+      setOutputPath("C:\\Downloads\\");
+      return;
+    }
     try {
       const urlObj = new URL(newUrl);
       const pathname = urlObj.pathname;
@@ -550,7 +558,7 @@ export default function App() {
     return () => { if (ws) ws.close(); };
   }, []);
 
-  const startDownload = async (incomingUrl = url, incomingOutputPath = outputPath) => {
+  const startDownload = async (incomingUrl = url, incomingOutputPath = outputPath, forceTorrent = false) => {
     const cleanUrl = (incomingUrl ?? url).trim();
     const cleanOutputPath = (incomingOutputPath ?? outputPath).trim();
     const effectiveIps = validSelectedIps.length ? validSelectedIps : availableInterfaceIps;
@@ -563,16 +571,19 @@ export default function App() {
       return setToast(`Missing required fields: ${missing.join(", ")}`);
     }
 
+    const isTorrent = forceTorrent || cleanUrl.startsWith("magnet:?") || cleanUrl.endsWith(".torrent");
+
     setDownloading(true);
     try {
-      const resp = await fetch(`${API_BASE}/download`, {
+      const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
+      const body = isTorrent 
+        ? { magnet_uri: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits } 
+        : { url: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
+        
+      const resp = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: cleanUrl,
-          output_path: cleanOutputPath,
-          interface_ips: effectiveIps
-        })
+        body: JSON.stringify(body)
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Download failed to start");
@@ -591,6 +602,13 @@ export default function App() {
     setDownloadBtnState("checking");
     setDownloadErrorMsg("");
     setDownloadWarningMsg("");
+    
+    const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
+    if (isTorrent) {
+      startDownload(targetUrl, targetOutputPath, true);
+      setDownloadBtnState("idle");
+      return;
+    }
     
     try {
       const resp = await fetch(`${API_BASE}/analyze`, {
@@ -640,11 +658,18 @@ export default function App() {
 
   const clearHistory = () => setHistory([]);
 
-  const currentInterfacesProgress = Object.values(downloadStatus?.interfaces || {});
-  const combinedCurrentSpeed = currentInterfacesProgress.reduce(
-    (sum, item) => sum + Number(item.speed_mb_s || 0),
-    0
-  );
+  const currentInterfacesProgress = downloadStatus?.type === "torrent" 
+    ? Object.keys(downloadStatus.speeds || {}).map(ip => ({
+        ip_address: ip,
+        speed_mb_s: downloadStatus.speeds[ip] / (1024 * 1024),
+        peers: downloadStatus.peers_per_interface?.[ip] || 0
+      }))
+    : Object.values(downloadStatus?.interfaces || {});
+    
+  const combinedCurrentSpeed = downloadStatus?.type === "torrent"
+    ? (downloadStatus.speed_combined || 0) / (1024 * 1024)
+    : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
+    
   const currentEta = useMemo(() => {
     if (!downloadStatus?.expected_size || !combinedCurrentSpeed) return 0;
     const remaining = downloadStatus.expected_size - (downloadStatus.total_downloaded || 0);
@@ -841,6 +866,11 @@ export default function App() {
                         : "—"}
                     </span>
                   )}
+                  {bandwidthLimits[iface.ip_address] && (
+                    <div style={{ position: 'absolute', bottom: '8px', left: '10px', fontSize: '9px', fontWeight: 'bold', background: 'var(--accent)', color: 'white', padding: '1px 4px', borderRadius: '3px' }}>
+                      ⬇ {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s
+                    </div>
+                  )}
                 </button>
               );
             })}
@@ -898,21 +928,15 @@ export default function App() {
                   autoFocus
                 />
               ) : (
-                <button className="output-btn" style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'text' }} onClick={() => {
-                  setEditingOutputPath(true);
-                  if (pathHintCount < 3) {
-                    setPathHintCount(999);
-                    localStorage.setItem("burst_path_hint_count", "999");
-                  }
-                }}>
-                  {outputPath}
-                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-0 group-hover:opacity-100 transition-opacity"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-                </button>
+                <span className="path-text-v3" onClick={() => setEditingOutputPath(true)}>{outputPath}</span>
               )}
+              <button className="btn-edit-path" onClick={() => setEditingOutputPath(!editingOutputPath)}>✎</button>
             </div>
-            {pathHintCount < 3 && !editingOutputPath && (
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: '18px', marginTop: '2px' }}>
-                Click to change save location
+            {pathHintCount < 3 && <div className="path-hint">Click to change save location</div>}
+            
+            {(url.trim().startsWith("magnet:?") || url.trim().endsWith(".torrent")) && (
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                🧲 Magnet link detected — will connect via all selected interfaces
               </div>
             )}
           </section>
@@ -981,6 +1005,22 @@ export default function App() {
                     ))}
                   </ul>
                 </details>
+              )}
+              {downloadStatus?.type === "torrent" && (
+                <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--text-muted)' }}>
+                  Peers: {currentInterfacesProgress.map((item, idx) => {
+                    const iface = interfaces.find((i) => i.ip_address === item.ip_address);
+                    const colorTone = toneFor(shortName(iface?.name, iface?.interface_type));
+                    return (
+                      <span key={item.ip_address} style={{ color: colorTone.dot, fontWeight: 600 }}>
+                        {item.peers}{idx < currentInterfacesProgress.length - 1 ? " · " : ""}
+                      </span>
+                    );
+                  })}
+                  <div style={{ marginTop: '4px' }}>
+                    Seeders: {downloadStatus.seeders || 0} · Leechers: {downloadStatus.leechers || 0}
+                  </div>
+                </div>
               )}
             </section>
           )}
@@ -1197,6 +1237,24 @@ export default function App() {
               setSelectedIps(prev => prev.filter(ip => ip !== contextMenu.ip));
               setContextMenu(null);
             }}>Remove from downloads</button>
+            <button className="context-menu-item" onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setLimitPopover({
+                ip: contextMenu.ip,
+                x: rect.left,
+                y: rect.bottom + 8,
+                value: bandwidthLimits[contextMenu.ip] ? (bandwidthLimits[contextMenu.ip] / 1024 / 1024).toString() : ""
+              });
+              setContextMenu(null);
+            }}>Set bandwidth limit</button>
+            {bandwidthLimits[contextMenu.ip] && (
+              <button className="context-menu-item text-danger" onClick={() => {
+                const newLimits = { ...bandwidthLimits };
+                delete newLimits[contextMenu.ip];
+                setBandwidthLimits(newLimits);
+                setContextMenu(null);
+              }}>Remove limit</button>
+            )}
             <div className="context-menu-divider" />
             <button className="context-menu-item" onClick={() => {
               setDownloadOnlyIps(prev => {
@@ -1240,6 +1298,45 @@ export default function App() {
               setRenderedInterfaces(prev => prev.filter(i => i.ip_address !== contextMenu.ip));
               setContextMenu(null);
             }}>Forget this interface</button>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {limitPopover && createPortal(
+        <div className="limit-popover-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1999 }} onClick={() => setLimitPopover(null)}>
+          <div className="limit-popover slide-in" style={{ 
+            position: 'absolute', 
+            left: limitPopover.x, 
+            top: limitPopover.y, 
+            background: 'var(--bg)', 
+            border: '1px solid var(--border)', 
+            borderRadius: '6px', 
+            padding: '12px', 
+            boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+            display: 'flex',
+            gap: '8px',
+            alignItems: 'center'
+          }} onClick={e => e.stopPropagation()}>
+            <span style={{ fontSize: '12px', fontWeight: 500 }}>Max speed:</span>
+            <input 
+              type="number" 
+              style={{ width: '60px', padding: '4px', fontSize: '12px', borderRadius: '4px', border: '1px solid var(--border)', color: 'var(--text)' }} 
+              value={limitPopover.value}
+              onChange={e => setLimitPopover({...limitPopover, value: e.target.value})}
+              autoFocus
+            />
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>MB/s</span>
+            <button 
+              style={{ padding: '4px 8px', background: 'var(--accent)', color: 'white', borderRadius: '4px', border: 'none', fontSize: '12px', cursor: 'pointer' }}
+              onClick={() => {
+                const val = parseFloat(limitPopover.value);
+                if (!isNaN(val) && val > 0) {
+                  setBandwidthLimits({ ...bandwidthLimits, [limitPopover.ip]: Math.round(val * 1024 * 1024) });
+                }
+                setLimitPopover(null);
+              }}
+            >OK</button>
           </div>
         </div>,
         document.body
