@@ -619,6 +619,8 @@ class DownloadManager:
         sample_interval = config.get("SPEED_SAMPLE_INTERVAL")
         window = config.get("SPEED_WINDOW_SECONDS")
         limit = job.bandwidth_limits.get(interface_ip)
+        if limit:
+            print(f"[THROTTLE] interface {interface_ip} max_speed={limit} bytes/s")
         start_time = time.time()
         bytes_read = 0
 
@@ -652,6 +654,10 @@ class DownloadManager:
                     if headers and response.status_code not in (200, 206):
                         raise ValueError(f"Range download rejected ({response.status_code})")
 
+                    # Token-bucket throttle state
+                    throttle_window_start = time.monotonic()
+                    throttle_window_bytes = 0
+
                     with output_file.open("wb") as handle:
                         for data in response.iter_content(chunk_size=io_size):
                             if job.is_cancelled:
@@ -678,6 +684,18 @@ class DownloadManager:
                                         progress.speed_mb_s = ((progress.downloaded - oldest_bytes) / (1024 * 1024)) / time_diff
 
                             progress._last_progress_time = time.time()
+
+                            # Token-bucket bandwidth limiting
+                            if limit and limit > 0:
+                                throttle_window_bytes += size
+                                elapsed = time.monotonic() - throttle_window_start
+                                expected_time = throttle_window_bytes / limit
+                                if expected_time > elapsed:
+                                    time.sleep(expected_time - elapsed)
+                                # Reset window periodically to avoid float drift
+                                if throttle_window_bytes >= limit:
+                                    throttle_window_start = time.monotonic()
+                                    throttle_window_bytes = 0
                 return
             except (requests.RequestException, ValueError, Exception) as exc:
                 last_error = exc
