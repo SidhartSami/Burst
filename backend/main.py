@@ -133,12 +133,15 @@ async def add_interfaces_to_job(job_id: str, payload: AddInterfacesRequest) -> D
         raise HTTPException(status_code=404, detail="Job not found")
     all_ifaces = _interfaces_by_ip()
     selected = [all_ifaces[ip] for ip in payload.interface_ips if ip in all_ifaces]
+    results = []
     for iface in selected:
         try:
-            await manager.add_interface(job_id, iface)
+            result = await manager.add_interface(job_id, iface)
+            print(f"[ADD_IFACE] {iface['ip_address']} -> {result}")
+            results.append(result)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "success", "added": len(selected)}
+    return {"status": "success", "added": len(selected), "results": results}
 
 
 # ---------------------------------------------------------------------------
@@ -259,12 +262,11 @@ async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest)
         raise HTTPException(status_code=404, detail="Interface not found")
     
     try:
-        # Calls the existing add_interface. To truly split chunks mid-flight,
-        # downloader.py needs deep refactoring, but this endpoint satisfies the UX requirement.
-        await manager.add_interface(job_id, iface)
+        result = await manager.add_interface(job_id, iface)
+        print(f"[ADD_IFACE] Single add {payload.interface_ip} -> {result}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "success", "added": payload.interface_ip}
+    return {"status": "success", "added": payload.interface_ip, "detail": result}
 
 @app.post("/torrent/start")
 async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
