@@ -85,6 +85,7 @@ class DownloadJob:
     error: Optional[str] = None
     is_cancelled: bool = False
     retry_events: List[RetryEvent] = field(default_factory=list)
+    bandwidth_limits: Dict[str, float] = field(default_factory=dict)
     _queue: Any = field(default=None, repr=False)
     _chunk_files: Any = field(default=None, repr=False)
     _workers: Any = field(default_factory=dict, repr=False)   # ip -> Task
@@ -152,11 +153,11 @@ class DownloadManager:
     def get_job(self, job_id: str) -> Optional[DownloadJob]:
         return self.jobs.get(job_id)
 
-    async def create_job(self, url: str, output_path: str, interfaces: List[Dict[str, str]]) -> DownloadJob:
+    async def create_job(self, url: str, output_path: str, interfaces: List[Dict[str, str]], bandwidth_limits: Dict[str, float] = None) -> DownloadJob:
         if not interfaces:
             raise ValueError("At least one interface is required")
         job_id = str(uuid.uuid4())
-        job = DownloadJob(job_id=job_id, url=url, output_path=output_path)
+        job = DownloadJob(job_id=job_id, url=url, output_path=output_path, bandwidth_limits=bandwidth_limits or {})
         self.jobs[job_id] = job
         self._locks[job_id] = asyncio.Lock()
         self._thread_locks[job_id] = threading.Lock()
@@ -588,6 +589,9 @@ class DownloadManager:
         io_size = config.get("CHUNK_IO_SIZE")
         sample_interval = config.get("SPEED_SAMPLE_INTERVAL")
         window = config.get("SPEED_WINDOW_SECONDS")
+        limit = job.bandwidth_limits.get(interface_ip)
+        start_time = time.time()
+        bytes_read = 0
 
         for attempt in range(1, retry_attempts + 1):
             chunk_downloaded = 0
