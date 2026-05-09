@@ -1001,17 +1001,24 @@ export default function App() {
                   <X size={14} />
                 </button>
               </div>
-              <div className="progress-main">
-                <div
-                  className={`progress-fill ${downloading ? "progress-shimmer" : ""}`}
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      ((downloadStatus.total_downloaded || 0) / Math.max(1, downloadStatus.expected_size || 1)) * 100
-                    )}%`
-                  }}
-                />
-              </div>
+              {downloadStatus.status === "fetching_metadata" ? (
+                <div className="fetching-metadata-v3">
+                  <div className="fetching-spinner" />
+                  <span>Fetching torrent metadata...</span>
+                </div>
+              ) : (
+                <div className="progress-main">
+                  <div
+                    className={`progress-fill ${downloading ? "progress-shimmer" : ""}`}
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        ((downloadStatus.total_downloaded || 0) / Math.max(1, downloadStatus.expected_size || 1)) * 100
+                      )}%`
+                    }}
+                  />
+                </div>
+              )}
               <div className="iface-bars">
                 {currentInterfacesProgress.map((item) => {
                   const iface = interfaces.find((i) => i.ip_address === item.ip_address);
@@ -1029,17 +1036,26 @@ export default function App() {
                   );
                 })}
               </div>
-              <div className="speed-line">{formatSpeed(combinedCurrentSpeed)}</div>
-              <p className="speed-detail">
-                {currentInterfacesProgress.map((item) => `${shortName(item.name, "")} ${Number(item.speed_mb_s || 0).toFixed(2)}`).join(" · ")}
-              </p>
-              <p className="eta-line">
-                {formatEta(currentEta)}
-                {speedupText ? ` · ${speedupText}` : ""}
-              </p>
+              {downloadStatus.status !== "fetching_metadata" && (
+                <>
+                  <div className="speed-line">{formatSpeed(combinedCurrentSpeed)}</div>
+                  <p className="speed-detail">
+                    {currentInterfacesProgress.map((item) => `${shortName(item.name, "")} ${Number(item.speed_mb_s || 0).toFixed(2)}`).join(" · ")}
+                  </p>
+                  <p className="eta-line">
+                    {formatEta(currentEta)}
+                    {speedupText ? ` · ${speedupText}` : ""}
+                  </p>
+                </>
+              )}
               {downloadStatus.status === "waiting_reconnect" && (
                 <div className="reconnect-banner">
                   <AlertTriangle size={14} /> All connections lost — waiting to reconnect
+                </div>
+              )}
+              {downloadStatus.status === "failed" && downloadStatus.type === "torrent" && downloadStatus.error && (
+                <div className="reconnect-banner" style={{ background: 'var(--danger-soft)', color: 'var(--danger)' }}>
+                  <AlertTriangle size={14} /> {downloadStatus.error}
                 </div>
               )}
               {(downloadStatus.retry_events || []).length > 0 && (
@@ -1055,7 +1071,7 @@ export default function App() {
                   </ul>
                 </details>
               )}
-              {downloadStatus?.type === "torrent" && (
+              {downloadStatus?.type === "torrent" && downloadStatus.status !== "fetching_metadata" && (
                 <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--text-muted)' }}>
                   Peers: {currentInterfacesProgress.map((item, idx) => {
                     const iface = interfaces.find((i) => i.ip_address === item.ip_address);
