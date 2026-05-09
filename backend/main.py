@@ -187,6 +187,7 @@ async def websocket_interfaces(websocket: WebSocket) -> None:
 
 async def interface_polling_loop():
     last_interfaces = {}
+    pending_notifications = set()
     while True:
         try:
             current_interfaces = get_active_interfaces_dict()
@@ -203,14 +204,20 @@ async def interface_polling_loop():
                         removed.append(i)
                         
                 for i in added:
-                    msg = {"event": "interface_added", "interface": {"name": i["name"], "ip": i["ip_address"], "type": i.get("interface_type", ""), "speed": 0}}
-                    for ws in list(interfaces_ws_sockets):
-                        try:
-                            await ws.send_json(msg)
-                        except Exception:
-                            pass
+                    ip = i["ip_address"]
+                    if ip not in pending_notifications:
+                        pending_notifications.add(ip)
+                        msg = {"event": "interface_added", "interface": {"name": i["name"], "ip": ip, "type": i.get("interface_type", ""), "speed": 0}}
+                        for ws in list(interfaces_ws_sockets):
+                            try:
+                                await ws.send_json(msg)
+                            except Exception:
+                                pass
                 for i in removed:
-                    msg = {"event": "interface_removed", "interface": {"name": i["name"], "ip": i["ip_address"]}}
+                    ip = i["ip_address"]
+                    if ip in pending_notifications:
+                        pending_notifications.remove(ip)
+                    msg = {"event": "interface_removed", "interface": {"name": i["name"], "ip": ip}}
                     for ws in list(interfaces_ws_sockets):
                         try:
                             await ws.send_json(msg)

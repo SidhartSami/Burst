@@ -8,6 +8,7 @@ import {
   ChevronDown,
   CheckCircle2,
   CircleX,
+  Clock,
   Folder,
   GripVertical,
   Pause,
@@ -132,6 +133,7 @@ export default function App() {
   const [pathHintCount, setPathHintCount] = useState(0);
   const [pillHintSeen, setPillHintSeen] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [hotplugBanners, setHotplugBanners] = useState([]);
   const [contextMenu, setContextMenu] = useState(null);
   const [downloadOnlyIps, setDownloadOnlyIps] = useState([]);
@@ -208,35 +210,8 @@ export default function App() {
     setInterfaces(fresh);
     mergeInterfacesForUi(fresh);
 
-    // Detect new or returning interface during active download
-    if (downloading && jobId && !newIfacePrompt) {
-      const freshIps = fresh.map((i) => i.ip_address);
-
-      // Case 1: Brand new interface that wasn't there before
-      const brandNew = freshIps.filter((ip) => !prevIfaceIpsRef.current.includes(ip));
-
-      // Case 2: Interface exists in download but is dead/paused — has returned at OS level
-      const returning = freshIps.filter((ip) => {
-        const dlStatus = downloadStatus?.interfaces?.[ip];
-        return dlStatus && ["paused_slow", "disconnected", "excluded"].includes(dlStatus.status);
-      });
-
-      const candidates = [...brandNew, ...returning];
-      if (candidates.length > 0) {
-        const targetIp = candidates[0];
-        const targetIface = fresh.find((i) => i.ip_address === targetIp);
-        if (targetIface) {
-          setNewIfacePrompt({
-            ip: targetIface.ip_address,
-            name: shortName(targetIface.name, targetIface.interface_type),
-            isReturning: returning.includes(targetIp),
-          });
-        }
-      }
-      prevIfaceIpsRef.current = freshIps;
-    } else {
-      prevIfaceIpsRef.current = fresh.map((i) => i.ip_address);
-    }
+    // Detect returning interfaces or clean up prevIfaceIpsRef
+    prevIfaceIpsRef.current = fresh.map((i) => i.ip_address);
 
     setSelectedIps((prev) =>
       prev.length
@@ -486,13 +461,15 @@ export default function App() {
 
   const handleNewIfaceAccept = async () => {
     if (!newIfacePrompt || !jobId) return;
-    setSelectedIps((prev) => [...prev, newIfacePrompt.ip]);
     try {
-      await fetch(`${API_BASE}/download/${jobId}/interfaces`, {
+      const resp = await fetch(`${API_BASE}/download/${jobId}/add_interface`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ interface_ips: [newIfacePrompt.ip] })
+        body: JSON.stringify({ interface_ip: newIfacePrompt.ip })
       });
+      if (!resp.ok) throw new Error(await resp.text());
+      setSelectedIps((prev) => [...prev, newIfacePrompt.ip]);
+      setToast(`${newIfacePrompt.name} added to download!`);
     } catch (err) {
       setToast("Failed to add interface: " + err.message);
     }
@@ -516,12 +493,14 @@ export default function App() {
   const validSelectedIpsRef = useRef([]);
   const downloadingRef = useRef(false);
   const jobIdRef = useRef("");
+  const downloadStatusRef = useRef(null);
   
   useEffect(() => {
     validSelectedIpsRef.current = validSelectedIps;
     downloadingRef.current = downloading;
     jobIdRef.current = jobId;
-  }, [validSelectedIps, downloading, jobId]);
+    downloadStatusRef.current = downloadStatus;
+  }, [validSelectedIps, downloading, jobId, downloadStatus]);
 
   useEffect(() => {
     let ws;
@@ -532,8 +511,22 @@ export default function App() {
           const payload = JSON.parse(event.data);
           if (payload.event === "interface_added") {
             const ignored = JSON.parse(localStorage.getItem("burst_ignored_interfaces") || "[]");
-            if (!ignored.includes(payload.interface.ip)) {
-              setHotplugBanners(prev => [...prev, { id: Date.now() + Math.random(), interface: payload.interface }]);
+            const ip = payload.interface.ip;
+            if (!ignored.includes(ip)) {
+              if (downloadingRef.current && jobIdRef.current) {
+                const inJob = downloadStatusRef.current?.interfaces?.[ip];
+                if (!inJob) {
+                  setNewIfacePrompt({
+                    ip: ip,
+                    name: payload.interface.name || "Unknown",
+                  });
+                }
+              } else {
+                setHotplugBanners(prev => {
+                  if (prev.some(b => b.id === ip)) return prev;
+                  return [...prev, { id: ip, interface: payload.interface }];
+                });
+              }
             }
           } else if (payload.event === "interface_removed") {
             const removedIp = payload.interface.ip;
@@ -743,6 +736,9 @@ export default function App() {
               <span className="connections-pill">
                 <span className="dot">●</span> {activeConnectionCount} active
               </span>
+              <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setShowHistoryModal(true)}>
+                <Clock size={16} />
+              </button>
               <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setShowSettingsModal(true)}>
                 <Settings2 size={16} />
               </button>
@@ -1001,79 +997,19 @@ export default function App() {
             </section>
           )}
 
-          <section className="recent-head">
-            <h2>Recent</h2>
-            <button onClick={clearHistory}>Clear</button>
-          </section>
-          <section className="recent-list">
-            {history.map((item) => (
-              <article key={item.id} className="recent-item">
-                <div className="recent-main">
-                  {item.status === "completed" ? (
-                    <CheckCircle2 size={13} color="var(--success)" />
-                  ) : (
-                    <CircleX size={13} color="var(--danger)" />
-                  )}
-                  <div className="recent-copy">
-                    <p>{item.filename}</p>
-                    <span>
-                      {new Date(item.timestamp).toLocaleString()} ·{" "}
-                      {item.status === "failed" ? <em className="failed-tag">Failed</em> : `avg ${formatSpeed(item.avgSpeed)}`}
-                    </span>
-                    {item.status === "failed" && item.error_reason ? (
-                      <span className="error-reason">{item.error_reason.slice(0, 60)}</span>
-                    ) : (
-                      <span className="iface-dots-row">
-                        {(item.interfaces_used || []).slice(0, 3).map((iface, idx) => (
-                          <span
-                            key={`${item.id}-${iface}-${idx}`}
-                            className="iface-history-dot"
-                            style={{
-                              background:
-                                idx === 0 ? "var(--ethernet-color)" : idx === 1 ? "var(--wifi-color)" : "var(--extra-color)"
-                            }}
-                          />
-                        ))}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="recent-metric">
-                  {item.time_saved > 0 ? `Saved ${Math.round(item.time_saved)}s` : item.status === "failed" ? "Failed" : formatSpeed(item.avgSpeed)}
-                </div>
-              </article>
-            ))}
-          </section>
+          <div style={{ textAlign: 'center', padding: '16px', fontSize: '11px', color: 'var(--text-muted)' }}>
+            ⚡ Browser extension — coming soon
+          </div>
 
-          <section className="ext-row">
-            <button className="ext-toggle" onClick={() => setShowExtension((v) => !v)}>
-              <span>⚡ Browser Extension</span>
-              <span className="soon-badge">Coming soon</span>
-              <ChevronDown size={14} className={showExtension ? "open" : ""} />
-            </button>
-            {showExtension && (
-              <div className="ext-body fade-in">
-                <button disabled title="coming soon">
-                  Install Chrome Extension
-                </button>
-                <button disabled title="coming soon">
-                  Install Firefox Extension
-                </button>
-              </div>
-            )}
-          </section>
-          <div className="card-footer">Burst v0.2</div>
+          <div className="card-footer" style={{ borderTop: 'none', paddingTop: 0 }}>Burst v0.2</div>
           {newIfacePrompt && (
             <div className="iface-prompt slide-in">
               <p>
-                <strong>{newIfacePrompt.name}</strong>
-                {newIfacePrompt.isReturning
-                  ? " reconnected — rejoin the download?"
-                  : " detected — add to current download?"}
+                <strong>{newIfacePrompt.name}</strong> detected — add to current download?
               </p>
               <div className="iface-prompt-actions">
                 <button className="btn-prompt-yes" onClick={handleNewIfaceAccept}>
-                  {newIfacePrompt.isReturning ? "Rejoin" : "Yes, boost speed"}
+                  Yes, boost speed
                 </button>
                 <button className="btn-prompt-no" onClick={handleNewIfaceDismiss}>No thanks</button>
               </div>
@@ -1179,6 +1115,69 @@ export default function App() {
                   body: JSON.stringify({settings: appSettings})
                 }).then(() => setShowSettingsModal(false)).catch(() => {});
               }}>Save</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showHistoryModal && createPortal(
+        <div className="settings-modal-overlay" onClick={() => setShowHistoryModal(false)}>
+          <div className="settings-modal slide-in" style={{ width: '480px' }} onClick={e => e.stopPropagation()}>
+            <div className="settings-modal-header">
+              <h2>History</h2>
+              <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                <button className="btn-clear" style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }} onClick={clearHistory}>Clear</button>
+                <button className="settings-modal-close" onClick={() => setShowHistoryModal(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+            <div className="settings-modal-body" style={{ padding: 0 }}>
+              {history.length > 0 ? (
+                <div className="recent-list">
+                  {history.map((item) => (
+                    <article key={item.id} className="recent-item fade-in" style={{ borderTop: 'none', borderBottom: '1px solid var(--border)' }}>
+                      <div className="recent-main">
+                        <div className="file-icon">
+                          <Folder size={14} />
+                        </div>
+                        <div className="recent-copy">
+                          <p>{item.filename}</p>
+                          <span>
+                            {formatBytes(item.size)}
+                            <div className="iface-dots-row" title={`Downloaded via ${item.interfaces_used?.length || 1} connections`}>
+                              {item.interfaces_used?.map((ip, idx) => {
+                                const iface = interfaces.find((i) => i.ip_address === ip);
+                                return <span key={idx} className="iface-history-dot" style={{ background: iface ? toneFor(shortName(iface.name, iface.interface_type)).dot : 'var(--text-muted)' }} />;
+                              })}
+                            </div>
+                          </span>
+                        </div>
+                      </div>
+                      <div className="recent-meta">
+                        {item.status === "failed" ? (
+                          <>
+                            <span className="recent-metric failed-tag">Failed</span>
+                            <span className="error-reason" title={item.error_reason}>{item.error_reason}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="recent-metric">{formatSpeed(item.avgSpeed)}</span>
+                            {item.time_saved > 0 && (
+                              <span className="saved-badge">Saved {formatEta(item.time_saved)}</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                  No recent downloads
+                </div>
+              )}
             </div>
           </div>
         </div>,
