@@ -12,7 +12,6 @@
 ## ⚡ What is Burst?
 
 **Burst** is a next-generation download manager designed to maximize your bandwidth by **bonding multiple network interfaces** into a single, high-speed download stream. Whether you're combining Ethernet, Wi-Fi, and 5G/4G tethering, Burst intelligently distributes chunks across all active connections to ensure you're using every bit of speed available.
-<img width="800" height="450" alt="VideoProject1-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/5c9138b6-9886-46c2-828d-33f43bd8f0a3" />
 
 ## ✨ Key Features
 
@@ -22,6 +21,8 @@
 - 🎨 **Modern Frameless UI**: A sleek, dark-themed interface built with React, providing a premium desktop experience.
 - 🛡️ **Automated Firewall Setup**: Zero-config installation with automated Windows Firewall rule management.
 - 📦 **One-Click Installer**: Professional "Next-Next-Finish" setup experience powered by Inno Setup.
+
+<img width="800" height="450" alt="VideoProject1-ezgif com-video-to-gif-converter(1)" src="https://github.com/user-attachments/assets/19dceec7-c5e6-4a34-92d6-2d2a3096a9d9" />
 
 ## 🚀 Getting Started
 
