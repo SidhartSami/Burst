@@ -14,6 +14,9 @@ from interfaces import get_active_interfaces_dict
 from torrent import start_torrent_download, active_torrents
 from speedtest import benchmark_interfaces
 import config
+from contextlib import asynccontextmanager
+import tkinter as tk
+from tkinter import filedialog
 
 
 class DownloadRequest(BaseModel):
@@ -34,6 +37,9 @@ class AddInterfacesRequest(BaseModel):
 class AddInterfaceRequest(BaseModel):
     interface_ip: str
 
+class RemoveInterfaceRequest(BaseModel):
+    interface_ip: str
+
 class TorrentStartRequest(BaseModel):
     magnet_uri: str
     output_path: str
@@ -45,7 +51,19 @@ class SettingsUpdate(BaseModel):
     settings: Dict[str, Any]
 
 
-app = FastAPI(title="Burst API", version="0.2.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start polling loop
+    task = asyncio.create_task(interface_polling_loop())
+    yield
+    # Shutdown: Clean up if needed
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="Burst API", version="0.2.0", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 
@@ -158,6 +176,25 @@ async def update_settings(payload: SettingsUpdate) -> Dict[str, Any]:
     return {"settings": updated}
 
 
+@app.post("/settings/reset")
+async def reset_settings() -> Dict[str, Any]:
+    return {"settings": config.reset_settings()}
+
+
+@app.get("/select-path")
+async def select_path():
+    """Opens a native directory selection dialog and returns the selected path."""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        path = filedialog.askdirectory()
+        root.destroy()
+        return {"path": path if path else None}
+    except Exception as e:
+        return {"path": None, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # WebSocket for real-time progress & Interface Hotplug Polling
 # ---------------------------------------------------------------------------
@@ -205,7 +242,6 @@ async def websocket_interfaces(websocket: WebSocket) -> None:
 
 async def interface_polling_loop():
     last_interfaces = {}
-    pending_notifications = set()
     while True:
         try:
             current_interfaces = get_active_interfaces_dict()
@@ -223,18 +259,14 @@ async def interface_polling_loop():
                         
                 for i in added:
                     ip = i["ip_address"]
-                    if ip not in pending_notifications:
-                        pending_notifications.add(ip)
-                        msg = {"event": "interface_added", "interface": {"name": i["name"], "ip": ip, "type": i.get("interface_type", ""), "speed": 0}}
-                        for ws in list(interfaces_ws_sockets):
-                            try:
-                                await ws.send_json(msg)
-                            except Exception:
-                                pass
+                    msg = {"event": "interface_added", "interface": {"name": i["name"], "ip": ip, "type": i.get("interface_type", ""), "speed": 0}}
+                    for ws in list(interfaces_ws_sockets):
+                        try:
+                            await ws.send_json(msg)
+                        except Exception:
+                            pass
                 for i in removed:
                     ip = i["ip_address"]
-                    if ip in pending_notifications:
-                        pending_notifications.remove(ip)
                     msg = {"event": "interface_removed", "interface": {"name": i["name"], "ip": ip}}
                     for ws in list(interfaces_ws_sockets):
                         try:
@@ -247,20 +279,25 @@ async def interface_polling_loop():
             pass
         await asyncio.sleep(3)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(interface_polling_loop())
+# startup/shutdown handled by lifespan decorator
 
 @app.post("/download/{job_id}/add_interface")
 async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest) -> Dict[str, Any]:
     job = manager.get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        # Check if it's a torrent job
+        tjob = active_torrents.get(job_id)
+        if not tjob:
+            raise HTTPException(status_code=404, detail="Job not found")
+        all_ifaces = get_active_interfaces_dict()
+        iface = next((i for i in all_ifaces if i["ip_address"] == payload.interface_ip), None)
+        if not iface:
+            raise HTTPException(status_code=404, detail="Interface not found")
+        return await tjob.add_interface(payload.interface_ip, iface["name"])
     all_ifaces = _interfaces_by_ip()
     iface = all_ifaces.get(payload.interface_ip)
     if not iface:
         raise HTTPException(status_code=404, detail="Interface not found")
-    
     try:
         result = await manager.add_interface(job_id, iface)
         print(f"[ADD_IFACE] Single add {payload.interface_ip} -> {result}")
@@ -268,12 +305,57 @@ async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest)
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", "added": payload.interface_ip, "detail": result}
 
+@app.post("/download/{job_id}/remove_interface")
+async def remove_interface_from_job(job_id: str, payload: RemoveInterfaceRequest) -> Dict[str, Any]:
+    job = manager.get_job(job_id)
+    if not job:
+        # Check if it's a torrent job
+        tjob = active_torrents.get(job_id)
+        if not tjob:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return await tjob.remove_interface(payload.interface_ip)
+        
+    try:
+        result = await manager.remove_interface(job_id, payload.interface_ip)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/download/{job_id}/pause")
+async def pause_download(job_id: str) -> Dict[str, Any]:
+    try:
+        return await manager.pause_job(job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/download/{job_id}/resume")
+async def resume_download(job_id: str) -> Dict[str, Any]:
+    try:
+        return await manager.resume_job(job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/download/{job_id}/cancel")
+async def cancel_download(job_id: str) -> Dict[str, Any]:
+    # Check regular manager first
+    job = manager.get_job(job_id)
+    if job:
+        return await manager.cancel_job(job_id)
+    
+    # Check torrent manager
+    tjob = active_torrents.get(job_id)
+    if tjob:
+        return await tjob.cancel()
+    
+    raise HTTPException(status_code=404, detail="Job not found")
+
+
 @app.post("/torrent/start")
 async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
     if not req.interface_ips:
         raise HTTPException(status_code=400, detail="No interfaces selected")
     try:
-        job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, getattr(req, "bandwidth_limits", None))
+        job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, req.bandwidth_limits)
         return {"job_id": job.job_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

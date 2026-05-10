@@ -1,0 +1,11 @@
+# Run these commands in PowerShell as Administrator to allow Burst P2P traffic through Windows Firewall.
+
+$pythonPath = (Get-Command python).Source
+
+# Allow UDP traffic (Essential for DHT and Peer Discovery)
+New-NetFirewallRule -DisplayName "Burst P2P Engine (Python)" -Direction Inbound -Program "$pythonPath" -Action Allow -Protocol UDP
+
+# Allow TCP traffic (Essential for Data Transfer)
+New-NetFirewallRule -DisplayName "Burst P2P Engine (Python)" -Direction Inbound -Program "$pythonPath" -Action Allow -Protocol TCP
+
+Write-Host "Firewall rules for Burst have been successfully applied to: $pythonPath" -ForegroundColor Green
