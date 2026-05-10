@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   AlertCircle,
+  Inbox,
   CheckCircle2,
   Folder,
   Magnet,
@@ -572,8 +573,12 @@ export default function App() {
                   if (activeTab === 'torrents') return st.type === 'torrent';
                   return st.type !== 'torrent';
                 }).length === 0 && (
-                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: '13px' }}>
-                    No active {activeTab}
+                  <div className="empty-state slide-in">
+                    <div className="empty-icon-wrapper">
+                      <Inbox size={32} strokeWidth={1.5} />
+                    </div>
+                    <h3>No active {activeTab}</h3>
+                    <p>Paste a link above to start your first speed-bonded download.</p>
                   </div>
                 )}
                 {activeJobs.filter(jid => {
