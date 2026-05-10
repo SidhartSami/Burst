@@ -230,9 +230,9 @@ async def start_torrent_download(
         # For torrents, the output_path is often a directory, so we handle it slightly differently if needed
         # but the logic remains same for simple collision
         counter = 1
-        while f"{final_path} ({counter})" in active_paths:
+        while f"{final_path}({counter})" in active_paths:
             counter += 1
-        final_path = f"{final_path} ({counter})"
+        final_path = f"{final_path}({counter})"
 
     job = TorrentJob(magnet_uri, final_path, interface_ips)
     active_torrents[job.job_id] = job

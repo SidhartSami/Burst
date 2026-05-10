@@ -168,9 +168,9 @@ class DownloadManager:
             ext = p.suffix
             base = str(p.with_suffix(""))
             counter = 1
-            while f"{base} ({counter}){ext}" in active_paths:
+            while f"{base}({counter}){ext}" in active_paths:
                 counter += 1
-            final_path = f"{base} ({counter}){ext}"
+            final_path = f"{base}({counter}){ext}"
 
         job_id = str(uuid.uuid4())
         job = DownloadJob(job_id=job_id, url=url, output_path=final_path, bandwidth_limits=bandwidth_limits or {})

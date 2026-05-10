@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  AlertCircle,
   CheckCircle2,
   Folder,
   Magnet,
@@ -244,7 +245,10 @@ export default function App() {
     setUrl(newUrl);
     const isTorrent = newUrl.trim().startsWith("magnet:?") || newUrl.trim().endsWith(".torrent");
     if (isTorrent) {
-      setOutputPath("C:\\Downloads\\");
+      const magnetNameMatch = newUrl.match(/dn=([^&]+)/);
+      const magnetName = magnetNameMatch ? decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, ' ') : "torrent-download";
+      const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
+      setOutputPath(savedPath + magnetName);
       return;
     }
     try {
@@ -499,14 +503,14 @@ export default function App() {
       <div className={`main-layout ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <aside className="sidebar">
           <div className="nav-list" style={{ marginTop: '12px' }}>
-            <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
+             <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
               <Download size={16} /> {!isSidebarCollapsed && "Downloads"}
-            </button>
-            <button className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')} title="History">
-              <History size={16} /> {!isSidebarCollapsed && "History"}
             </button>
             <button className={`nav-item ${activeTab === 'torrents' ? 'active' : ''}`} onClick={() => setActiveTab('torrents')} title="Torrents">
               <Magnet size={16} /> {!isSidebarCollapsed && "Torrents"}
+            </button>
+            <button className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')} title="History">
+              <History size={16} /> {!isSidebarCollapsed && "History"}
             </button>
             <button className={`nav-item ${activeTab === 'connections' ? 'active' : ''}`} onClick={() => setActiveTab('connections')} title="Connections">
               <Zap size={16} /> {!isSidebarCollapsed && "Connections"}
@@ -619,7 +623,7 @@ export default function App() {
               )}
               {history.map((item) => (
                 <div className="completed-row" key={item.id ?? Math.random()}>
-                  <CheckCircle2 size={16} color={item.status === 'failed' ? "var(--danger)" : "var(--success)"} />
+                  {item.status === 'failed' ? <AlertCircle size={16} color="var(--danger)" /> : <CheckCircle2 size={16} color="var(--success)" />}
                   <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
                   <div className="completed-meta">
                     <span>{formatBytes(item.size)}</span>
