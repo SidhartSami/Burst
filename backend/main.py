@@ -3,17 +3,29 @@ from __future__ import annotations
 
 import asyncio
 import time
+import sys
+import os
+
+# Redirect stdout/stderr to devnull for --noconsole mode
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import os
 
 from downloader import DownloadManager, analyze_url
 from interfaces import get_active_interfaces_dict
 from torrent import start_torrent_download, active_torrents
 from speedtest import benchmark_interfaces
 import config
+from setup_utils import apply_firewall_rules
 from contextlib import asynccontextmanager
 import tkinter as tk
 from tkinter import filedialog
@@ -53,7 +65,11 @@ class SettingsUpdate(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Start polling loop
+    # Run firewall setup in a separate thread so it doesn't block the startup
+    from threading import Thread
+    Thread(target=apply_firewall_rules, daemon=True).start()
+    
+    # Start polling loop
     task = asyncio.create_task(interface_polling_loop())
     yield
     # Shutdown: Clean up if needed
@@ -367,7 +383,103 @@ async def get_torrent_status(job_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
 
+# ---------------------------------------------------------------------------
+# Serve Production UI
+# ---------------------------------------------------------------------------
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.join(os.path.dirname(__file__), "..")
+
+    return os.path.join(base_path, relative_path)
+
+frontend_dist = resource_path("frontend/dist")
+
+if os.path.exists(frontend_dist):
+    # Mount assets folder for JS/CSS
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+
+    # Catch-all to serve index.html for any other URL (SPA support)
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        # Check if the requested path is a file in the dist root (like favicon.ico)
+        file_path = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    import webview
+    from threading import Thread
+
+    # 1. Define the server thread
+    def start_server():
+        # Full silent config for Uvicorn
+        full_silence_config = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {"()": "uvicorn.logging.DefaultFormatter", "fmt": "%(message)s", "use_colors": False},
+                "access": {"()": "uvicorn.logging.AccessFormatter", "fmt": "%(message)s", "use_colors": False},
+            },
+            "handlers": {"null": {"class": "logging.NullHandler"}},
+            "loggers": {
+                "uvicorn": {"handlers": ["null"], "level": "CRITICAL"},
+                "uvicorn.error": {"handlers": ["null"], "level": "CRITICAL"},
+                "uvicorn.access": {"handlers": ["null"], "level": "CRITICAL"},
+            },
+        }
+        # Passing 'app' object directly is safer for PyInstaller
+        uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_config=full_silence_config, use_colors=False)
+
+    # 2. Start server in background
+    t = Thread(target=start_server)
+    t.daemon = True
+    t.start()
+
+    # 3. Create the API for Window Controls
+    class WindowAPI:
+        def __init__(self):
+            self.window = None
+        def set_window(self, window):
+            self.window = window
+
+        def close(self):
+            if self.window: self.window.destroy()
+        def minimize(self):
+            if self.window: self.window.minimize()
+        def maximize(self):
+            if self.window:
+                if self.window.fullscreen:
+                    self.window.toggle_fullscreen()
+                else:
+                    self.window.maximize()
+
+    api = WindowAPI()
+
+    # 4. Define the background loader
+    def load_logic(window):
+        # Wait for server to be ready
+        import time
+        time.sleep(2)
+        window.load_url("http://127.0.0.1:8000")
+
+    # 5. Create and Start instantly
+    window = webview.create_window(
+        "Burst", 
+        url=None, # Start empty so it's instant
+        width=950, 
+        height=680, 
+        frameless=True, 
+        easy_drag=True,
+        resizable=False,
+        js_api=api
+    )
+    api.set_window(window)
+    
+    # Start the engine - this runs the load_logic in the background
+    webview.start(load_logic, window)
