@@ -114,6 +114,15 @@ def save_settings(overrides: Dict[str, Any]) -> Dict[str, Any]:
         pass
     return current
 
+def reset_settings() -> Dict[str, Any]:
+    """Delete overrides and restore defaults."""
+    if SETTINGS_FILE.exists():
+        try:
+            SETTINGS_FILE.unlink()
+        except OSError:
+            pass
+    return dict(_DEFAULTS)
+
 
 def get(key: str) -> Any:
     """Get a single setting value (hot-reads from disk for runtime changes)."""

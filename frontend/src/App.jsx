@@ -1,29 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { closestCenter, DndContext, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
-import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import {
   AlertTriangle,
-  Cable,
-  ChevronDown,
   CheckCircle2,
-  CircleX,
-  Clock,
   Folder,
-  GripVertical,
   Magnet,
   Pause,
   Settings,
-  Settings2,
-  Smartphone,
-  Wifi,
-  X
+  X,
+  Download,
+  Zap,
+  History,
+  Search,
+  FolderOpen,
+  Minus,
+  Square,
+  Play,
+  Moon,
+  Sun,
+  Menu
 } from "lucide-react";
-import { createPortal } from "react-dom";
 
 const API_BASE = "http://127.0.0.1:8000";
 const HISTORY_KEY = "burst_history";
-const SEEN_KEY = "burst_seen";
 
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
@@ -66,26 +64,12 @@ function shortName(name, type) {
 function toneFor(name) {
   const lowered = String(name || "").toLowerCase();
   if (/(wi-?fi|wireless|wlan)/i.test(lowered)) {
-    return { dot: "var(--wifi-color)", bar: "var(--wifi-color)" };
+    return { dot: "var(--wifi-color)" };
   }
   if (/(phone|usb|rndis|mobile|samsung|huawei|xiaomi)/i.test(lowered)) {
-    return { dot: "var(--ethernet-color)", bar: "var(--ethernet-color)" };
+    return { dot: "var(--ethernet-color)" };
   }
-  return { dot: "var(--extra-color)", bar: "var(--extra-color)" };
-}
-
-class HistoryErrorBoundary extends React.Component {
-  state = { hasError: false };
-  static getDerivedStateFromError() { return { hasError: true }; }
-  render() {
-    if (this.state.hasError) return (
-      <div style={{ padding: 20, color: 'red' }}>
-        History failed to load.
-        <button onClick={() => { localStorage.removeItem('burst_history'); window.location.reload(); }} style={{ marginLeft: 8, padding: '4px 8px', cursor: 'pointer' }}>Clear &amp; Reset</button>
-      </div>
-    );
-    return this.props.children;
-  }
+  return { dot: "var(--extra-color)" };
 }
 
 function readDroppedUrl(event) {
@@ -96,81 +80,165 @@ function readDroppedUrl(event) {
   return "";
 }
 
-function analyzeTimeSaved(size, baseSpeedMbS, actualSeconds) {
-  if (!size || !baseSpeedMbS || !actualSeconds) {
-    return { estimatedSingleTime: 0, timeSaved: 0 };
-  }
-  const baseBytesPerSec = baseSpeedMbS * 1024 * 1024;
-  if (!baseBytesPerSec) return { estimatedSingleTime: 0, timeSaved: 0 };
-  const estimatedSingleTime = size / baseBytesPerSec;
-  const timeSaved = Math.max(0, estimatedSingleTime - actualSeconds);
-  return { estimatedSingleTime, timeSaved };
-}
+function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps }) {
+  if (!status) return null;
 
-function SortableQueueItem({ item }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: item.id
-  });
+  const currentInterfacesProgress = status.type === "torrent" 
+    ? Object.keys(status.speeds || {}).map(ip => ({
+        ip_address: ip,
+        speed_mb_s: (status.speeds[ip] || 0) / (1024 * 1024),
+        peers: status.peers_per_interface?.[ip] || 0
+      }))
+    : Object.values(status.interfaces || {});
+    
+  const [isOptimistic, setIsOptimistic] = useState(null);
+
+  const activeIfaces = status.type === "torrent" 
+    ? (status.interface_ips || []).length
+    : Object.values(status.interfaces || {}).filter(i => i.status !== "excluded" && i.status !== "cancelled").length;
+
+  const isPaused = status.status === 'paused' || status.status === 'waiting_reconnect' || (status.status === 'downloading' && activeIfaces === 0);
+  const statusLabel = isPaused ? 'PAUSED' : status.status;
+  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (isPaused ? 'paused' : 'downloading'));
+
+  const pct = Math.min(100, ((status.total_downloaded || 0) / Math.max(1, status.expected_size || 1)) * 100);
+  
+  // Force speed to 0 if paused to avoid unprofessional jitter/rolling averages
+  const speedRaw = status.type === "torrent"
+    ? (status.speed_combined || 0) / (1024 * 1024)
+    : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
+    
+  const combinedCurrentSpeed = isPaused ? 0 : speedRaw;
+  const eta = (!isPaused && combinedCurrentSpeed > 0) ? (status.expected_size - status.total_downloaded) / (combinedCurrentSpeed * 1024 * 1024) : 0;
 
   return (
-    <article
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition, userSelect: "none" }}
-      className={`queue-item-v31 ${isDragging ? "dragging" : ""}`}
-    >
-      <button className="queue-handle" {...attributes} {...listeners}>
-        <GripVertical size={13} />
-      </button>
-      <div className="queue-copy">
-        <p>{item.filename}</p>
-        <span>{formatBytes(item.size)}</span>
+    <div className="dl-card slide-in">
+      <div className="dl-card-top">
+        <div className="dl-title-row">
+          <div className="dl-filename">{status.output_path?.split(/[\\/]/).pop() || "download.bin"}</div>
+          <div className={`status-badge ${statusClass}`}>{statusLabel}</div>
+        </div>
+        <div className="dl-actions">
+          {status.status === 'downloading' && status.type !== 'torrent' && (
+            <button className="action-btn" onClick={onPause} title="Pause"><Pause size={16}/></button>
+          )}
+          {(status.status === 'paused' || status.status === 'waiting_reconnect') && (
+            <button className="action-btn" onClick={onResume} title="Resume"><Play size={16}/></button>
+          )}
+          <button className="action-btn" onClick={onCancel} title="Cancel"><X size={16}/></button>
+          <div className="dl-speed">{formatSpeed(combinedCurrentSpeed)}</div>
+        </div>
       </div>
-      <span className="queue-badge">queued</span>
-    </article>
+
+      <div className="iface-pills">
+        {availableInterfaces.map(iface => {
+          let live = null;
+          let isSelected = false;
+
+          if (status.type === "torrent") {
+            isSelected = status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
+            if (isSelected) {
+              const speedBytes = status.speeds?.[iface.ip_address] || 0;
+              live = {
+                status: 'downloading',
+                speed_mb_s: speedBytes / (1024 * 1024)
+              };
+            }
+          } else {
+            live = status.interfaces?.[iface.ip_address];
+            isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
+          }
+          
+          if (isOptimistic && isOptimistic.ip === iface.ip_address) {
+            isSelected = isOptimistic.selected;
+          }
+
+          const speed = isPaused ? 0 : (live?.speed_mb_s || 0);
+          const tone = toneFor(shortName(iface.name, iface.interface_type));
+          const isShared = allUsedIps.filter(ip => ip === iface.ip_address).length > 1;
+
+          return (
+            <div 
+              key={iface.ip_address} 
+              className={`iface-pill ${isSelected ? 'active' : ''}`}
+              onClick={() => {
+                if (status.status === 'completed' || status.status === 'failed') return;
+                setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
+                onToggle(iface.ip_address, isSelected).finally(() => {
+                   setTimeout(() => setIsOptimistic(null), 1000);
+                });
+              }}
+            >
+              <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
+              {shortName(iface.name, iface.interface_type)}
+              {isSelected && speed > 0 && <span style={{ opacity: 0.8 }}>{Number(speed).toFixed(1)} MB/s</span>}
+              {isSelected && isShared && status.status === 'downloading' && <AlertTriangle size={12} style={{ color: 'var(--warning)', marginLeft: '2px' }} title="Shared with another download" />}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="progress-track">
+        <div className={`progress-fill ${statusClass}`} style={{ width: `${pct}%` }} />
+      </div>
+
+      <div className="dl-bottom">
+        <span>{pct.toFixed(1)}% • {formatBytes(status.total_downloaded)} / {formatBytes(status.expected_size)}</span>
+        <span>{!isPaused && status.status === 'downloading' ? formatEta(eta) : ''}</span>
+      </div>
+    </div>
   );
 }
 
 export default function App() {
-  const [showSplash, setShowSplash] = useState(false);
-  const [splashLeaving, setSplashLeaving] = useState(false);
+  const [activeTab, setActiveTab] = useState("downloads");
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [themeMode, setThemeMode] = useState(() => localStorage.getItem("burst_theme_mode") || "dark");
+  const isDarkMode = themeMode === "dark" || (themeMode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  
   const [interfaces, setInterfaces] = useState([]);
   const [renderedInterfaces, setRenderedInterfaces] = useState([]);
   const [selectedIps, setSelectedIps] = useState([]);
-  const [hasSpeedtestRun, setHasSpeedtestRun] = useState(false);
   const [url, setUrl] = useState("");
   const [outputPath, setOutputPath] = useState("C:\\Downloads\\burst-download.bin");
-  const [downloading, setDownloading] = useState(false);
-  const [downloadStatus, setDownloadStatus] = useState(null);
-  const [jobId, setJobId] = useState("");
+  const [activeJobs, setActiveJobs] = useState([]);
+  const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState([]);
-  const [queue, setQueue] = useState([]);
-  const [showExtension, setShowExtension] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [appSettings, setAppSettings] = useState(null);
   const [dragOverlay, setDragOverlay] = useState(false);
-  const [dropTargetActive, setDropTargetActive] = useState(false);
-  const [editingOutputPath, setEditingOutputPath] = useState(false);
   const [toast, setToast] = useState("");
-  const [speedRefreshActive, setSpeedRefreshActive] = useState(false);
-  const [newIfacePrompt, setNewIfacePrompt] = useState(null);
   const [downloadBtnState, setDownloadBtnState] = useState("idle");
-  const [downloadErrorMsg, setDownloadErrorMsg] = useState("");
-  const [downloadWarningMsg, setDownloadWarningMsg] = useState("");
-  const [pathHintCount, setPathHintCount] = useState(0);
-  const [pillHintSeen, setPillHintSeen] = useState(true);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showHistoryModal, setShowHistoryModal] = useState(false);
-  const [hotplugBanners, setHotplugBanners] = useState([]);
-  const [contextMenu, setContextMenu] = useState(null);
-  const [limitPopover, setLimitPopover] = useState(null);
+  const [editingOutputPath, setEditingOutputPath] = useState(false);
   const [bandwidthLimits, setBandwidthLimits] = useState({});
-  const [downloadOnlyIps, setDownloadOnlyIps] = useState([]);
-  const [ignoredInterfaces, setIgnoredInterfaces] = useState([]);
+  const [appSettings, setAppSettings] = useState(null);
+
+  const jobSocketsRef = useRef({});
 
   useEffect(() => {
-    setIgnoredInterfaces(JSON.parse(localStorage.getItem("burst_ignored_interfaces") || "[]"));
-    setDownloadOnlyIps(JSON.parse(localStorage.getItem("burst_download_only_ips") || "[]"));
+    if (isDarkMode) document.body.classList.add("dark");
+    else document.body.classList.remove("dark");
+    localStorage.setItem("burst_theme_mode", themeMode);
+  }, [isDarkMode, themeMode]);
+
+  useEffect(() => {
+    const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
+    setBandwidthLimits(savedLimits);
+    const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
+    if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
+    
+    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => {});
+    setActiveJobs([]);
   }, []);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(""), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    localStorage.setItem("burst_bandwidth_limits", JSON.stringify(bandwidthLimits));
+  }, [bandwidthLimits]);
 
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
@@ -195,9 +263,31 @@ export default function App() {
       setOutputPath("C:\\Downloads\\burst-download.bin");
     }
   };
-  const prevIfaceIpsRef = useRef([]);
-  const appRef = useRef(null);
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+
+  const handleBrowsePath = async (callback) => {
+    try {
+      const resp = await fetch(`${API_BASE}/select-path`);
+      const data = await resp.json();
+      if (data.path) {
+        callback(data.path);
+      }
+    } catch (err) {
+      setToast("Failed to open file explorer");
+    }
+  };
+
+  const handleWindowAction = (action) => {
+    // If running in Electron, these would be ipcRenderer calls
+    if (window.electronAPI) {
+      window.electronAPI[action]();
+    } else {
+      if (action === 'close') {
+        if (window.confirm("Quit Burst?")) window.close();
+      } else {
+        setToast(`${action.charAt(0).toUpperCase() + action.slice(1)} is handled by the OS/Electron.`);
+      }
+    }
+  };
 
   const mergeInterfacesForUi = (incoming) => {
     setRenderedInterfaces((prev) => {
@@ -208,22 +298,11 @@ export default function App() {
       for (const oldItem of prev) {
         const fresh = nextMap.get(oldItem.ip_address);
         if (!fresh) {
-          if (!oldItem.exiting) {
-            merged.push({ ...oldItem, exiting: true, entering: false });
-          } else {
-            merged.push(oldItem);
-          }
+          if (!oldItem.exiting) merged.push({ ...oldItem, exiting: true, entering: false });
+          else merged.push(oldItem);
           continue;
         }
-        const oldSpeed = Number(oldItem.speed_mb_s || 0);
-        const newSpeed = Number(fresh.speed_mb_s || 0);
-        merged.push({
-          ...oldItem,
-          ...fresh,
-          entering: false,
-          exiting: false,
-          speedFlash: hasSpeedtestRun && oldSpeed <= 0 && newSpeed > 0
-        });
+        merged.push({ ...oldItem, ...fresh, entering: false, exiting: false });
       }
 
       for (const fresh of incoming) {
@@ -235,908 +314,407 @@ export default function App() {
     });
   };
 
-  const fetchInterfaces = async (silent = true) => {
-    const resp = await fetch(`${API_BASE}/interfaces`);
-    if (!resp.ok) throw new Error("Could not load interfaces");
-    const data = await resp.json();
-    const fresh = data.interfaces || [];
-    setInterfaces(fresh);
-    mergeInterfacesForUi(fresh);
+  const fetchInterfaces = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/interfaces`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const fresh = data.interfaces || [];
+      setInterfaces(fresh);
+      mergeInterfacesForUi(fresh);
 
-    // Detect returning interfaces or clean up prevIfaceIpsRef
-    prevIfaceIpsRef.current = fresh.map((i) => i.ip_address);
-
-    setSelectedIps((prev) =>
-      prev.length
-        ? prev.filter((ip) => fresh.some((item) => item.ip_address === ip))
-        : fresh.map((item) => item.ip_address).filter((ip) => {
-            const ignored = JSON.parse(localStorage.getItem("burst_ignored_interfaces") || "[]");
-            return !ignored.includes(ip);
-          })
-    );
-    if (!silent) setToast("");
+      setSelectedIps((prev) =>
+        prev.length ? prev.filter((ip) => fresh.some((item) => item.ip_address === ip)) : fresh.map((item) => item.ip_address)
+      );
+    } catch {}
   };
 
   const runSpeedtestSilent = async () => {
-    setSpeedRefreshActive(true);
     try {
       const resp = await fetch(`${API_BASE}/speedtest`, { method: "POST" });
       const data = await resp.json();
       if (!resp.ok) return;
-      setHasSpeedtestRun(true);
-      setInterfaces((prev) =>
-        prev.map((iface) => {
-          const found = (data.results || []).find((r) => r.ip_address === iface.ip_address);
-          return found ? { ...iface, speed_mb_s: found.speed_mb_s } : iface;
-        })
-      );
       setRenderedInterfaces((prev) =>
         prev.map((iface) => {
           const found = (data.results || []).find((r) => r.ip_address === iface.ip_address);
           if (!found) return iface;
-          const oldSpeed = Number(iface.speed_mb_s || 0);
-          const newSpeed = Number(found.speed_mb_s || 0);
-          return {
-            ...iface,
-            speed_mb_s: found.speed_mb_s,
-            speedFlash: oldSpeed <= 0 && newSpeed > 0
-          };
+          return { ...iface, speed_mb_s: found.speed_mb_s };
         })
       );
-      setTimeout(() => {
-        setRenderedInterfaces((prev) => prev.map((item) => ({ ...item, speedFlash: false })));
-      }, 300);
-    } catch {
-      // silent refresh; ignore failures
-    } finally {
-      setSpeedRefreshActive(false);
-    }
+    } catch {}
   };
 
   useEffect(() => {
-    setShowSplash(!localStorage.getItem(SEEN_KEY));
-    fetchInterfaces().catch((err) => setToast(err.message));
-    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => {});
-    
-    const count = parseInt(localStorage.getItem("burst_path_hint_count") || "0", 10);
-    setPathHintCount(count);
-    if (count < 3) localStorage.setItem("burst_path_hint_count", (count + 1).toString());
-    
-    setPillHintSeen(!!localStorage.getItem("burst_pill_hint"));
+    fetchInterfaces();
+    const t1 = setInterval(fetchInterfaces, 15000);
+    const t2 = setInterval(runSpeedtestSilent, 20000);
+    return () => { clearInterval(t1); clearInterval(t2); };
   }, []);
 
+  const startDownload = async (forceUrl = null, forcePath = null) => {
+    const cleanUrl = (forceUrl || url).trim();
+    const cleanOutputPath = (forcePath || outputPath).trim();
+    const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
+    const isTorrent = cleanUrl.startsWith("magnet:?") || cleanUrl.endsWith(".torrent");
 
-
-  useEffect(() => {
-    const fadeTicker = setInterval(() => {
-      setRenderedInterfaces((prev) => prev.filter((item) => !item.exiting));
-    }, 220);
-    return () => clearInterval(fadeTicker);
-  }, []);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      runSpeedtestSilent();
-    }, 2000);
-    const refreshTimer = setInterval(() => {
-      fetchInterfaces().catch(() => {});
-    }, 15000);
-    const speedTimer = setInterval(() => {
-      runSpeedtestSilent();
-    }, 20000);
-    return () => {
-      clearTimeout(timer);
-      clearInterval(refreshTimer);
-      clearInterval(speedTimer);
-    };
-  }, []);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      const saved = JSON.parse(raw || "[]");
-      if (Array.isArray(saved)) {
-        // Sanitize each item with null-safe defaults
-        const sanitized = saved.map(item => ({
-          ...item,
-          id: item.id ?? crypto.randomUUID(),
-          filename: item.filename ?? 'Unknown file',
-          size: item.size ?? 0,
-          avgSpeed: item.avgSpeed ?? 0,
-          time_saved: item.time_saved ?? 0,
-          interfaces_used: Array.isArray(item.interfaces_used) ? item.interfaces_used : [],
-          timestamp: item.timestamp ?? Date.now(),
-          status: item.status ?? 'completed',
-        }));
-        setHistory(sanitized.slice(0, 8));
-      }
-    } catch {
-      // Corrupted localStorage — reset
-      localStorage.removeItem(HISTORY_KEY);
-      setHistory([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 8)));
-  }, [history]);
-
-  useEffect(() => {
-    const onDragOver = (event) => {
-      event.preventDefault();
-      setDragOverlay(true);
-    };
-    const onDrop = (event) => {
-      event.preventDefault();
-      const droppedUrl = readDroppedUrl(event);
-      setDragOverlay(false);
-      if (droppedUrl) {
-        setUrl(droppedUrl);
-        setTimeout(() => {
-          runAnalyze(droppedUrl);
-        }, 0);
-      }
-    };
-    const onDragLeave = (event) => {
-      if (event.clientX === 0 && event.clientY === 0) {
-        setDragOverlay(false);
-        setDropTargetActive(false);
-      }
-    };
-    window.addEventListener("dragover", onDragOver);
-    window.addEventListener("drop", onDrop);
-    window.addEventListener("dragleave", onDragLeave);
-    return () => {
-      window.removeEventListener("dragover", onDragOver);
-      window.removeEventListener("drop", onDrop);
-      window.removeEventListener("dragleave", onDragLeave);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!jobId) return undefined;
-    const ws = new WebSocket(`${API_BASE.replace("http", "ws")}/ws/${jobId}`);
-    ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      setDownloadStatus(payload);
-
-      if (payload.status === "downloading") {
-        setRenderedInterfaces((prev) =>
-          prev.map((iface) => {
-            const liveData = payload.interfaces?.[iface.ip_address];
-            if (liveData && liveData.status === "downloading") {
-              return { ...iface, speed_mb_s: liveData.speed_mb_s };
-            }
-            return iface;
-          })
-        );
-      } else if (payload.status === "completed") {
-        setDownloading(false);
-        const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
-        const ifaceUsed = Object.values(payload.interfaces || {}).map((i) => i.ip_address);
-        const selectedSpeeds = interfaces
-          .filter((i) => ifaceUsed.includes(i.ip_address))
-          .map((i) => Number(i.speed_mb_s || 0))
-          .filter((v) => v > 0);
-        const slowestSelected = selectedSpeeds.length > 0 ? Math.min(...selectedSpeeds) : 0;
-        const avgCombinedSpeed = duration
-          ? payload.expected_size / (duration * 1024 * 1024)
-          : 0;
-        const { estimatedSingleTime, timeSaved } = analyzeTimeSaved(
-          payload.expected_size,
-          slowestSelected,
-          duration
-        );
-        const actualTimeSaved = ifaceUsed.length > 1 ? timeSaved : 0;
-        const historyItem = {
-          id: payload.job_id || crypto.randomUUID(),
-          filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-          output_path: payload.output_path || "",
-          size: payload.expected_size || 0,
-          timestamp: Date.now(),
-          avgSpeed: avgCombinedSpeed || 0,
-          interfaces_used: Array.isArray(ifaceUsed) ? ifaceUsed : [],
-          estimated_single_time: estimatedSingleTime || 0,
-          total_time: duration || 0,
-          time_saved: actualTimeSaved || 0,
-          status: "completed"
-        };
-        setHistory((prev) => [historyItem, ...prev].slice(0, 10));
-        setToast(
-          `Completed ${historyItem.filename} · ${formatSpeed(avgCombinedSpeed)}` +
-            (actualTimeSaved > 0 ? ` · saved ~${Math.round(actualTimeSaved)}s` : "")
-        );
-        setJobId("");
-        setDownloadStatus(null);
-      } else if (payload.status === "failed") {
-        setDownloading(false);
-        const historyItem = {
-          id: payload.job_id || crypto.randomUUID(),
-          filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-          output_path: payload.output_path || "",
-          size: payload.expected_size || 0,
-          timestamp: Date.now(),
-          avgSpeed: 0,
-          interfaces_used: Object.values(payload.interfaces || {}).map((i) => i.ip_address),
-          estimated_single_time: 0,
-          total_time: 0,
-          time_saved: 0,
-          status: "failed",
-          error_reason: String(payload.error || "Unknown error")
-        };
-        setHistory((prev) => [historyItem, ...prev].slice(0, 10));
-        setToast(`Download failed: ${payload.error || "Unknown error"}`);
-        setJobId("");
-        setDownloadStatus(null);
-      }
-    };
-    ws.onerror = () => setToast("WebSocket disconnected");
-    return () => ws.close();
-  }, [jobId, interfaces]);
-
-  const handleToggle = async (ip) => {
-    const isSelected = selectedIps.includes(ip);
-    setSelectedIps((prev) => (isSelected ? prev.filter((x) => x !== ip) : [...prev, ip]));
-
-    if (downloading && jobId && !isSelected) {
-      try {
-        const resp = await fetch(`${API_BASE}/download/${jobId}/interfaces`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ interface_ips: [ip] })
-        });
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({}));
-          setToast("Could not add interface to active download: " + (errData.detail || resp.statusText));
-        }
-      } catch (err) {
-        setToast("Could not add interface to active download: " + err.message);
-      }
-    }
-
-    // Also handle tap-to-rejoin on disconnected/paused interfaces
-    if (downloading && jobId && isSelected) {
-      const liveStatus = downloadStatus?.interfaces?.[ip];
-      if (liveStatus && ["paused_slow", "disconnected", "excluded"].includes(liveStatus.status)) {
-        try {
-          await fetch(`${API_BASE}/download/${jobId}/interfaces`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ interface_ips: [ip] })
-          });
-          setToast("Interface rejoining download...");
-        } catch (err) {
-          setToast("Failed to rejoin: " + err.message);
-        }
-        return; // Don't deselect
-      }
-    }
-  };
-
-  const handleNewIfaceAccept = async () => {
-    if (!newIfacePrompt || !jobId) return;
-    try {
-      const resp = await fetch(`${API_BASE}/download/${jobId}/add_interface`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ interface_ip: newIfacePrompt.ip })
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || "Failed to add interface");
-      setSelectedIps((prev) => [...prev, newIfacePrompt.ip]);
-      console.log("[ADD_IFACE] Response:", data);
-      setToast(`${newIfacePrompt.name} added to download — worker spawned!`);
-    } catch (err) {
-      setToast("Could not add interface to active download: " + err.message);
-    }
-    setNewIfacePrompt(null);
-  };
-
-  const handleNewIfaceDismiss = () => {
-    setNewIfacePrompt(null);
-  };
-
-  const availableInterfaceIps = useMemo(
-    () => interfaces.map((item) => item.ip_address).filter(Boolean),
-    [interfaces]
-  );
-  const validSelectedIps = useMemo(
-    () => selectedIps.filter((ip) => availableInterfaceIps.includes(ip)),
-    [selectedIps, availableInterfaceIps]
-  );
-  const activeConnectionCount = availableInterfaceIps.length;
-
-  const validSelectedIpsRef = useRef([]);
-  const downloadingRef = useRef(false);
-  const jobIdRef = useRef("");
-  const downloadStatusRef = useRef(null);
-  
-  useEffect(() => {
-    validSelectedIpsRef.current = validSelectedIps;
-    downloadingRef.current = downloading;
-    jobIdRef.current = jobId;
-    downloadStatusRef.current = downloadStatus;
-  }, [validSelectedIps, downloading, jobId, downloadStatus]);
-
-  useEffect(() => {
-    let ws;
-    const connectWs = () => {
-      ws = new WebSocket(`${API_BASE.replace("http", "ws")}/ws/interfaces`);
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.event === "interface_added") {
-            const ignored = JSON.parse(localStorage.getItem("burst_ignored_interfaces") || "[]");
-            const ip = payload.interface.ip;
-            if (!ignored.includes(ip)) {
-              if (downloadingRef.current && jobIdRef.current) {
-                const inJob = downloadStatusRef.current?.interfaces?.[ip];
-                if (!inJob) {
-                  setNewIfacePrompt({
-                    ip: ip,
-                    name: payload.interface.name || "Unknown",
-                  });
-                }
-              } else {
-                setHotplugBanners(prev => {
-                  if (prev.some(b => b.id === ip)) return prev;
-                  return [...prev, { id: ip, interface: payload.interface }];
-                });
-              }
-            }
-          } else if (payload.event === "interface_removed") {
-            const removedIp = payload.interface.ip;
-            setRenderedInterfaces(prev => {
-              const copy = [...prev];
-              const idx = copy.findIndex(i => i.ip_address === removedIp);
-              if (idx >= 0) copy[idx] = { ...copy[idx], exiting: true };
-              return copy;
-            });
-            if (downloadingRef.current && validSelectedIpsRef.current.includes(removedIp)) {
-              setToast(`${payload.interface.name} disconnected — download continuing on remaining interfaces`);
-            }
-          }
-        } catch {}
-      };
-      ws.onclose = () => {
-        setTimeout(connectWs, 3000);
-      };
-    };
-    connectWs();
-    return () => { if (ws) ws.close(); };
-  }, []);
-
-  const startDownload = async (incomingUrl = url, incomingOutputPath = outputPath, forceTorrent = false) => {
-    const cleanUrl = (incomingUrl ?? url).trim();
-    const cleanOutputPath = (incomingOutputPath ?? outputPath).trim();
-    const effectiveIps = validSelectedIps.length ? validSelectedIps : availableInterfaceIps;
-
-    const missing = [];
-    if (!cleanUrl) missing.push("URL");
-    if (!cleanOutputPath) missing.push("output path");
-    if (effectiveIps.length === 0) missing.push("interfaces");
-    if (missing.length) {
-      return setToast(`Missing required fields: ${missing.join(", ")}`);
-    }
-
-    const isTorrent = forceTorrent || cleanUrl.startsWith("magnet:?") || cleanUrl.endsWith(".torrent");
-
-    setDownloading(true);
     try {
       const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
       const body = isTorrent 
-        ? { magnet_uri: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits } 
+        ? { magnet_uri: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits }
         : { url: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
-        
-      console.log('[DOWNLOAD] Request:', endpoint, body);
+
       const resp = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || "Download failed to start");
-      setJobId(data.job_id);
+      if (!resp.ok) throw new Error(data.detail || "Failed to start");
+      setActiveJobs(prev => [...prev, data.job_id]);
+      setUrl("");
+      setActiveTab(isTorrent ? "torrents" : "downloads");
     } catch (err) {
-      setDownloading(false);
       setToast(err.message);
     }
   };
 
   const handleDownloadClick = async () => {
+    if (downloadBtnState === "checking") return;
     const targetUrl = url.trim();
-    const targetOutputPath = outputPath.trim();
-    if (!targetUrl || !targetOutputPath) return setToast("URL and output path are required.");
-    
-    setDownloadBtnState("checking");
-    setDownloadErrorMsg("");
-    setDownloadWarningMsg("");
-    
+    if (!targetUrl) return;
+
     const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
-    if (isTorrent) {
-      startDownload(targetUrl, targetOutputPath, true);
-      setDownloadBtnState("idle");
-      return;
-    }
-    
-    try {
-      const resp = await fetch(`${API_BASE}/analyze`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: targetUrl, interface_ip: validSelectedIps[0] || null })
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || "URL is invalid or unreachable");
-      
-      if (!data.supports_ranges) {
-        setDownloadWarningMsg("⚠ Server doesn't support split downloads — downloading via fastest connection only");
-      }
-      
-      startDownload(targetUrl, targetOutputPath);
-      setDownloadBtnState("idle");
-    } catch (err) {
-      setDownloadBtnState("error");
-      setDownloadErrorMsg(err.message);
-      setTimeout(() => {
+    if (!isTorrent) {
+      setDownloadBtnState("checking");
+      try {
+        const resp = await fetch(`${API_BASE}/analyze`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: targetUrl, interface_ip: selectedIps[0] || null })
+        });
+        const data = await resp.json();
         setDownloadBtnState("idle");
-        setDownloadErrorMsg("");
-      }, 4000);
+        if (!resp.ok) { setToast(data.detail || "URL unreachable"); return; }
+      } catch (err) {
+        setDownloadBtnState("idle");
+        setToast("Connection error");
+        return;
+      }
     }
+    startDownload();
   };
 
   useEffect(() => {
-    if (!downloading && !jobId && queue.length > 0) {
-      if (validSelectedIps.length > 0 || availableInterfaceIps.length > 0) {
-        const nextItem = queue[0];
-        setQueue((prev) => prev.slice(1));
-        startDownload(nextItem.url, nextItem.outputPath);
+    Object.keys(jobSocketsRef.current).forEach(id => {
+      if (!activeJobs.includes(id)) {
+        jobSocketsRef.current[id].close();
+        delete jobSocketsRef.current[id];
       }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [downloading, jobId, queue.length, validSelectedIps.length, availableInterfaceIps.length]);
+    });
+    activeJobs.forEach(id => {
+      if (!jobSocketsRef.current[id]) {
+        const ws = new WebSocket(`${API_BASE.replace("http", "ws")}/ws/${id}`);
+        ws.onmessage = (event) => {
+          const payload = JSON.parse(event.data);
+          setJobStatuses(prev => ({ ...prev, [id]: payload }));
+          if (payload.status === "completed" || payload.status === "failed") {
+            if (payload.status === "completed" || payload.status === "failed") {
+                const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
+                const historyItem = {
+                    id: payload.job_id || crypto.randomUUID(),
+                    filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
+                    size: payload.expected_size || 0,
+                    timestamp: Date.now(),
+                    avgSpeed: duration ? payload.expected_size / (duration * 1024 * 1024) : 0,
+                    interfaces_used: Object.keys(payload.interfaces || {}),
+                    status: payload.status,
+                    error_reason: payload.error
+                };
+                setHistory(prev => [historyItem, ...prev].slice(0, 50));
+            }
+          }
+        };
+        jobSocketsRef.current[id] = ws;
+      }
+    });
+  }, [activeJobs]);
 
-  const cancelDownload = async () => {
-    if (!jobId) return;
-    try {
-      await fetch(`${API_BASE}/download/${jobId}/cancel`, { method: "POST" });
-      setToast("Download cancelled");
-    } catch (err) {
-      setToast("Failed to cancel: " + err.message);
-    }
-  };
+  useEffect(() => {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (raw) setHistory(JSON.parse(raw).slice(0, 50));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  }, [history]);
+
+  const allUsedIps = useMemo(() => {
+    return Object.keys(jobStatuses)
+      .filter(jid => activeJobs.includes(jid))
+      .filter(jid => jobStatuses[jid].status === "downloading")
+      .flatMap(jid => {
+        const s = jobStatuses[jid];
+        if (s.type === "torrent") return s.interface_ips || [];
+        return Object.values(s.interfaces || {})
+          .filter(i => i.status !== "excluded" && i.status !== "cancelled" && i.status !== "disconnected")
+          .map(i => i.ip_address);
+      });
+  }, [jobStatuses, activeJobs]);
 
   const clearHistory = () => setHistory([]);
 
-  const currentInterfacesProgress = downloadStatus?.type === "torrent" 
-    ? Object.keys(downloadStatus.speeds || {}).map(ip => ({
-        ip_address: ip,
-        speed_mb_s: downloadStatus.speeds[ip] / (1024 * 1024),
-        peers: downloadStatus.peers_per_interface?.[ip] || 0
-      }))
-    : Object.values(downloadStatus?.interfaces || {});
-    
-  const combinedCurrentSpeed = downloadStatus?.type === "torrent"
-    ? (downloadStatus.speed_combined || 0) / (1024 * 1024)
-    : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
-    
-  const currentEta = useMemo(() => {
-    if (!downloadStatus?.expected_size || !combinedCurrentSpeed) return 0;
-    const remaining = downloadStatus.expected_size - (downloadStatus.total_downloaded || 0);
-    if (remaining <= 0) return 0;
-    return remaining / (combinedCurrentSpeed * 1024 * 1024);
-  }, [downloadStatus, combinedCurrentSpeed]);
-
-  const getInterfaceTone = (iface) => {
-    const t = `${iface.interface_type || ""} ${iface.name || ""}`.toLowerCase();
-    if (/(wi-?fi|wireless|wlan)/i.test(t)) {
-      return { dot: "var(--wifi-color)", bar: "var(--wifi-color)", Icon: Wifi };
-    }
-    if (/(rndis|usb|mobile|samsung|huawei|xiaomi|remote ndis)/i.test(t)) {
-      return { dot: "var(--ethernet-color)", bar: "var(--ethernet-color)", Icon: Smartphone };
-    }
-    return { dot: "var(--extra-color)", bar: "var(--extra-color)", Icon: Cable };
-  };
-
-  const selectedSlowestSpeed = useMemo(() => {
-    const selected = interfaces.filter((iface) =>
-      currentInterfacesProgress.some((item) => item.ip_address === iface.ip_address)
-    );
-    const valid = selected.map((i) => Number(i.speed_mb_s || 0)).filter((v) => v > 0);
-    if (!valid.length) return 0;
-    return Math.min(...valid);
-  }, [interfaces, currentInterfacesProgress]);
-
-  const speedupText = useMemo(() => {
-    if (!downloadStatus?.expected_size || !downloadStatus.started_at) return "";
-    const activeIfaces = Object.values(downloadStatus.interfaces || {});
-    if (activeIfaces.length <= 1) return "";
-
-    const elapsed =
-      (downloadStatus.finished_at || Date.now() / 1000) - (downloadStatus.started_at || Date.now() / 1000);
-    const { timeSaved } = analyzeTimeSaved(downloadStatus.expected_size, selectedSlowestSpeed, elapsed);
-    if (timeSaved <= 0) return "";
-    if (timeSaved < 5) return "faster than single connection";
-    return `~${Math.round(timeSaved)}s faster than single connection`;
-  }, [downloadStatus, selectedSlowestSpeed]);
-
-  const handleQueueDragEnd = (event) => {
-    const { active, over } = event;
-    if (!active?.id || !over?.id || active.id === over.id) return;
-    setQueue((prev) => {
-      const oldIndex = prev.findIndex((item) => item.id === active.id);
-      const newIndex = prev.findIndex((item) => item.id === over.id);
-      if (oldIndex < 0 || newIndex < 0) return prev;
-      return arrayMove(prev, oldIndex, newIndex);
-    });
-  };
-
-  const handleSplashContinue = () => {
-    localStorage.setItem(SEEN_KEY, "1");
-    setSplashLeaving(true);
-    setTimeout(() => {
-      setShowSplash(false);
-      setSplashLeaving(false);
-    }, 300);
-  };
+  const activeConnectionCount = interfaces.length;
 
   return (
-    <main className="app-shell">
+    <div className={`app-container ${isDarkMode ? 'dark' : ''}`} onDragOver={e => { e.preventDefault(); setDragOverlay(true); }}>
       {dragOverlay && (
-        <div className="drag-overlay">
+        <div className="drag-overlay" onDragLeave={() => setDragOverlay(false)} onDrop={e => {
+            e.preventDefault();
+            setDragOverlay(false);
+            const droppedUrl = readDroppedUrl(e);
+            if (droppedUrl) handleUrlChange(droppedUrl);
+        }}>
           <div className="drag-overlay-content">Drop URL to download</div>
         </div>
       )}
-      {showSplash ? (
-        <section className={`splash-panel ${splashLeaving ? "fade-out" : "fade-in"}`} style={{justifyContent: 'center', backgroundColor: '#e2e5e4', backgroundImage: 'none'}}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
-            <h1 className="logo-mini" style={{ fontSize: '48px', marginBottom: '16px', color: '#1a1a1a', gap: '12px' }}>
-              <span className="logo-mark" style={{ width: '24px', height: '24px', borderRadius: '4px' }} /> Burst
-            </h1>
-            <p className="splash-tagline" style={{ fontSize: '20px', fontWeight: '400', color: '#1a2a3a', lineHeight: '1.3', marginBottom: '40px' }}>
-              Combine your connections. Multiply your speed.
-            </p>
-            <button className="btn-start" style={{ width: '48px', height: '32px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '6px', color: '#fff' }} onClick={handleSplashContinue}>
-              →
+
+      <div className="titlebar">
+        <div className="titlebar-left">
+          <button className="titlebar-btn" onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}>
+            <Menu size={16} />
+          </button>
+          <div className="titlebar-title">
+            <div className="logo-square" style={{ width: '12px', height: '12px', borderRadius: '2px', background: 'var(--accent)' }} />
+            Burst 1.0
+          </div>
+        </div>
+        <div className="titlebar-drag-region" />
+        <div className="window-controls">
+          <button className="window-btn" onClick={() => handleWindowAction('minimize')}><Minus size={16}/></button>
+          <button className="window-btn" onClick={() => handleWindowAction('maximize')}><Square size={14}/></button>
+          <button className="window-btn close" onClick={() => handleWindowAction('close')}><X size={16}/></button>
+        </div>
+      </div>
+
+      <div className={`main-layout ${isSidebarCollapsed ? 'collapsed' : ''}`}>
+        <aside className="sidebar">
+          <div className="nav-list" style={{ marginTop: '12px' }}>
+            <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
+              <Download size={16} /> {!isSidebarCollapsed && "Downloads"}
+            </button>
+            <button className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')} title="History">
+              <History size={16} /> {!isSidebarCollapsed && "History"}
+            </button>
+            <button className={`nav-item ${activeTab === 'torrents' ? 'active' : ''}`} onClick={() => setActiveTab('torrents')} title="Torrents">
+              <Magnet size={16} /> {!isSidebarCollapsed && "Torrents"}
+            </button>
+            <button className={`nav-item ${activeTab === 'connections' ? 'active' : ''}`} onClick={() => setActiveTab('connections')} title="Connections">
+              <Zap size={16} /> {!isSidebarCollapsed && "Connections"}
+            </button>
+            <button className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title="Settings">
+              <Settings size={16} /> {!isSidebarCollapsed && "Settings"}
             </button>
           </div>
-        </section>
-      ) : (
-        <div ref={appRef} className="app-panel fade-in">
-          <header className="top-bar">
-            <h1 className="logo-mini">
-              <span className="logo-mark" /> Burst
-            </h1>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span className="connections-pill">
-                <span className="dot">●</span> {activeConnectionCount} active
-              </span>
-              <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setShowHistoryModal(true)}>
-                <Clock size={16} />
-              </button>
-              <button style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setShowSettingsModal(true)}>
-                <Settings2 size={16} />
-              </button>
-            </div>
-          </header>
 
-          {hotplugBanners.map((banner) => (
-            <div key={banner.id} className="hotplug-banner slide-in">
-              <div className="hotplug-banner-text">
-                📱 New connection detected — {banner.interface.name} ({banner.interface.type || "Unknown"})
+          {!isSidebarCollapsed && (
+            <div className="sidebar-footer">
+              <div className="conn-pill">
+                <div className="conn-dot" style={{ background: activeConnectionCount > 0 ? 'var(--success)' : 'var(--danger)' }} />
+                {activeConnectionCount} connected
               </div>
-              <div className="hotplug-banner-actions">
-                <button className="btn-add" onClick={async () => {
-                  setHotplugBanners(prev => prev.filter(b => b.id !== banner.id));
-                  setSelectedIps(prev => [...prev, banner.interface.ip]);
-                  fetchInterfaces();
-                  
-                  if (downloadingRef.current && jobIdRef.current) {
-                    try {
-                      await fetch(`${API_BASE}/download/${jobIdRef.current}/add_interface`, {
+            </div>
+          )}
+        </aside>
+
+        <main className="content-area">
+          {(activeTab === 'downloads' || activeTab === 'torrents') && (
+            <>
+              <div className="content-header">
+                <div className="url-bar">
+                  <input 
+                    className="url-input" 
+                    value={url} 
+                    onChange={e => handleUrlChange(e.target.value)} 
+                    placeholder={activeTab === 'torrents' ? "Paste a magnet link..." : "Paste a download URL..."} 
+                  />
+                  <button className="btn-primary" onClick={handleDownloadClick} disabled={downloadBtnState === "checking"}>
+                    <Download size={16} /> {downloadBtnState === "checking" ? "Checking..." : "Download"}
+                  </button>
+                </div>
+                <div className="path-hint">
+                  <div className="path-browse-trigger" onClick={() => handleBrowsePath(setOutputPath)} title="Browse folder">
+                    <FolderOpen size={14} /> 
+                  </div>
+                  <div className="path-text" onClick={() => setEditingOutputPath(true)}>
+                    {editingOutputPath ? (
+                      <input 
+                        value={outputPath} 
+                        onChange={e => setOutputPath(e.target.value)} 
+                        onBlur={() => setEditingOutputPath(false)} 
+                        autoFocus 
+                        onKeyDown={e => e.key === 'Enter' && setEditingOutputPath(false)}
+                      />
+                    ) : (
+                      <span>{outputPath}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="content-body">
+                <div className="section-label">Active {activeTab}</div>
+                {activeJobs.filter(jid => {
+                  const st = jobStatuses[jid];
+                  if (!st) return false;
+                  if (activeTab === 'torrents') return st.type === 'torrent';
+                  return st.type !== 'torrent';
+                }).length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: '13px' }}>
+                    No active {activeTab}
+                  </div>
+                )}
+                {activeJobs.filter(jid => {
+                  const st = jobStatuses[jid];
+                  if (!st) return false;
+                  if (activeTab === 'torrents') return st.type === 'torrent';
+                  return st.type !== 'torrent';
+                }).map(jid => (
+                  <DownloadCard 
+                    key={jid}
+                    jid={jid}
+                    status={jobStatuses[jid]}
+                    availableInterfaces={renderedInterfaces}
+                    allUsedIps={allUsedIps}
+                    onToggle={async (ip, selected) => {
+                      const endpoint = selected ? 'remove_interface' : 'add_interface';
+                      return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ interface_ip: banner.interface.ip })
+                        body: JSON.stringify({ interface_ip: ip })
+                      }).then(async r => {
+                          if (!r.ok) setToast(await r.text());
                       });
-                      setToast(`${banner.interface.name} added — download rebalanced across ${validSelectedIpsRef.current.length + 1} connections`);
-                    } catch (err) {
-                      setToast("Failed to add interface: " + err.message);
-                    }
-                  }
-                }}>Add to downloads</button>
-                <button className="btn-ignore" onClick={() => {
-                  setHotplugBanners(prev => prev.filter(b => b.id !== banner.id));
-                  fetchInterfaces();
-                }}>Ignore</button>
-              </div>
-            </div>
-          ))}
-
-          <div style={{ padding: '24px 24px 0 24px', fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-muted)', fontWeight: 600 }}>
-            ACTIVE CONNECTIONS
-          </div>
-          <section className="row-section iface-row">
-            {renderedInterfaces.map((iface) => {
-              const selected = validSelectedIps.includes(iface.ip_address);
-              const tone = getInterfaceTone(iface);
-              const Icon = tone.Icon;
-              return (
-                <button
-                  key={iface.ip_address}
-                  onClick={() => {
-                    handleToggle(iface.ip_address);
-                    if (!pillHintSeen) {
-                      setPillHintSeen(true);
-                      localStorage.setItem("burst_pill_hint", "1");
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setContextMenu({ x: e.clientX, y: e.clientY, ip: iface.ip_address, name: iface.name });
-                  }}
-                  className={`iface-pill-v3 relative ${selected ? "selected" : ""} ${iface.entering ? "pill-enter" : ""} ${
-                    iface.exiting ? "pill-exit" : ""
-                  }`}
-                  style={{ "--tone": tone.dot }}
-                >
-                  {selected ? (
-                    <CheckCircle2 size={13} style={{ position: 'absolute', top: '8px', right: '8px', color: 'var(--accent)' }} />
-                  ) : (
-                    <div style={{ position: 'absolute', top: '8px', right: '10px', fontSize: '16px', lineHeight: '10px', color: 'var(--text-muted)' }}>+</div>
-                  )}
-                  {downloadOnlyIps.includes(iface.ip_address) && (
-                    <div style={{ position: 'absolute', bottom: '8px', right: '8px', fontSize: '10px', background: 'var(--surface-2)', padding: '2px 4px', borderRadius: '4px', color: 'var(--text-muted)' }} title="Deprioritized for general traffic">
-                      ↓ only
-                    </div>
-                  )}
-                  <div className="iface-pill-head">
-                    <span className="iface-dot" />
-                    <Icon size={12} />
-                    <span>{shortName(iface.name, iface.interface_type)}</span>
-                  </div>
-                  <p
-                    className={`iface-meta ${iface.speedFlash ? "speed-flash" : ""} ${
-                      hasSpeedtestRun && Number(iface.speed_mb_s || 0) > 1
-                        ? "speed-fast"
-                        : hasSpeedtestRun && Number(iface.speed_mb_s || 0) > 0 && Number(iface.speed_mb_s || 0) < 0.5
-                          ? "speed-slow"
-                          : ""
-                    }`}
-                  >
-                    {speedRefreshActive && hasSpeedtestRun ? <span className="speed-pulse" /> : null}
-                    {hasSpeedtestRun && Number(iface.speed_mb_s || 0) > 0 ? formatSpeed(iface.speed_mb_s) : "— MB/s"}
-                  </p>
-                  {downloading && downloadStatus?.interfaces?.[iface.ip_address] && (
-                    <span className={`iface-status-badge status-${downloadStatus.interfaces[iface.ip_address].status || "pending"}`}>
-                      {downloadStatus.interfaces[iface.ip_address].weight_percent > 0
-                        ? `${downloadStatus.interfaces[iface.ip_address].weight_percent}%`
-                        : downloadStatus.interfaces[iface.ip_address].status === "paused_slow" ? "Slow"
-                        : downloadStatus.interfaces[iface.ip_address].status === "disconnected" ? "Lost"
-                        : downloadStatus.interfaces[iface.ip_address].status === "excluded" ? "Off"
-                        : "—"}
-                    </span>
-                  )}
-                  {bandwidthLimits[iface.ip_address] && (
-                    <div style={{ position: 'absolute', bottom: '8px', left: '10px', fontSize: '9px', fontWeight: 'bold', background: 'var(--accent)', color: 'white', padding: '1px 4px', borderRadius: '3px' }}>
-                      ⬇ {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s
-                    </div>
-                  )}
-                </button>
-              );
-            })}
-          </section>
-          {!pillHintSeen && (
-            <div style={{ padding: '0 24px 12px 24px', fontSize: '12px', color: 'var(--text-muted)', marginTop: '-12px' }}>
-              Select connections to use for downloads
-            </div>
-          )}
-
-          <section className="row-section" style={{ marginTop: '24px' }}>
-            <div className={`url-row ${dropTargetActive ? "dropping" : ""}`} style={{ gridTemplateColumns: '1fr auto' }}>
-              <input
-                value={url}
-                onChange={(e) => handleUrlChange(e.target.value)}
-                placeholder="Paste a download URL..."
-                className="url-input"
-                onDrop={(event) => {
-                  event.preventDefault();
-                  setDropTargetActive(false);
-                  const droppedUrl = readDroppedUrl(event);
-                  if (droppedUrl) {
-                    handleUrlChange(droppedUrl);
-                  }
-                }}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  setDropTargetActive(true);
-                }}
-                onDragLeave={() => setDropTargetActive(false)}
-              />
-              {/* <button className="btn-ghost" onClick={addToQueue}>+ Queue</button> */}
-              <button className="btn-download" onClick={handleDownloadClick} disabled={downloading || downloadBtnState === "checking"}>
-                {downloadBtnState === "checking" ? "Checking..." : "↓ Download"}
-              </button>
-            </div>
-            {downloadWarningMsg && (
-              <div style={{ marginTop: '12px', fontSize: '12px', color: '#92400e', background: '#fef3c7', padding: '8px 12px', borderRadius: '6px' }}>
-                {downloadWarningMsg}
-              </div>
-            )}
-            {downloadErrorMsg && (
-              <div style={{ marginTop: '12px', fontSize: '12px', color: '#991b1b', background: '#fee2e2', padding: '8px 12px', borderRadius: '6px' }}>
-                {downloadErrorMsg}
-              </div>
-            )}
-            <div className="output-line group" style={{ marginTop: '16px' }}>
-              <Folder size={12} />
-              {editingOutputPath ? (
-                <input
-                  value={outputPath}
-                  onChange={(event) => setOutputPath(event.target.value)}
-                  className="output-input"
-                  onBlur={() => setEditingOutputPath(false)}
-                  autoFocus
-                />
-              ) : (
-                <span className="path-text-v3" onClick={() => setEditingOutputPath(true)}>{outputPath}</span>
-              )}
-              <button className="btn-edit-path" onClick={() => setEditingOutputPath(!editingOutputPath)}>✎</button>
-            </div>
-            {pathHintCount < 3 && <div className="path-hint">Click to change save location</div>}
-            
-            {(url.trim().startsWith("magnet:?") || url.trim().endsWith(".torrent")) && (
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                🧲 Magnet link detected — will connect via all selected interfaces
-              </div>
-            )}
-          </section>
-
-          {downloadStatus && (
-            <section className="download-card-v3 slide-in">
-              <div className="download-head">
-                <div>
-                  <p className="download-name">{downloadStatus.output_path?.split(/[\\/]/).pop() || "download.bin"}</p>
-                  <p className="download-meta">{formatBytes(downloadStatus.expected_size)}</p>
-                </div>
-                <button className="cancel-btn" onClick={cancelDownload} title="Cancel download">
-                  <X size={14} />
-                </button>
-              </div>
-              {downloadStatus.status === "fetching_metadata" ? (
-                <div className="fetching-metadata-v3">
-                  <div className="fetching-spinner" />
-                  <span>Fetching torrent metadata...</span>
-                </div>
-              ) : (
-                <div className="progress-main">
-                  <div
-                    className={`progress-fill ${downloading ? "progress-shimmer" : ""}`}
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        ((downloadStatus.total_downloaded || 0) / Math.max(1, downloadStatus.expected_size || 1)) * 100
-                      )}%`
                     }}
+                    onCancel={() => {
+                      fetch(`${API_BASE}/download/${jid}/cancel`, { method: "POST" });
+                      setActiveJobs(prev => prev.filter(x => x !== jid));
+                    }}
+                    onPause={() => fetch(`${API_BASE}/download/${jid}/pause`, { method: "POST" })}
+                    onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
                   />
-                </div>
-              )}
-              <div className="iface-bars">
-                {currentInterfacesProgress.map((item) => {
-                  const iface = interfaces.find((i) => i.ip_address === item.ip_address);
-                  const tone = iface ? getInterfaceTone(iface) : { bar: "var(--extra-color)" };
-                  const pct = Math.min(100, ((item.downloaded || 0) / Math.max(1, downloadStatus.expected_size || 1)) * 100);
-                  return (
-                    <div key={item.ip_address} className="progress-mini">
-                      <div className="progress-mini-bg">
-                        <div
-                          className="progress-mini-fill"
-                          style={{ width: `${pct}%`, backgroundColor: tone.bar }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
+                ))}
               </div>
-              {downloadStatus.status !== "fetching_metadata" && (
-                <>
-                  <div className="speed-line">{formatSpeed(combinedCurrentSpeed)}</div>
-                  <p className="speed-detail">
-                    {currentInterfacesProgress.map((item) => `${shortName(item.name, "")} ${Number(item.speed_mb_s || 0).toFixed(2)}`).join(" · ")}
-                  </p>
-                  <p className="eta-line">
-                    {formatEta(currentEta)}
-                    {speedupText ? ` · ${speedupText}` : ""}
-                  </p>
-                </>
-              )}
-              {downloadStatus.status === "waiting_reconnect" && (
-                <div className="reconnect-banner">
-                  <AlertTriangle size={14} /> All connections lost — waiting to reconnect
+            </>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="content-body">
+              <div className="section-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>History</span>
+                <button onClick={clearHistory} style={{ background: 'transparent', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '11px' }}>Clear History</button>
+              </div>
+              {history.length === 0 && (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: '13px' }}>
+                  No completed downloads yet.
                 </div>
               )}
-              {downloadStatus.status === "failed" && downloadStatus.type === "torrent" && downloadStatus.error && (
-                <div className="reconnect-banner" style={{ background: 'var(--danger-soft)', color: 'var(--danger)' }}>
-                  <AlertTriangle size={14} /> {downloadStatus.error}
-                </div>
-              )}
-              {(downloadStatus.retry_events || []).length > 0 && (
-                <details className="activity-log">
-                  <summary>Activity ({downloadStatus.retry_events.length} events)</summary>
-                  <ul>
-                    {downloadStatus.retry_events.slice(-10).reverse().map((ev, i) => (
-                      <li key={i}>
-                        Chunk {ev.chunk_index}: {shortName(ev.from_interface, "")} → {shortName(ev.to_interface, "")}
-                        <span className="activity-reason">{ev.reason}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-              {downloadStatus?.type === "torrent" && downloadStatus.status !== "fetching_metadata" && (
-                <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--text-muted)' }}>
-                  Peers: {currentInterfacesProgress.map((item, idx) => {
-                    const iface = interfaces.find((i) => i.ip_address === item.ip_address);
-                    const colorTone = toneFor(shortName(iface?.name, iface?.interface_type));
-                    return (
-                      <span key={item.ip_address} style={{ color: colorTone.dot, fontWeight: 600 }}>
-                        {item.peers}{idx < currentInterfacesProgress.length - 1 ? " · " : ""}
-                      </span>
-                    );
-                  })}
-                  <div style={{ marginTop: '4px' }}>
-                    Seeders: {downloadStatus.seeders || 0} · Leechers: {downloadStatus.leechers || 0}
+              {history.map((item) => (
+                <div className="completed-row" key={item.id ?? Math.random()}>
+                  <CheckCircle2 size={16} color={item.status === 'failed' ? "var(--danger)" : "var(--success)"} />
+                  <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
+                  <div className="completed-meta">
+                    <span>{formatBytes(item.size)}</span>
+                    {item.status !== 'failed' && <span>{formatSpeed(item.avgSpeed)} avg</span>}
                   </div>
+                  {item.time_saved > 0 && <div className="completed-saved">Saved {formatEta(item.time_saved)}</div>}
                 </div>
-              )}
-            </section>
+              ))}
+            </div>
           )}
 
-          {queue.length > 0 && (
-            <section className="queue-list">
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleQueueDragEnd}>
-                <SortableContext items={queue.map((item) => item.id)} strategy={verticalListSortingStrategy}>
-                  {queue.map((item) => (
-                    <SortableQueueItem key={item.id} item={item} />
+          {activeTab === 'connections' && (
+            <div className="content-body">
+              <div className="section-label">Interfaces</div>
+              <table className="conn-table">
+                <tbody>
+                  {renderedInterfaces.map((iface) => (
+                    <tr className="conn-row" key={iface.ip_address}>
+                      <td>
+                        <div className="conn-name">
+                          <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type)).dot }} />
+                          {iface.name || iface.ip_address}
+                          <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
+                        </div>
+                      </td>
+                      <td className="conn-speed">
+                        {iface.speed_mb_s ? `${iface.speed_mb_s.toFixed(2)} MB/s` : '0.00 MB/s'}
+                      </td>
+                      <td>
+                        <div className="conn-actions">
+                           {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
+                           <button className="btn-small" onClick={() => {
+                              const val = prompt("Set bandwidth limit in MB/s (0 to remove):", bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024) : "");
+                              if (val !== null) {
+                                const num = parseFloat(val);
+                                if (num > 0) {
+                                  setBandwidthLimits({ ...bandwidthLimits, [iface.ip_address]: Math.round(num * 1024 * 1024) });
+                                } else {
+                                  const newLimits = { ...bandwidthLimits };
+                                  delete newLimits[iface.ip_address];
+                                  setBandwidthLimits(newLimits);
+                                }
+                              }
+                           }}>Set limit (MB/s)</button>
+                        </div>
+                      </td>
+                    </tr>
                   ))}
-                </SortableContext>
-              </DndContext>
-            </section>
-          )}
-
-          <div style={{ textAlign: 'center', padding: '16px', fontSize: '11px', color: 'var(--text-muted)' }}>
-            ⚡ Browser extension — coming soon
-          </div>
-
-          <div className="card-footer" style={{ borderTop: 'none', paddingTop: 0 }}>Burst v0.2</div>
-          {newIfacePrompt && (
-            <div className="iface-prompt slide-in">
-              <p>
-                <strong>{newIfacePrompt.name}</strong> detected — add to current download?
-              </p>
-              <div className="iface-prompt-actions">
-                <button className="btn-prompt-yes" onClick={handleNewIfaceAccept}>
-                  Yes, boost speed
-                </button>
-                <button className="btn-prompt-no" onClick={handleNewIfaceDismiss}>No thanks</button>
-              </div>
+                </tbody>
+              </table>
             </div>
           )}
-          {toast && <div className="toast-line">{toast}</div>}
-        </div>
-      )}
-      
-      {showSettingsModal && appSettings && createPortal(
-        <div className="settings-modal-overlay" onClick={() => setShowSettingsModal(false)}>
-          <div className="settings-modal slide-in" onClick={e => e.stopPropagation()}>
-            <div className="settings-modal-header">
-              <h2>Settings</h2>
-              <button className="settings-modal-close" onClick={() => setShowSettingsModal(false)}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="settings-modal-body">
-              <div className="settings-section">
-                <div className="settings-section-title">Chunking</div>
+
+          {activeTab === 'settings' && (
+            <div className="content-body">
+              <div className="section-label">Settings</div>
+              {!appSettings ? (
+                 <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Loading settings...</div>
+              ) : (
                 <div className="settings-grid">
+                  <div className="settings-section-title">General</div>
+                <label className="setting-row">
+                  <span>Default Download Path</span>
+                  <div className="setting-input-wrap">
+                    <input 
+                      type="text" 
+                      style={{ width: '240px' }} 
+                      value={localStorage.getItem("burst_default_path") || "C:\\Downloads\\"} 
+                      onChange={(e) => {
+                        localStorage.setItem("burst_default_path", e.target.value);
+                        setToast("Default path updated");
+                      }} 
+                    />
+                    <button className="btn-small" onClick={() => handleBrowsePath(p => {
+                        localStorage.setItem("burst_default_path", p);
+                        setToast("Default path updated");
+                    })}>Browse</button>
+                  </div>
+                </label>
+                <label className="setting-row">
+                  <span>Theme Mode</span>
+                  <div className="setting-input-wrap">
+                    <select 
+                      value={themeMode} 
+                      onChange={(e) => setThemeMode(e.target.value)}
+                      style={{ background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', padding: '4px', borderRadius: '4px' }}
+                    >
+                      <option value="dark">Always Dark</option>
+                      <option value="light">Always Light</option>
+                      <option value="system">System Preference</option>
+                    </select>
+                  </div>
+                </label>
+
+                <div className="settings-section-title">Chunking</div>
                   {[
                     { key: "BASE_CHUNK_SIZE", label: "Chunk size", unit: "MB", divisor: 1048576, step: 1 },
                     { key: "MIN_CHUNK_SIZE", label: "Min chunk", unit: "KB", divisor: 1024, step: 64 },
@@ -1156,11 +734,8 @@ export default function App() {
                       </label>
                     );
                   })}
-                </div>
-              </div>
-              <div className="settings-section">
-                <div className="settings-section-title">Rebalancing</div>
-                <div className="settings-grid">
+                  
+                  <div className="settings-section-title">Rebalancing</div>
                   {[
                     { key: "WEIGHT_REBALANCE_INTERVAL_SECONDS", label: "Rebalance interval", unit: "sec", divisor: 1, step: 1 },
                     { key: "MIN_INTERFACE_SPEED_THRESHOLD", label: "Min speed threshold", unit: "KB/s", divisor: 1/1024, step: 10 },
@@ -1180,245 +755,34 @@ export default function App() {
                       </label>
                     );
                   })}
-                </div>
-              </div>
-              <div className="settings-section">
-                <div className="settings-section-title">Reliability</div>
-                <div className="settings-grid">
-                  {[
-                    { key: "DISCONNECT_DETECTION_TIMEOUT", label: "Disconnect timeout", unit: "sec", divisor: 1, step: 1 },
-                    { key: "RETRY_SAME_INTERFACE_COOLDOWN", label: "Retry cooldown", unit: "sec", divisor: 1, step: 1 },
-                    { key: "MAX_CONSECUTIVE_FAILURES", label: "Max failures", unit: "×", divisor: 1, step: 1 },
-                    { key: "RETRY_ATTEMPTS", label: "Retry attempts", unit: "×", divisor: 1, step: 1 },
-                    { key: "RETRY_DELAY_SECONDS", label: "Retry delay", unit: "sec", divisor: 1, step: 1 },
-                  ].map(({ key, label, unit, divisor, step }) => {
-                    const displayVal = Math.round((appSettings[key] ?? 0) / divisor * 100) / 100;
-                    return (
-                      <label key={key} className="setting-row">
-                        <span>{label}</span>
-                        <div className="setting-input-wrap">
-                          <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
-                              const raw = Number(e.target.value) * divisor;
-                              setAppSettings(prev => ({...prev, [key]: raw}));
-                            }} />
-                          <span className="setting-unit">{unit}</span>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-            <div className="settings-modal-footer">
-              <button className="btn-reset-settings" onClick={() => {
-                fetch(`${API_BASE}/settings/reset`, { method: "POST" }).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => {});
-              }}>Reset to defaults</button>
-              <button className="btn-save-settings" onClick={() => {
-                fetch(`${API_BASE}/settings`, {
-                  method: "POST",
-                  headers: {"Content-Type": "application/json"},
-                  body: JSON.stringify({settings: appSettings})
-                }).then(() => setShowSettingsModal(false)).catch(() => {});
-              }}>Save</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {showHistoryModal && createPortal(
-        <div className="settings-modal-overlay" onClick={() => setShowHistoryModal(false)}>
-          <div className="settings-modal slide-in" style={{ width: '480px' }} onClick={e => e.stopPropagation()}>
-            <div className="settings-modal-header">
-              <h2>History</h2>
-              <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <button className="btn-clear" style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }} onClick={clearHistory}>Clear</button>
-                <button className="settings-modal-close" onClick={() => setShowHistoryModal(false)}>
-                  <X size={18} />
-                </button>
-              </div>
-            </div>
-            <div className="settings-modal-body" style={{ padding: 0 }}>
-              <HistoryErrorBoundary>
-                {history.length > 0 ? (
-                  <div className="recent-list">
-                    {history.map((item) => {
-                      const safeFilename = item.filename ?? 'Unknown file';
-                      const safeSize = item.size ?? 0;
-                      const safeAvgSpeed = item.avgSpeed ?? 0;
-                      const safeTimeSaved = item.time_saved ?? 0;
-                      const safeInterfaces = Array.isArray(item.interfaces_used) ? item.interfaces_used : [];
-                      const safeStatus = item.status ?? 'completed';
-                      return (
-                        <article key={item.id ?? Math.random()} className="recent-item fade-in" style={{ borderTop: 'none', borderBottom: '1px solid var(--border)' }}>
-                          <div className="recent-main">
-                            <div className="file-icon">
-                              <Folder size={14} />
-                            </div>
-                            <div className="recent-copy">
-                              <p>{safeFilename}</p>
-                              <span>
-                                {formatBytes(safeSize)}
-                                <div className="iface-dots-row" title={`Downloaded via ${safeInterfaces.length || 1} connections`}>
-                                  {safeInterfaces.map((ip, idx) => {
-                                    const iface = interfaces.find((i) => i.ip_address === ip);
-                                    return <span key={idx} className="iface-history-dot" style={{ background: iface ? toneFor(shortName(iface.name, iface.interface_type)).dot : 'var(--text-muted)' }} />;
-                                  })}
-                                </div>
-                              </span>
-                            </div>
-                          </div>
-                          <div className="recent-meta">
-                            {safeStatus === "failed" ? (
-                              <>
-                                <span className="recent-metric failed-tag">Failed</span>
-                                <span className="error-reason" title={item.error_reason ?? ''}>{item.error_reason ?? 'Unknown error'}</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="recent-metric">{formatSpeed(safeAvgSpeed)}</span>
-                                {safeTimeSaved > 0 && (
-                                  <span className="saved-badge">Saved {formatEta(safeTimeSaved)}</span>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </article>
-                      );
-                    })}
+                  
+                  <div style={{ marginTop: '24px', display: 'flex', gap: '12px' }}>
+                    <button className="btn-primary" onClick={() => {
+                      fetch(`${API_BASE}/settings`, {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({settings: appSettings})
+                      }).then(() => setToast("Settings saved.")).catch(() => {});
+                    }}>Save Settings</button>
+                    <button className="btn-small" onClick={() => {
+                      fetch(`${API_BASE}/settings/reset`, { method: "POST" }).then(r => r.json()).then(d => {
+                        setAppSettings(d.settings);
+                        setToast("Settings reset to defaults.");
+                      }).catch(() => {});
+                    }}>Reset to Defaults</button>
                   </div>
-                ) : (
-                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
-                    No recent downloads
-                  </div>
-                )}
-              </HistoryErrorBoundary>
+                </div>
+              )}
             </div>
-          </div>
-        </div>,
-        document.body
+          )}
+        </main>
+      </div>
+      
+      {toast && (
+        <div style={{ position: 'fixed', bottom: '24px', right: '32px', background: 'var(--text)', color: 'var(--bg)', padding: '8px 16px', borderRadius: '4px', fontSize: '13px', zIndex: 9999, animation: 'slideIn 0.2s ease' }}>
+          {toast}
+        </div>
       )}
-
-      {contextMenu && createPortal(
-        <div className="context-menu-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1999 }} onClick={() => setContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}>
-          <div className="context-menu slide-in" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={e => e.stopPropagation()}>
-            <button className="context-menu-item" onClick={() => {
-              if (!validSelectedIps.includes(contextMenu.ip)) {
-                setSelectedIps(prev => [...prev, contextMenu.ip]);
-              }
-              setContextMenu(null);
-            }}>Add to downloads</button>
-            <button className="context-menu-item" onClick={() => {
-              setSelectedIps(prev => prev.filter(ip => ip !== contextMenu.ip));
-              setContextMenu(null);
-            }}>Remove from downloads</button>
-            <button className="context-menu-item" onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setLimitPopover({
-                ip: contextMenu.ip,
-                x: rect.left,
-                y: rect.bottom + 8,
-                value: bandwidthLimits[contextMenu.ip] ? (bandwidthLimits[contextMenu.ip] / 1024 / 1024).toString() : ""
-              });
-              setContextMenu(null);
-            }}>Set bandwidth limit</button>
-            {bandwidthLimits[contextMenu.ip] && (
-              <button className="context-menu-item text-danger" onClick={() => {
-                const newLimits = { ...bandwidthLimits };
-                delete newLimits[contextMenu.ip];
-                setBandwidthLimits(newLimits);
-                setContextMenu(null);
-              }}>Remove limit</button>
-            )}
-            <div className="context-menu-divider" />
-            <button className="context-menu-item" onClick={() => {
-              setDownloadOnlyIps(prev => {
-                const isOnly = prev.includes(contextMenu.ip);
-                const updated = isOnly ? prev.filter(ip => ip !== contextMenu.ip) : [...prev, contextMenu.ip];
-                localStorage.setItem("burst_download_only_ips", JSON.stringify(updated));
-                return updated;
-              });
-              setContextMenu(null);
-            }}>Download only mode {downloadOnlyIps.includes(contextMenu.ip) ? "✓" : ""}</button>
-            <button className="context-menu-item" onClick={async () => {
-              const ip = contextMenu.ip;
-              setContextMenu(null);
-              setSpeedRefreshActive(true);
-              try {
-                const resp = await fetch(`${API_BASE}/speedtest`, { method: "POST" });
-                const data = await resp.json();
-                if (resp.ok) {
-                  setInterfaces(prev => prev.map(i => {
-                    const found = (data.results || []).find((r) => r.ip_address === i.ip_address);
-                    return found ? { ...i, speed_mb_s: found.speed_mb_s } : i;
-                  }));
-                  setRenderedInterfaces(prev => prev.map(i => {
-                    const found = (data.results || []).find((r) => r.ip_address === i.ip_address);
-                    return found ? { ...i, speed_mb_s: found.speed_mb_s, speedFlash: true } : i;
-                  }));
-                  setTimeout(() => setRenderedInterfaces(prev => prev.map(i => ({...i, speedFlash: false}))), 300);
-                }
-              } finally {
-                setSpeedRefreshActive(false);
-              }
-            }}>Run speedtest</button>
-            <div className="context-menu-divider" />
-            <button className="context-menu-item" style={{ color: 'var(--danger)' }} onClick={() => {
-              setIgnoredInterfaces(prev => {
-                const updated = [...prev, contextMenu.ip];
-                localStorage.setItem("burst_ignored_interfaces", JSON.stringify(updated));
-                return updated;
-              });
-              setSelectedIps(prev => prev.filter(ip => ip !== contextMenu.ip));
-              setRenderedInterfaces(prev => prev.filter(i => i.ip_address !== contextMenu.ip));
-              setContextMenu(null);
-            }}>Forget this interface</button>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {limitPopover && createPortal(
-        <div className="limit-popover-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1999 }} onClick={() => setLimitPopover(null)}>
-          <div className="limit-popover slide-in" style={{ 
-            position: 'absolute', 
-            left: limitPopover.x, 
-            top: limitPopover.y, 
-            background: 'var(--bg)', 
-            border: '1px solid var(--border)', 
-            borderRadius: '6px', 
-            padding: '12px', 
-            boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-            display: 'flex',
-            gap: '8px',
-            alignItems: 'center'
-          }} onClick={e => e.stopPropagation()}>
-            <span style={{ fontSize: '12px', fontWeight: 500 }}>Max speed:</span>
-            <input 
-              type="number" 
-              style={{ width: '60px', padding: '4px', fontSize: '12px', borderRadius: '4px', border: '1px solid var(--border)', color: 'var(--text)' }} 
-              value={limitPopover.value}
-              onChange={e => setLimitPopover({...limitPopover, value: e.target.value})}
-              autoFocus
-            />
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>MB/s</span>
-            <button 
-              style={{ padding: '4px 8px', background: 'var(--accent)', color: 'white', borderRadius: '4px', border: 'none', fontSize: '12px', cursor: 'pointer' }}
-              onClick={() => {
-                const val = parseFloat(limitPopover.value);
-                if (!isNaN(val) && val > 0) {
-                  setBandwidthLimits({ ...bandwidthLimits, [limitPopover.ip]: Math.round(val * 1024 * 1024) });
-                }
-                setLimitPopover(null);
-              }}
-            >OK</button>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {/* TODO: Electron wrapper will add system tray icon showing live combined speed */}
-      {/* TODO: Extension sends POST to localhost:8000/download when user clicks download in browser */}
-    </main>
+    </div>
   );
 }
