@@ -12,6 +12,7 @@
 ## ⚡ What is Burst?
 
 **Burst** is a next-generation download manager designed to maximize your bandwidth by **bonding multiple network interfaces** into a single, high-speed download stream. Whether you're combining Ethernet, Wi-Fi, and 5G/4G tethering, Burst intelligently distributes chunks across all active connections to ensure you're using every bit of speed available.
+<img width="800" height="450" alt="VideoProject1-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/5c9138b6-9886-46c2-828d-33f43bd8f0a3" />
 
 ## ✨ Key Features
 
