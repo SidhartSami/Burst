@@ -738,7 +738,24 @@ export default function App() {
 
           {activeTab === 'settings' && (
             <div className="content-body">
-              <div className="section-label">Settings</div>
+              <div className="settings-header">
+                <div className="section-label">Settings</div>
+                <div className="settings-actions">
+                  <button className="clear-btn" onClick={() => {
+                    fetch(`${API_BASE}/settings/reset`, { method: "POST" }).then(r => r.json()).then(d => {
+                      setAppSettings(d.settings);
+                      setToast("Settings reset to defaults.");
+                    }).catch(() => {});
+                  }}>Reset Defaults</button>
+                  <button className="btn-primary-small" onClick={() => {
+                    fetch(`${API_BASE}/settings`, {
+                      method: "POST",
+                      headers: {"Content-Type": "application/json"},
+                      body: JSON.stringify({settings: appSettings})
+                    }).then(() => setToast("Settings saved.")).catch(() => {});
+                  }}>Save Settings</button>
+                </div>
+              </div>
               {!appSettings ? (
                  <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Loading settings...</div>
               ) : (
@@ -819,21 +836,6 @@ export default function App() {
                     );
                   })}
                   
-                  <div style={{ marginTop: '24px', display: 'flex', gap: '12px' }}>
-                    <button className="btn-primary" onClick={() => {
-                      fetch(`${API_BASE}/settings`, {
-                        method: "POST",
-                        headers: {"Content-Type": "application/json"},
-                        body: JSON.stringify({settings: appSettings})
-                      }).then(() => setToast("Settings saved.")).catch(() => {});
-                    }}>Save Settings</button>
-                    <button className="btn-small" onClick={() => {
-                      fetch(`${API_BASE}/settings/reset`, { method: "POST" }).then(r => r.json()).then(d => {
-                        setAppSettings(d.settings);
-                        setToast("Settings reset to defaults.");
-                      }).catch(() => {});
-                    }}>Reset to Defaults</button>
-                  </div>
                 </div>
               )}
             </div>
