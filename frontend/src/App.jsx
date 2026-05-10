@@ -206,6 +206,16 @@ export default function App() {
   const [activeJobs, setActiveJobs] = useState([]);
   const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState([]);
+
+  const groupedHistory = useMemo(() => {
+    const groups = {};
+    history.forEach(item => {
+      const dateStr = item.timestamp ? item.timestamp.split(',')[0] : 'Unknown Date';
+      if (!groups[dateStr]) groups[dateStr] = [];
+      groups[dateStr].push(item);
+    });
+    return groups;
+  }, [history]);
   const [dragOverlay, setDragOverlay] = useState(false);
   const [toast, setToast] = useState("");
   const [downloadBtnState, setDownloadBtnState] = useState("idle");
@@ -423,20 +433,19 @@ export default function App() {
           const payload = JSON.parse(event.data);
           setJobStatuses(prev => ({ ...prev, [id]: payload }));
           if (payload.status === "completed" || payload.status === "failed") {
-            if (payload.status === "completed" || payload.status === "failed") {
                 const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
                 const historyItem = {
                     id: payload.job_id || crypto.randomUUID(),
                     filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-                    size: payload.expected_size || 0,
-                    timestamp: Date.now(),
-                    avgSpeed: duration ? payload.expected_size / (duration * 1024 * 1024) : 0,
-                    interfaces_used: Object.keys(payload.interfaces || {}),
+                    path: payload.output_path || "Unknown path",
+                    size: payload.total_downloaded,
+                    avgSpeed: payload.speed_combined || 0,
+                    time_saved: payload.time_saved || 0,
                     status: payload.status,
-                    error_reason: payload.error
+                    timestamp: new Date().toLocaleString(),
+                    type: payload.type || (activeTab === 'torrents' ? 'torrent' : 'download')
                 };
                 setHistory(prev => [historyItem, ...prev].slice(0, 50));
-            }
           }
         };
         jobSocketsRef.current[id] = ws;
@@ -534,39 +543,53 @@ export default function App() {
         <main className="content-area">
           {(activeTab === 'downloads' || activeTab === 'torrents') && (
             <>
-              <div className="content-header">
-                <div className="url-bar">
+              <div className="top-controls">
+                <div className="input-group">
                   <input 
+                    type="text" 
                     className="url-input" 
-                    value={url} 
-                    onChange={e => handleUrlChange(e.target.value)} 
-                    placeholder={activeTab === 'torrents' ? "Paste a magnet link..." : "Paste a download URL..."} 
+                    placeholder={activeTab === 'torrents' ? "Paste a magnet link or .torrent URL..." : "Paste a download URL..."}
+                    value={url}
+                    onChange={(e) => handleUrlChange(e.target.value)}
                   />
-                  <button className="btn-primary" onClick={handleDownloadClick} disabled={downloadBtnState === "checking"}>
-                    <Download size={16} /> {downloadBtnState === "checking" ? "Checking..." : "Download"}
+                  <button 
+                    className="btn-primary" 
+                    onClick={handleDownloadClick}
+                    disabled={downloadBtnState === "checking"}
+                  >
+                    {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
+                    {downloadBtnState === "checking" ? "Checking..." : "Download"}
                   </button>
                 </div>
-                <div className="path-hint">
-                  <div className="path-browse-trigger" onClick={() => handleBrowsePath(setOutputPath)} title="Browse folder">
-                    <FolderOpen size={14} /> 
-                  </div>
-                  <div className="path-text" onClick={() => setEditingOutputPath(true)}>
-                    {editingOutputPath ? (
-                      <input 
-                        value={outputPath} 
-                        onChange={e => setOutputPath(e.target.value)} 
-                        onBlur={() => setEditingOutputPath(false)} 
-                        autoFocus 
-                        onKeyDown={e => e.key === 'Enter' && setEditingOutputPath(false)}
-                      />
-                    ) : (
-                      <span>{outputPath}</span>
-                    )}
+
+                <div className="path-row">
+                  <button className="browse-btn-icon" onClick={async () => {
+                    try {
+                      const resp = await fetch(`${API_BASE}/select-path`);
+                      const data = await resp.json();
+                      if (data.path) setOutputPath(data.path + (url ? "" : "\\burst-download.bin"));
+                    } catch {}
+                  }} title="Browse directory">
+                    <FolderOpen size={16} />
+                  </button>
+                  <div className="path-input-container" onClick={() => setEditingOutputPath(true)}>
+                    <div className="path-text">
+                      {editingOutputPath ? (
+                        <input
+                          autoFocus
+                          value={outputPath}
+                          onChange={(e) => setOutputPath(e.target.value)}
+                          onBlur={() => setEditingOutputPath(false)}
+                          onKeyDown={(e) => e.key === 'Enter' && setEditingOutputPath(false)}
+                        />
+                      ) : outputPath}
+                    </div>
                   </div>
                 </div>
               </div>
+
               <div className="content-body">
-                <div className="section-label">Active {activeTab}</div>
+                <div className="section-label">Active {activeTab === 'torrents' ? 'Torrents' : 'Downloads'}</div>
                 {activeJobs.filter(jid => {
                   const st = jobStatuses[jid];
                   if (!st) return false;
@@ -611,30 +634,61 @@ export default function App() {
                     onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
                   />
                 ))}
+
+                {/* Recently Completed Section */}
+                {history.filter(h => activeTab === 'torrents' ? h.type === 'torrent' : h.type !== 'torrent').length > 0 && (
+                  <div className="recent-completed-section">
+                    <div className="section-label">Recently Completed</div>
+                    {history
+                      .filter(h => activeTab === 'torrents' ? h.type === 'torrent' : h.type !== 'torrent')
+                      .slice(0, 3)
+                      .map(item => (
+                        <div className="completed-row mini" key={item.id}>
+                          {item.status === 'failed' ? <AlertCircle size={14} color="var(--danger)" /> : <CheckCircle2 size={14} color="var(--success)" />}
+                          <div className="completed-filename">{item.filename}</div>
+                          <div className="completed-meta">
+                            <span>{formatBytes(item.size)}</span>
+                          </div>
+                        </div>
+                      ))
+                    }
+                  </div>
+                )}
               </div>
             </>
           )}
 
           {activeTab === 'history' && (
             <div className="content-body">
-              <div className="section-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>History</span>
-                <button onClick={clearHistory} style={{ background: 'transparent', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '11px' }}>Clear History</button>
+              <div className="history-header">
+                <div className="section-label">History</div>
+                <button onClick={clearHistory} className="clear-btn">Clear History</button>
               </div>
               {history.length === 0 && (
                 <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)', fontSize: '13px' }}>
                   No completed downloads yet.
                 </div>
               )}
-              {history.map((item) => (
-                <div className="completed-row" key={item.id ?? Math.random()}>
-                  {item.status === 'failed' ? <AlertCircle size={16} color="var(--danger)" /> : <CheckCircle2 size={16} color="var(--success)" />}
-                  <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
-                  <div className="completed-meta">
-                    <span>{formatBytes(item.size)}</span>
-                    {item.status !== 'failed' && <span>{formatSpeed(item.avgSpeed)} avg</span>}
-                  </div>
-                  {item.time_saved > 0 && <div className="completed-saved">Saved {formatEta(item.time_saved)}</div>}
+              {Object.keys(groupedHistory).map(date => (
+                <div className="history-date-group" key={date}>
+                  <div className="history-date-label">{date}</div>
+                  {groupedHistory[date].map((item) => (
+                    <div className="completed-row" key={item.id ?? Math.random()}>
+                      <div className="completed-icon">
+                        {item.status === 'failed' ? <AlertCircle size={18} color="var(--danger)" /> : <CheckCircle2 size={18} color="var(--success)" />}
+                      </div>
+                      <div className="completed-info">
+                        <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
+                        <div className="completed-path">{item.path}</div>
+                        <div className="completed-meta-row">
+                          <span className="meta-tag">{item.timestamp.split(',')[1]}</span>
+                          <span className="meta-tag">{formatBytes(item.size)}</span>
+                          {item.status !== 'failed' && <span className="meta-tag">{formatSpeed(item.avgSpeed)} avg</span>}
+                        </div>
+                      </div>
+                      {item.time_saved > 0 && <div className="completed-saved">Saved {formatEta(item.time_saved)}</div>}
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
