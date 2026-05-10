@@ -14,8 +14,9 @@
   --border: #e5e5e5;
   --text: #1a1a1a;
   --text-muted: #6e6e6e;
-  
-  --accent: #f97316; /* Brand Orange */
+
+  --accent: #f97316;
+  /* Brand Orange */
   --accent-hover: #ea580c;
   --accent-dim: rgba(249, 115, 22, 0.1);
   --accent-text: #ffffff;
@@ -44,7 +45,7 @@
   --border: #3c3c3c;
   --text: #cccccc;
   --text-muted: #858585;
-  
+
   --accent: #f97316;
   --accent-hover: #fb923c;
   --accent-dim: rgba(249, 115, 22, 0.2);
@@ -79,6 +80,7 @@ input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
+
 input[type=number] {
   -moz-appearance: textfield;
 }
@@ -86,13 +88,10 @@ input[type=number] {
 .app-container {
   display: flex;
   flex-direction: column;
-  height: min(800px, 95vh);
+  height: 100vh;
+  width: 100vw;
   background: var(--bg);
-  max-width: 1200px;
-  margin: min(40px, 2.5vh) auto;
   overflow: hidden;
-  border-radius: 10px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
   border: 1px solid var(--border);
 }
 
@@ -140,7 +139,7 @@ input[type=number] {
   font-family: 'Bricolage Grotesque', sans-serif;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .titlebar-drag-region {
@@ -315,6 +314,7 @@ input[type=number] {
   font-size: 13px;
   outline: none;
 }
+
 .url-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
@@ -335,9 +335,11 @@ input[type=number] {
   align-items: center;
   gap: 8px;
 }
+
 .btn-primary:hover {
   background: var(--accent-hover);
 }
+
 .btn-primary:disabled {
   opacity: 0.7;
   cursor: not-allowed;
@@ -424,8 +426,9 @@ input[type=number] {
   gap: 12px;
   transition: box-shadow 0.2s;
 }
+
 .dl-card:hover {
-  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
 }
 
 .dl-card-top {
@@ -453,11 +456,31 @@ input[type=number] {
   border-radius: 4px;
   text-transform: uppercase;
 }
-.status-badge.downloading { background: var(--accent-dim); color: var(--accent); }
-.status-badge.paused { background: var(--warning-dim); color: var(--warning); }
-.status-badge.failed { background: var(--danger-dim); color: var(--danger); }
-.status-badge.completed { background: var(--success-dim); color: var(--success); }
-.status-badge.waiting { background: var(--surface-2); color: var(--text-muted); }
+
+.status-badge.downloading {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.status-badge.paused {
+  background: var(--warning-dim);
+  color: var(--warning);
+}
+
+.status-badge.failed {
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+
+.status-badge.completed {
+  background: var(--success-dim);
+  color: var(--success);
+}
+
+.status-badge.waiting {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
 
 .dl-speed {
   font-family: 'JetBrains Mono', monospace;
@@ -482,6 +505,7 @@ input[type=number] {
   place-items: center;
   border-radius: 4px;
 }
+
 .action-btn:hover {
   background: var(--surface-hover);
   color: var(--text);
@@ -505,13 +529,18 @@ input[type=number] {
   color: var(--text-muted);
   cursor: pointer;
 }
+
 .iface-pill.active {
   background: var(--accent-dim);
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.iface-pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+.iface-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
 
 .progress-track {
   height: 6px;
@@ -526,9 +555,17 @@ input[type=number] {
   transition: width 0.3s ease;
 }
 
-.progress-fill.completed { background: var(--success); }
-.progress-fill.failed { background: var(--danger); }
-.progress-fill.paused { background: var(--warning); }
+.progress-fill.completed {
+  background: var(--success);
+}
+
+.progress-fill.failed {
+  background: var(--danger);
+}
+
+.progress-fill.paused {
+  background: var(--warning);
+}
 
 .dl-bottom {
   display: flex;
@@ -579,7 +616,7 @@ input[type=number] {
   gap: 12px;
   margin-bottom: 8px;
   border-color: transparent;
-  background: rgba(255,255,255,0.03);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .completed-row.mini .completed-filename {
@@ -645,9 +682,11 @@ input[type=number] {
 .conn-row {
   border-bottom: 1px solid var(--border);
 }
+
 .conn-row:hover {
   background: var(--surface-hover);
 }
+
 .conn-row td {
   padding: 12px;
   font-size: 13px;
@@ -659,6 +698,7 @@ input[type=number] {
   gap: 8px;
   font-weight: 500;
 }
+
 .conn-type {
   font-size: 10px;
   background: var(--surface-2);
@@ -666,15 +706,18 @@ input[type=number] {
   border-radius: 4px;
   color: var(--text-muted);
 }
+
 .conn-speed {
   font-family: 'JetBrains Mono', monospace;
   color: var(--accent);
 }
+
 .conn-actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
 }
+
 .btn-small {
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -684,6 +727,7 @@ input[type=number] {
   font-size: 11px;
   cursor: pointer;
 }
+
 .btn-small:hover {
   background: var(--border);
 }
@@ -707,6 +751,7 @@ input[type=number] {
   gap: 12px;
   max-width: 600px;
 }
+
 .setting-row {
   display: flex;
   justify-content: space-between;
@@ -715,6 +760,7 @@ input[type=number] {
   border-bottom: 1px solid var(--border);
   font-size: 13px;
 }
+
 .sidebar-footer {
   padding: 16px;
   border-top: 1px solid var(--border);
@@ -725,11 +771,13 @@ input[type=number] {
   align-items: center;
   gap: 8px;
 }
+
 .setting-input-wrap {
   display: flex;
   align-items: center;
   gap: 8px;
 }
+
 .setting-input-wrap input {
   width: 80px;
   padding: 4px 8px;
@@ -739,6 +787,7 @@ input[type=number] {
   color: var(--text);
   font-size: 13px;
 }
+
 .setting-unit {
   font-size: 12px;
   color: var(--text-muted);
@@ -761,6 +810,7 @@ input[type=number] {
   border: none;
   color: var(--text-muted);
 }
+
 .theme-toggle:hover {
   color: var(--text);
 }
@@ -768,19 +818,28 @@ input[type=number] {
 .slide-in {
   animation: slideIn 0.2s ease;
 }
+
 @keyframes slideIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .drag-overlay {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0,0,0,0.5);
+  background: rgba(0, 0, 0, 0.5);
   display: grid;
   place-items: center;
 }
+
 .drag-overlay-content {
   background: var(--bg);
   color: var(--accent);
@@ -814,7 +873,7 @@ input[type=number] {
   color: var(--accent);
   opacity: 0.9;
   border: 1px solid var(--border);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
 }
 
 .empty-state h3 {

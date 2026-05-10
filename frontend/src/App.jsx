@@ -22,7 +22,9 @@ import {
   Menu
 } from "lucide-react";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
+  ? "http://127.0.0.1:8000"
+  : window.location.origin;
 const HISTORY_KEY = "burst_history";
 
 function formatBytes(bytes) {
@@ -85,17 +87,17 @@ function readDroppedUrl(event) {
 function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps }) {
   if (!status) return null;
 
-  const currentInterfacesProgress = status.type === "torrent" 
+  const currentInterfacesProgress = status.type === "torrent"
     ? Object.keys(status.speeds || {}).map(ip => ({
-        ip_address: ip,
-        speed_mb_s: (status.speeds[ip] || 0) / (1024 * 1024),
-        peers: status.peers_per_interface?.[ip] || 0
-      }))
+      ip_address: ip,
+      speed_mb_s: (status.speeds[ip] || 0) / (1024 * 1024),
+      peers: status.peers_per_interface?.[ip] || 0
+    }))
     : Object.values(status.interfaces || {});
-    
+
   const [isOptimistic, setIsOptimistic] = useState(null);
 
-  const activeIfaces = status.type === "torrent" 
+  const activeIfaces = status.type === "torrent"
     ? (status.interface_ips || []).length
     : Object.values(status.interfaces || {}).filter(i => i.status !== "excluded" && i.status !== "cancelled").length;
 
@@ -104,12 +106,12 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
   const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (isPaused ? 'paused' : 'downloading'));
 
   const pct = Math.min(100, ((status.total_downloaded || 0) / Math.max(1, status.expected_size || 1)) * 100);
-  
+
   // Force speed to 0 if paused to avoid unprofessional jitter/rolling averages
   const speedRaw = status.type === "torrent"
     ? (status.speed_combined || 0) / (1024 * 1024)
     : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
-    
+
   const combinedCurrentSpeed = isPaused ? 0 : speedRaw;
   const eta = (!isPaused && combinedCurrentSpeed > 0) ? (status.expected_size - status.total_downloaded) / (combinedCurrentSpeed * 1024 * 1024) : 0;
 
@@ -122,12 +124,12 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
         </div>
         <div className="dl-actions">
           {status.status === 'downloading' && status.type !== 'torrent' && (
-            <button className="action-btn" onClick={onPause} title="Pause"><Pause size={16}/></button>
+            <button className="action-btn" onClick={onPause} title="Pause"><Pause size={16} /></button>
           )}
           {(status.status === 'paused' || status.status === 'waiting_reconnect') && (
-            <button className="action-btn" onClick={onResume} title="Resume"><Play size={16}/></button>
+            <button className="action-btn" onClick={onResume} title="Resume"><Play size={16} /></button>
           )}
-          <button className="action-btn" onClick={onCancel} title="Cancel"><X size={16}/></button>
+          <button className="action-btn" onClick={onCancel} title="Cancel"><X size={16} /></button>
           <div className="dl-speed">{formatSpeed(combinedCurrentSpeed)}</div>
         </div>
       </div>
@@ -150,7 +152,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
             live = status.interfaces?.[iface.ip_address];
             isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
           }
-          
+
           if (isOptimistic && isOptimistic.ip === iface.ip_address) {
             isSelected = isOptimistic.selected;
           }
@@ -160,14 +162,14 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
           const isShared = allUsedIps.filter(ip => ip === iface.ip_address).length > 1;
 
           return (
-            <div 
-              key={iface.ip_address} 
+            <div
+              key={iface.ip_address}
               className={`iface-pill ${isSelected ? 'active' : ''}`}
               onClick={() => {
                 if (status.status === 'completed' || status.status === 'failed') return;
                 setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
                 onToggle(iface.ip_address, isSelected).finally(() => {
-                   setTimeout(() => setIsOptimistic(null), 1000);
+                  setTimeout(() => setIsOptimistic(null), 1000);
                 });
               }}
             >
@@ -197,7 +199,7 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [themeMode, setThemeMode] = useState(() => localStorage.getItem("burst_theme_mode") || "dark");
   const isDarkMode = themeMode === "dark" || (themeMode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  
+
   const [interfaces, setInterfaces] = useState([]);
   const [renderedInterfaces, setRenderedInterfaces] = useState([]);
   const [selectedIps, setSelectedIps] = useState([]);
@@ -205,7 +207,10 @@ export default function App() {
   const [outputPath, setOutputPath] = useState("C:\\Downloads\\burst-download.bin");
   const [activeJobs, setActiveJobs] = useState([]);
   const [jobStatuses, setJobStatuses] = useState({});
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(() => {
+    const saved = localStorage.getItem(HISTORY_KEY);
+    return saved ? JSON.parse(saved) : [];
+  });
 
   const groupedHistory = useMemo(() => {
     const groups = {};
@@ -232,12 +237,16 @@ export default function App() {
   }, [isDarkMode, themeMode]);
 
   useEffect(() => {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  }, [history]);
+
+  useEffect(() => {
     const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
     setBandwidthLimits(savedLimits);
     const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
     if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
-    
-    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => {});
+
+    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => { });
     setActiveJobs([]);
   }, []);
 
@@ -292,14 +301,16 @@ export default function App() {
   };
 
   const handleWindowAction = (action) => {
-    // If running in Electron, these would be ipcRenderer calls
-    if (window.electronAPI) {
-      window.electronAPI[action]();
+    if (window.pywebview && window.pywebview.api) {
+      if (action === 'close') window.pywebview.api.close();
+      else if (action === 'minimize') window.pywebview.api.minimize();
+      else if (action === 'maximize') window.pywebview.api.maximize();
     } else {
+      // Fallback for browser testing
       if (action === 'close') {
         if (window.confirm("Quit Burst?")) window.close();
       } else {
-        setToast(`${action.charAt(0).toUpperCase() + action.slice(1)} is handled by the OS/Electron.`);
+        setToast(`${action.charAt(0).toUpperCase() + action.slice(1)} is handled by the OS.`);
       }
     }
   };
@@ -341,7 +352,7 @@ export default function App() {
       setSelectedIps((prev) =>
         prev.length ? prev.filter((ip) => fresh.some((item) => item.ip_address === ip)) : fresh.map((item) => item.ip_address)
       );
-    } catch {}
+    } catch { }
   };
 
   const runSpeedtestSilent = async () => {
@@ -356,7 +367,7 @@ export default function App() {
           return { ...iface, speed_mb_s: found.speed_mb_s };
         })
       );
-    } catch {}
+    } catch { }
   };
 
   useEffect(() => {
@@ -374,7 +385,7 @@ export default function App() {
 
     try {
       const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
-      const body = isTorrent 
+      const body = isTorrent
         ? { magnet_uri: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits }
         : { url: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
 
@@ -433,19 +444,19 @@ export default function App() {
           const payload = JSON.parse(event.data);
           setJobStatuses(prev => ({ ...prev, [id]: payload }));
           if (payload.status === "completed" || payload.status === "failed") {
-                const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
-                const historyItem = {
-                    id: payload.job_id || crypto.randomUUID(),
-                    filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
-                    path: payload.output_path || "Unknown path",
-                    size: payload.total_downloaded,
-                    avgSpeed: payload.speed_combined || 0,
-                    time_saved: payload.time_saved || 0,
-                    status: payload.status,
-                    timestamp: new Date().toLocaleString(),
-                    type: payload.type || (activeTab === 'torrents' ? 'torrent' : 'download')
-                };
-                setHistory(prev => [historyItem, ...prev].slice(0, 50));
+            const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
+            const historyItem = {
+              id: payload.job_id || crypto.randomUUID(),
+              filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
+              path: payload.output_path || "Unknown path",
+              size: payload.total_downloaded,
+              avgSpeed: payload.speed_combined || 0,
+              time_saved: payload.time_saved || 0,
+              status: payload.status,
+              timestamp: new Date().toLocaleString(),
+              type: payload.type || (activeTab === 'torrents' ? 'torrent' : 'download')
+            };
+            setHistory(prev => [historyItem, ...prev].slice(0, 50));
           }
         };
         jobSocketsRef.current[id] = ws;
@@ -483,10 +494,10 @@ export default function App() {
     <div className={`app-container ${isDarkMode ? 'dark' : ''}`} onDragOver={e => { e.preventDefault(); setDragOverlay(true); }}>
       {dragOverlay && (
         <div className="drag-overlay" onDragLeave={() => setDragOverlay(false)} onDrop={e => {
-            e.preventDefault();
-            setDragOverlay(false);
-            const droppedUrl = readDroppedUrl(e);
-            if (droppedUrl) handleUrlChange(droppedUrl);
+          e.preventDefault();
+          setDragOverlay(false);
+          const droppedUrl = readDroppedUrl(e);
+          if (droppedUrl) handleUrlChange(droppedUrl);
         }}>
           <div className="drag-overlay-content">Drop URL to download</div>
         </div>
@@ -498,22 +509,21 @@ export default function App() {
             <Menu size={16} />
           </button>
           <div className="titlebar-title">
-            <div className="logo-square" style={{ width: '12px', height: '12px', borderRadius: '2px', background: 'var(--accent)' }} />
-            Burst 1.0
+            <img src="/logo.png" alt="Burst" style={{ width: '18px', height: '18px', objectFit: 'contain' }} />
+            Burst
           </div>
         </div>
         <div className="titlebar-drag-region" />
         <div className="window-controls">
-          <button className="window-btn" onClick={() => handleWindowAction('minimize')}><Minus size={16}/></button>
-          <button className="window-btn" onClick={() => handleWindowAction('maximize')}><Square size={14}/></button>
-          <button className="window-btn close" onClick={() => handleWindowAction('close')}><X size={16}/></button>
+          <button className="window-btn" onClick={() => handleWindowAction('minimize')}><Minus size={16} /></button>
+          <button className="window-btn close" onClick={() => handleWindowAction('close')}><X size={16} /></button>
         </div>
       </div>
 
       <div className={`main-layout ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <aside className="sidebar">
           <div className="nav-list" style={{ marginTop: '12px' }}>
-             <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
+            <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
               <Download size={16} /> {!isSidebarCollapsed && "Downloads"}
             </button>
             <button className={`nav-item ${activeTab === 'torrents' ? 'active' : ''}`} onClick={() => setActiveTab('torrents')} title="Torrents">
@@ -545,15 +555,15 @@ export default function App() {
             <>
               <div className="top-controls">
                 <div className="input-group">
-                  <input 
-                    type="text" 
-                    className="url-input" 
+                  <input
+                    type="text"
+                    className="url-input"
                     placeholder={activeTab === 'torrents' ? "Paste a magnet link or .torrent URL..." : "Paste a download URL..."}
                     value={url}
                     onChange={(e) => handleUrlChange(e.target.value)}
                   />
-                  <button 
-                    className="btn-primary" 
+                  <button
+                    className="btn-primary"
                     onClick={handleDownloadClick}
                     disabled={downloadBtnState === "checking"}
                   >
@@ -568,7 +578,7 @@ export default function App() {
                       const resp = await fetch(`${API_BASE}/select-path`);
                       const data = await resp.json();
                       if (data.path) setOutputPath(data.path + (url ? "" : "\\burst-download.bin"));
-                    } catch {}
+                    } catch { }
                   }} title="Browse directory">
                     <FolderOpen size={16} />
                   </button>
@@ -596,21 +606,21 @@ export default function App() {
                   if (activeTab === 'torrents') return st.type === 'torrent';
                   return st.type !== 'torrent';
                 }).length === 0 && (
-                  <div className="empty-state slide-in">
-                    <div className="empty-icon-wrapper">
-                      <Inbox size={32} strokeWidth={1.5} />
+                    <div className="empty-state slide-in">
+                      <div className="empty-icon-wrapper">
+                        <Inbox size={32} strokeWidth={1.5} />
+                      </div>
+                      <h3>No active {activeTab}</h3>
+                      <p>Paste a link above to start your first speed-bonded download.</p>
                     </div>
-                    <h3>No active {activeTab}</h3>
-                    <p>Paste a link above to start your first speed-bonded download.</p>
-                  </div>
-                )}
+                  )}
                 {activeJobs.filter(jid => {
                   const st = jobStatuses[jid];
                   if (!st) return false;
                   if (activeTab === 'torrents') return st.type === 'torrent';
                   return st.type !== 'torrent';
                 }).map(jid => (
-                  <DownloadCard 
+                  <DownloadCard
                     key={jid}
                     jid={jid}
                     status={jobStatuses[jid]}
@@ -623,7 +633,7 @@ export default function App() {
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ interface_ip: ip })
                       }).then(async r => {
-                          if (!r.ok) setToast(await r.text());
+                        if (!r.ok) setToast(await r.text());
                       });
                     }}
                     onCancel={() => {
@@ -713,20 +723,20 @@ export default function App() {
                       </td>
                       <td>
                         <div className="conn-actions">
-                           {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
-                           <button className="btn-small" onClick={() => {
-                              const val = prompt("Set bandwidth limit in MB/s (0 to remove):", bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024) : "");
-                              if (val !== null) {
-                                const num = parseFloat(val);
-                                if (num > 0) {
-                                  setBandwidthLimits({ ...bandwidthLimits, [iface.ip_address]: Math.round(num * 1024 * 1024) });
-                                } else {
-                                  const newLimits = { ...bandwidthLimits };
-                                  delete newLimits[iface.ip_address];
-                                  setBandwidthLimits(newLimits);
-                                }
+                          {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
+                          <button className="btn-small" onClick={() => {
+                            const val = prompt("Set bandwidth limit in MB/s (0 to remove):", bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024) : "");
+                            if (val !== null) {
+                              const num = parseFloat(val);
+                              if (num > 0) {
+                                setBandwidthLimits({ ...bandwidthLimits, [iface.ip_address]: Math.round(num * 1024 * 1024) });
+                              } else {
+                                const newLimits = { ...bandwidthLimits };
+                                delete newLimits[iface.ip_address];
+                                setBandwidthLimits(newLimits);
                               }
-                           }}>Set limit (MB/s)</button>
+                            }
+                          }}>Set limit (MB/s)</button>
                         </div>
                       </td>
                     </tr>
@@ -745,56 +755,56 @@ export default function App() {
                     fetch(`${API_BASE}/settings/reset`, { method: "POST" }).then(r => r.json()).then(d => {
                       setAppSettings(d.settings);
                       setToast("Settings reset to defaults.");
-                    }).catch(() => {});
+                    }).catch(() => { });
                   }}>Reset Defaults</button>
                   <button className="btn-primary-small" onClick={() => {
                     fetch(`${API_BASE}/settings`, {
                       method: "POST",
-                      headers: {"Content-Type": "application/json"},
-                      body: JSON.stringify({settings: appSettings})
-                    }).then(() => setToast("Settings saved.")).catch(() => {});
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ settings: appSettings })
+                    }).then(() => setToast("Settings saved.")).catch(() => { });
                   }}>Save Settings</button>
                 </div>
               </div>
               {!appSettings ? (
-                 <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Loading settings...</div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Loading settings...</div>
               ) : (
                 <div className="settings-grid">
                   <div className="settings-section-title">General</div>
-                <label className="setting-row">
-                  <span>Default Download Path</span>
-                  <div className="setting-input-wrap">
-                    <input 
-                      type="text" 
-                      style={{ width: '240px' }} 
-                      value={localStorage.getItem("burst_default_path") || "C:\\Downloads\\"} 
-                      onChange={(e) => {
-                        localStorage.setItem("burst_default_path", e.target.value);
-                        setToast("Default path updated");
-                      }} 
-                    />
-                    <button className="btn-small" onClick={() => handleBrowsePath(p => {
+                  <label className="setting-row">
+                    <span>Default Download Path</span>
+                    <div className="setting-input-wrap">
+                      <input
+                        type="text"
+                        style={{ width: '240px' }}
+                        value={localStorage.getItem("burst_default_path") || "C:\\Downloads\\"}
+                        onChange={(e) => {
+                          localStorage.setItem("burst_default_path", e.target.value);
+                          setToast("Default path updated");
+                        }}
+                      />
+                      <button className="btn-small" onClick={() => handleBrowsePath(p => {
                         localStorage.setItem("burst_default_path", p);
                         setToast("Default path updated");
-                    })}>Browse</button>
-                  </div>
-                </label>
-                <label className="setting-row">
-                  <span>Theme Mode</span>
-                  <div className="setting-input-wrap">
-                    <select 
-                      value={themeMode} 
-                      onChange={(e) => setThemeMode(e.target.value)}
-                      style={{ background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', padding: '4px', borderRadius: '4px' }}
-                    >
-                      <option value="dark">Always Dark</option>
-                      <option value="light">Always Light</option>
-                      <option value="system">System Preference</option>
-                    </select>
-                  </div>
-                </label>
+                      })}>Browse</button>
+                    </div>
+                  </label>
+                  <label className="setting-row">
+                    <span>Theme Mode</span>
+                    <div className="setting-input-wrap">
+                      <select
+                        value={themeMode}
+                        onChange={(e) => setThemeMode(e.target.value)}
+                        style={{ background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', padding: '4px', borderRadius: '4px' }}
+                      >
+                        <option value="dark">Always Dark</option>
+                        <option value="light">Always Light</option>
+                        <option value="system">System Preference</option>
+                      </select>
+                    </div>
+                  </label>
 
-                <div className="settings-section-title">Chunking</div>
+                  <div className="settings-section-title">Chunking</div>
                   {[
                     { key: "BASE_CHUNK_SIZE", label: "Chunk size", unit: "MB", divisor: 1048576, step: 1 },
                     { key: "MIN_CHUNK_SIZE", label: "Min chunk", unit: "KB", divisor: 1024, step: 64 },
@@ -806,19 +816,19 @@ export default function App() {
                         <span>{label}</span>
                         <div className="setting-input-wrap">
                           <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
-                              const raw = Number(e.target.value) * divisor;
-                              setAppSettings(prev => ({...prev, [key]: raw}));
-                            }} />
+                            const raw = Number(e.target.value) * divisor;
+                            setAppSettings(prev => ({ ...prev, [key]: raw }));
+                          }} />
                           <span className="setting-unit">{unit}</span>
                         </div>
                       </label>
                     );
                   })}
-                  
+
                   <div className="settings-section-title">Rebalancing</div>
                   {[
                     { key: "WEIGHT_REBALANCE_INTERVAL_SECONDS", label: "Rebalance interval", unit: "sec", divisor: 1, step: 1 },
-                    { key: "MIN_INTERFACE_SPEED_THRESHOLD", label: "Min speed threshold", unit: "KB/s", divisor: 1/1024, step: 10 },
+                    { key: "MIN_INTERFACE_SPEED_THRESHOLD", label: "Min speed threshold", unit: "KB/s", divisor: 1 / 1024, step: 10 },
                     { key: "SLOW_INTERFACE_GRACE_PERIOD", label: "Slow grace period", unit: "sec", divisor: 1, step: 1 },
                   ].map(({ key, label, unit, divisor, step }) => {
                     const displayVal = Math.round((appSettings[key] ?? 0) / divisor * 100) / 100;
@@ -827,22 +837,22 @@ export default function App() {
                         <span>{label}</span>
                         <div className="setting-input-wrap">
                           <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
-                              const raw = Number(e.target.value) * divisor;
-                              setAppSettings(prev => ({...prev, [key]: raw}));
-                            }} />
+                            const raw = Number(e.target.value) * divisor;
+                            setAppSettings(prev => ({ ...prev, [key]: raw }));
+                          }} />
                           <span className="setting-unit">{unit}</span>
                         </div>
                       </label>
                     );
                   })}
-                  
+
                 </div>
               )}
             </div>
           )}
         </main>
       </div>
-      
+
       {toast && (
         <div style={{ position: 'fixed', bottom: '24px', right: '32px', background: 'var(--text)', color: 'var(--bg)', padding: '8px 16px', borderRadius: '4px', fontSize: '13px', zIndex: 9999, animation: 'slideIn 0.2s ease' }}>
           {toast}
