@@ -113,6 +113,7 @@ class TorrentJob:
         self.magnet_uri = magnet_uri
         self.output_path = output_path
         self.interface_ips = list(interface_ips)
+        self.filename = self._extract_name(magnet_uri)
 
         self.status = "fetching_metadata"
         self.progress = 0.0
@@ -139,6 +140,7 @@ class TorrentJob:
     def to_dict(self) -> dict:
         return {
             "job_id": self.job_id,
+            "filename": self.filename,
             "type": "torrent",
             "progress": self.progress,
             "speed_combined": self.speed_combined,
@@ -155,6 +157,20 @@ class TorrentJob:
             "error": self.error,
             "interface_ips": self.interface_ips,
         }
+
+    def _extract_name(self, magnet_uri: str) -> str:
+        """Try to extract display name (&dn=) from magnet URI."""
+        try:
+            if "?" in magnet_uri:
+                import urllib.parse
+                qs = magnet_uri.split("?", 1)[1]
+                params = urllib.parse.parse_qs(qs)
+                names = params.get("dn", [])
+                if names:
+                    return names[0]
+        except:
+            pass
+        return "torrent"
 
     async def add_interface(self, ip: str, interface_name: str = "") -> dict:
         if any(s_ip == ip for s_ip, _ in self.sessions):

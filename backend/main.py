@@ -82,6 +82,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Burst API", version="0.2.0", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
+event_bus: Set[WebSocket] = set()
+
+async def broadcast_event(event_type: str, data: Any):
+    """Notify all global event listeners."""
+    message = {"type": event_type, "data": data}
+    disconnected = set()
+    for ws in event_bus:
+        try:
+            await ws.send_json(message)
+        except:
+            disconnected.add(ws)
+    for ws in disconnected:
+        event_bus.discard(ws)
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,14 +113,19 @@ def _interfaces_by_ip() -> Dict[str, Dict[str, Any]]:
 # Interface & speed endpoints
 # ---------------------------------------------------------------------------
 @app.get("/interfaces")
-async def interfaces() -> Dict[str, Any]:
+async def interfaces(benchmark: bool = True) -> Dict[str, Any]:
     base = get_active_interfaces_dict()
-    speed_data = await benchmark_interfaces(base)
-    by_ip = {str(item["ip_address"]): item for item in speed_data}
-    for interface in base:
-        matched = by_ip.get(str(interface["ip_address"]))
-        interface["speed_mb_s"] = matched.get("speed_mb_s", 0.0) if matched else 0.0
-        interface["speedtest_error"] = matched.get("error") if matched else None
+    if benchmark:
+        speed_data = await benchmark_interfaces(base)
+        by_ip = {str(item["ip_address"]): item for item in speed_data}
+        for interface in base:
+            matched = by_ip.get(str(interface["ip_address"]))
+            interface["speed_mb_s"] = matched.get("speed_mb_s", 0.0) if matched else 0.0
+            interface["speedtest_error"] = matched.get("error") if matched else None
+    else:
+        for interface in base:
+            interface["speed_mb_s"] = 0.0
+            interface["speedtest_error"] = None
     return {"interfaces": base, "count": len(base)}
 
 
@@ -138,6 +156,7 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="No valid interfaces selected")
     try:
         job = await manager.create_job(payload.url, payload.output_path, selected, payload.bandwidth_limits)
+        await broadcast_event("new_job", {"job_id": job.job_id})
         return {"job_id": job.job_id, "status": job.status}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -178,6 +197,33 @@ async def add_interfaces_to_job(job_id: str, payload: AddInterfacesRequest) -> D
     return {"status": "success", "added": len(selected), "results": results}
 
 
+@app.get("/active-jobs")
+async def get_active_jobs() -> Dict[str, Any]:
+    """Returns a list of all active (not completed/failed) job IDs."""
+    regular_ids = [jid for jid, job in manager.jobs.items() if job.status not in ("completed", "failed")]
+    torrent_ids = [jid for jid, job in active_torrents.items() if job.status not in ("completed", "failed")]
+    return {"job_ids": regular_ids + torrent_ids}
+
+
+@app.get("/history")
+async def get_history():
+    # Regular jobs
+    all_jobs = [j.to_dict() for j in manager.jobs.values()]
+    # Torrent jobs
+    all_jobs += [j.to_dict() for j in active_torrents.values()]
+    
+    # Filter: Only show completed or failed jobs, and skip internal pings
+    finished = [
+        j for j in all_jobs 
+        if j["status"] in ("completed", "failed") 
+        and j.get("filename") != "__ping__"
+    ]
+    
+    # Sort by finished_at desc
+    finished.sort(key=lambda x: x.get("finished_at", 0) or 0, reverse=True)
+    return {"history": finished}
+
+
 # ---------------------------------------------------------------------------
 # Settings endpoints
 # ---------------------------------------------------------------------------
@@ -214,6 +260,18 @@ async def select_path():
 # ---------------------------------------------------------------------------
 # WebSocket for real-time progress & Interface Hotplug Polling
 # ---------------------------------------------------------------------------
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket) -> None:
+    await websocket.accept()
+    event_bus.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        event_bus.discard(websocket)
+
 @app.websocket("/ws/{job_id}")
 async def websocket_progress(websocket: WebSocket, job_id: str) -> None:
     if job_id == "interfaces":
@@ -365,13 +423,13 @@ async def cancel_download(job_id: str) -> Dict[str, Any]:
     
     raise HTTPException(status_code=404, detail="Job not found")
 
-
 @app.post("/torrent/start")
 async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
     if not req.interface_ips:
         raise HTTPException(status_code=400, detail="No interfaces selected")
     try:
         job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, req.bandwidth_limits)
+        await broadcast_event("new_job", {"job_id": job.job_id})
         return {"job_id": job.job_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

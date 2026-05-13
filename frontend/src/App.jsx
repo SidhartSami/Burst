@@ -84,6 +84,29 @@ function readDroppedUrl(event) {
   return "";
 }
 
+function PromptModal({ isOpen, title, defaultValue, onConfirm, onCancel }) {
+  const [value, setValue] = useState(defaultValue);
+  if (!isOpen) return null;
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content slide-in">
+        <h3>{title}</h3>
+        <input 
+          autoFocus 
+          type="number" 
+          value={value} 
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && onConfirm(value)}
+        />
+        <div className="modal-actions">
+          <button className="btn-secondary" onClick={onCancel}>Cancel</button>
+          <button className="btn-primary" onClick={() => onConfirm(value)}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps }) {
   if (!status) return null;
 
@@ -227,6 +250,7 @@ export default function App() {
   const [editingOutputPath, setEditingOutputPath] = useState(false);
   const [bandwidthLimits, setBandwidthLimits] = useState({});
   const [appSettings, setAppSettings] = useState(null);
+  const [promptData, setPromptData] = useState(null); // { title, value, ip }
 
   const jobSocketsRef = useRef({});
 
@@ -241,13 +265,48 @@ export default function App() {
   }, [history]);
 
   useEffect(() => {
+    // 1. Restore local defaults immediately
     const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
     setBandwidthLimits(savedLimits);
     const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
     if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
 
-    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => setAppSettings(d.settings)).catch(() => { });
-    setActiveJobs([]);
+    // 2. Fetch settings from backend in background
+    fetch(`${API_BASE}/settings`)
+      .then(r => r.json())
+      .then(d => {
+        setAppSettings(d.settings);
+        if (d.settings.THEME_MODE) {
+          setThemeMode(d.settings.THEME_MODE);
+        }
+        if (d.settings.DEFAULT_DOWNLOAD_PATH && !url) {
+          setOutputPath(d.settings.DEFAULT_DOWNLOAD_PATH + "\\burst-download.bin");
+        }
+      })
+      .catch(() => { });
+    // 3. Listen for global events (like new downloads from extension)
+    const eventWsUrl = API_BASE.replace("http", "ws") + "/ws/events";
+    let eventWs = new WebSocket(eventWsUrl);
+    
+    eventWs.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "new_job") {
+        const jobId = msg.data.job_id;
+        setActiveJobs(prev => {
+          if (prev.includes(jobId)) return prev;
+          return [...prev, jobId];
+        });
+      }
+    };
+
+    // Reconnect logic
+    eventWs.onclose = () => {
+      setTimeout(() => {
+        // Simple reconnect logic would go here if needed
+      }, 5000);
+    };
+
+    return () => eventWs.close();
   }, []);
 
   useEffect(() => {
@@ -396,9 +455,15 @@ export default function App() {
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Failed to start");
-      setActiveJobs(prev => [...prev, data.job_id]);
-      setUrl("");
-      setActiveTab(isTorrent ? "torrents" : "downloads");
+      
+      if (data.job_id) {
+        setActiveJobs(prev => {
+          if (prev.includes(data.job_id)) return prev;
+          return [...prev, data.job_id];
+        });
+        setUrl("");
+        setActiveTab(isTorrent ? "torrents" : "downloads");
+      }
     } catch (err) {
       setToast(err.message);
     }
@@ -725,17 +790,11 @@ export default function App() {
                         <div className="conn-actions">
                           {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
                           <button className="btn-small" onClick={() => {
-                            const val = prompt("Set bandwidth limit in MB/s (0 to remove):", bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024) : "");
-                            if (val !== null) {
-                              const num = parseFloat(val);
-                              if (num > 0) {
-                                setBandwidthLimits({ ...bandwidthLimits, [iface.ip_address]: Math.round(num * 1024 * 1024) });
-                              } else {
-                                const newLimits = { ...bandwidthLimits };
-                                delete newLimits[iface.ip_address];
-                                setBandwidthLimits(newLimits);
-                              }
-                            }
+                            setPromptData({
+                              title: "Set bandwidth limit (MB/s)",
+                              ip: iface.ip_address,
+                              value: bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024).toString() : ""
+                            });
                           }}>Set limit (MB/s)</button>
                         </div>
                       </td>
@@ -777,15 +836,14 @@ export default function App() {
                       <input
                         type="text"
                         style={{ width: '240px' }}
-                        value={localStorage.getItem("burst_default_path") || "C:\\Downloads\\"}
+                        value={appSettings?.DEFAULT_DOWNLOAD_PATH || "C:\\Downloads"}
                         onChange={(e) => {
-                          localStorage.setItem("burst_default_path", e.target.value);
-                          setToast("Default path updated");
+                          setAppSettings({ ...appSettings, DEFAULT_DOWNLOAD_PATH: e.target.value });
                         }}
                       />
                       <button className="btn-small" onClick={() => handleBrowsePath(p => {
-                        localStorage.setItem("burst_default_path", p);
-                        setToast("Default path updated");
+                        setAppSettings({ ...appSettings, DEFAULT_DOWNLOAD_PATH: p });
+                        setToast("Path selected. Remember to Save Settings.");
                       })}>Browse</button>
                     </div>
                   </label>
@@ -794,7 +852,17 @@ export default function App() {
                     <div className="setting-input-wrap">
                       <select
                         value={themeMode}
-                        onChange={(e) => setThemeMode(e.target.value)}
+                        onChange={(e) => {
+                          const newMode = e.target.value;
+                          setThemeMode(newMode);
+                          setAppSettings(prev => ({ ...prev, THEME_MODE: newMode }));
+                          // Auto-save theme preference to backend instantly
+                          fetch(`${API_BASE}/settings`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ settings: { ...appSettings, THEME_MODE: newMode } })
+                          }).catch(() => {});
+                        }}
                         style={{ background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', padding: '4px', borderRadius: '4px' }}
                       >
                         <option value="dark">Always Dark</option>
@@ -858,6 +926,25 @@ export default function App() {
           {toast}
         </div>
       )}
+
+      <PromptModal 
+        isOpen={!!promptData}
+        title={promptData?.title}
+        defaultValue={promptData?.value}
+        onCancel={() => setPromptData(null)}
+        onConfirm={(val) => {
+          const num = parseFloat(val);
+          const ip = promptData.ip;
+          if (num > 0) {
+            setBandwidthLimits({ ...bandwidthLimits, [ip]: Math.round(num * 1024 * 1024) });
+          } else {
+            const newLimits = { ...bandwidthLimits };
+            delete newLimits[ip];
+            setBandwidthLimits(newLimits);
+          }
+          setPromptData(null);
+        }}
+      />
     </div>
   );
 }

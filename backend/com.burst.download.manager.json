@@ -1,0 +1,9 @@
+{
+  "name": "com.burst.download.manager",
+  "description": "Burst Download Manager Native Messaging Host",
+  "path": "C:\\Coding\\Burst\\backend\\native_host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://efabfdfagodpbamahbbchalepgdlllho/"
+  ]
+}
