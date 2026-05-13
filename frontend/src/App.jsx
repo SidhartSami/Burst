@@ -218,7 +218,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("downloads");
+  const [activeTab, setActiveTab] = useState("active");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [themeMode, setThemeMode] = useState(() => localStorage.getItem("burst_theme_mode") || "dark");
   const isDarkMode = themeMode === "dark" || (themeMode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -279,8 +279,8 @@ export default function App() {
         if (d.settings.THEME_MODE) {
           setThemeMode(d.settings.THEME_MODE);
         }
-        if (d.settings.DEFAULT_DOWNLOAD_PATH && !url) {
-          setOutputPath(d.settings.DEFAULT_DOWNLOAD_PATH + "\\burst-download.bin");
+        if (d.settings.DOWNLOAD_PATH && !url) {
+          setOutputPath(d.settings.DOWNLOAD_PATH);
         }
       })
       .catch(() => { });
@@ -322,12 +322,23 @@ export default function App() {
 
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
-    const isTorrent = newUrl.trim().startsWith("magnet:?") || newUrl.trim().endsWith(".torrent");
+    const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent");
+    // Helper to get directory only
+    const getBaseDir = () => {
+      if (outputPath) {
+        const parts = outputPath.split(/[\\\/]/);
+        parts.pop();
+        return parts.join("\\") + "\\";
+      }
+      return "C:\\Downloads\\";
+    };
+
+    const baseDir = getBaseDir();
+
     if (isTorrent) {
       const magnetNameMatch = newUrl.match(/dn=([^&]+)/);
       const magnetName = magnetNameMatch ? decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, ' ') : "torrent-download";
-      const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
-      setOutputPath(savedPath + magnetName);
+      setOutputPath(baseDir + magnetName);
       return;
     }
     try {
@@ -337,13 +348,13 @@ export default function App() {
         const segments = pathname.split("/");
         const lastSegment = segments[segments.length - 1];
         if (lastSegment && !lastSegment.includes("?") && lastSegment.includes(".")) {
-          setOutputPath(`C:\\Downloads\\${lastSegment}`);
+          setOutputPath(baseDir + lastSegment);
           return;
         }
       }
-      setOutputPath("C:\\Downloads\\burst-download.bin");
+      setOutputPath(baseDir + "burst-download.bin");
     } catch {
-      setOutputPath("C:\\Downloads\\burst-download.bin");
+      setOutputPath(baseDir + "burst-download.bin");
     }
   };
 
@@ -462,7 +473,7 @@ export default function App() {
           return [...prev, data.job_id];
         });
         setUrl("");
-        setActiveTab(isTorrent ? "torrents" : "downloads");
+        setActiveTab("active");
       }
     } catch (err) {
       setToast(err.message);
@@ -588,11 +599,8 @@ export default function App() {
       <div className={`main-layout ${isSidebarCollapsed ? 'collapsed' : ''}`}>
         <aside className="sidebar">
           <div className="nav-list" style={{ marginTop: '12px' }}>
-            <button className={`nav-item ${activeTab === 'downloads' ? 'active' : ''}`} onClick={() => setActiveTab('downloads')} title="Downloads">
-              <Download size={16} /> {!isSidebarCollapsed && "Downloads"}
-            </button>
-            <button className={`nav-item ${activeTab === 'torrents' ? 'active' : ''}`} onClick={() => setActiveTab('torrents')} title="Torrents">
-              <Magnet size={16} /> {!isSidebarCollapsed && "Torrents"}
+            <button className={`nav-item ${activeTab === 'active' ? 'active' : ''}`} onClick={() => setActiveTab('active')} title="Active Downloads">
+              <Download size={16} /> {!isSidebarCollapsed && "Active"}
             </button>
             <button className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')} title="History">
               <History size={16} /> {!isSidebarCollapsed && "History"}
@@ -616,14 +624,14 @@ export default function App() {
         </aside>
 
         <main className="content-area">
-          {(activeTab === 'downloads' || activeTab === 'torrents') && (
+          {activeTab === 'active' && (
             <>
               <div className="top-controls">
                 <div className="input-group">
                   <input
                     type="text"
                     className="url-input"
-                    placeholder={activeTab === 'torrents' ? "Paste a magnet link or .torrent URL..." : "Paste a download URL..."}
+                    placeholder="Paste a URL, magnet link, or .torrent..."
                     value={url}
                     onChange={(e) => handleUrlChange(e.target.value)}
                   />
@@ -664,13 +672,8 @@ export default function App() {
               </div>
 
               <div className="content-body">
-                <div className="section-label">Active {activeTab === 'torrents' ? 'Torrents' : 'Downloads'}</div>
-                {activeJobs.filter(jid => {
-                  const st = jobStatuses[jid];
-                  if (!st) return false;
-                  if (activeTab === 'torrents') return st.type === 'torrent';
-                  return st.type !== 'torrent';
-                }).length === 0 && (
+                <div className="section-label">Active Downloads</div>
+                {activeJobs.length === 0 && (
                     <div className="empty-state slide-in">
                       <div className="empty-icon-wrapper">
                         <Inbox size={32} strokeWidth={1.5} />
@@ -679,12 +682,7 @@ export default function App() {
                       <p>Paste a link above to start your first speed-bonded download.</p>
                     </div>
                   )}
-                {activeJobs.filter(jid => {
-                  const st = jobStatuses[jid];
-                  if (!st) return false;
-                  if (activeTab === 'torrents') return st.type === 'torrent';
-                  return st.type !== 'torrent';
-                }).map(jid => (
+                {activeJobs.map(jid => (
                   <DownloadCard
                     key={jid}
                     jid={jid}
@@ -711,11 +709,10 @@ export default function App() {
                 ))}
 
                 {/* Recently Completed Section */}
-                {history.filter(h => activeTab === 'torrents' ? h.type === 'torrent' : h.type !== 'torrent').length > 0 && (
+                {history.length > 0 && (
                   <div className="recent-completed-section">
                     <div className="section-label">Recently Completed</div>
                     {history
-                      .filter(h => activeTab === 'torrents' ? h.type === 'torrent' : h.type !== 'torrent')
                       .slice(0, 3)
                       .map(item => (
                         <div className="completed-row mini" key={item.id}>

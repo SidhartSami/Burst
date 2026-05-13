@@ -112,7 +112,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "CHECK_STATUS") {
     chrome.runtime.sendNativeMessage(
       NATIVE_HOST,
-      { url: "__ping__" },
+      { url: "BURST_INTERNAL_CHECK" },
       (response) => {
         // Any response (even an error about __ping__) means the host is alive
         const alive = !chrome.runtime.lastError;
