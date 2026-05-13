@@ -25,8 +25,15 @@ from requests.adapters import HTTPAdapter
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from urllib3.poolmanager import PoolManager
 
-from merger import cleanup_chunks, merge_chunks
 import config
+from merger import cleanup_chunks, merge_chunks
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive"
+}
 
 
 @dataclass
@@ -132,7 +139,7 @@ def _build_connector(local_ip: str) -> aiohttp.TCPConnector:
 async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str, Any]:
     connector = _build_connector(preferred_ip) if preferred_ip else None
     timeout = aiohttp.ClientTimeout(total=config.get("REQUEST_TIMEOUT_SECONDS"))
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=BROWSER_HEADERS) as session:
         async with session.head(url, allow_redirects=True) as response:
             response.raise_for_status()
             total_size = int(response.headers.get("Content-Length", "0"))
@@ -188,7 +195,7 @@ class DownloadManager:
         try:
             connector = _build_connector(interface_ip)
             timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=BROWSER_HEADERS) as session:
                 start = time.perf_counter()
                 async with session.head(url, allow_redirects=True) as _:
                     pass
@@ -863,8 +870,13 @@ class DownloadManager:
                 response = None
                 for candidate_url in request_urls:
                     try:
+                        # Merge range headers with browser headers
+                        merged_headers = dict(BROWSER_HEADERS)
+                        if headers:
+                            merged_headers.update(headers)
+                            
                         response = session.get(
-                            candidate_url, headers=headers or {},
+                            candidate_url, headers=merged_headers,
                             stream=True, timeout=30,
                             allow_redirects=True, verify=False,
                         )

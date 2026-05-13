@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" width="120" height="120" alt="Burst Logo">
+  <img src="assets/logo.png" width="120" height="120" alt="Burst Logo">
   <h1>Burst</h1>
   <p><strong>The High-Performance Multi-Interface Download Manager</strong></p>
   
@@ -27,7 +27,7 @@
 ## 🚀 Getting Started
 
 ### Installation
-1. Go to the [Releases](https://github.com/YOUR_USERNAME/Burst/releases) page.
+1. Go to the [Releases](https://github.com/SidhartSami/Burst/releases) page.
 2. Download `Burst_Setup_v1.0.exe`.
 3. Run the installer and launch Burst!
 
@@ -35,7 +35,7 @@
 If you want to build Burst from source:
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/Burst.git
+git clone https://github.com/SidhartSami/Burst.git
 
 # Install Backend Dependencies
 pip install -r backend/requirements.txt
