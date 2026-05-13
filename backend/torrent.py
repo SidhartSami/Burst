@@ -21,7 +21,8 @@ def _find_free_port() -> int:
 
 def _make_settings(ip: Optional[str] = None) -> dict:
     base = {
-        "user_agent": "burst/0.2",
+        "user_agent": "qBittorrent/4.6.3",
+        "peer_fingerprint": f"-qB4630-{str(uuid.uuid4())[:6]}", # Unique per session
         "enable_dht": True,
         "enable_lsd": True,
         "enable_natpmp": True,
@@ -30,19 +31,23 @@ def _make_settings(ip: Optional[str] = None) -> dict:
             "router.bittorrent.com:6881,"
             "router.utorrent.com:6881,"
             "dht.transmissionbt.com:6881,"
-            "dht.aelitis.com:6881"
+            "dht.aelitis.com:6881,"
+            "router.bitcomet.com:6881,"
+            "dht.libtorrent.org:25401"
         ),
-        "connection_speed": 20,
-        "num_want": 200,
-        "request_timeout": 10,
-        "peer_timeout": 20,
-        "min_reconnect_time": 3,
-        "min_announce_interval": 5,
+        "connection_speed": 50,
+        "num_want": 300,
+        "request_timeout": 20,
+        "peer_timeout": 30,
+        "min_reconnect_time": 2,
+        "min_announce_interval": 3,
         "announce_to_all_tiers": True,
         "announce_to_all_trackers": True,
     }
     if ip:
-        base["listen_interfaces"] = f"{ip}:{_find_free_port()}"
+        # IPv6 requires brackets in listen_interfaces
+        listen_ip = f"[{ip}]" if ":" in ip else ip
+        base["listen_interfaces"] = f"{listen_ip}:{_find_free_port()}"
         base["outgoing_interfaces"] = ip
     else:
         base["listen_interfaces"] = f"0.0.0.0:{_find_free_port()}"
@@ -274,6 +279,9 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     meta_ses.add_dht_router("router.bittorrent.com", 6881)
     meta_ses.add_dht_router("router.utorrent.com", 6881)
     meta_ses.add_dht_router("dht.transmissionbt.com", 6881)
+    meta_ses.add_dht_router("dht.aelitis.com", 6881)
+    meta_ses.add_dht_router("router.bitcomet.com", 6881)
+    meta_ses.add_dht_router("dht.libtorrent.org", 25401)
 
     job._meta_session = meta_ses
 

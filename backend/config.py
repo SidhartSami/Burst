@@ -8,6 +8,7 @@ via the settings API (persisted to burst_settings.json).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -85,7 +86,7 @@ _DEFAULTS: Dict[str, Any] = {
     "SPEEDTEST_URL": SPEEDTEST_URL,
     "SPEEDTEST_TIMEOUT": SPEEDTEST_TIMEOUT,
     "HTTP_HANDLER_SIZE_THRESHOLD": HTTP_HANDLER_SIZE_THRESHOLD,
-    "DEFAULT_DOWNLOAD_PATH": "C:\\Downloads",
+    "DOWNLOAD_PATH": os.path.join(os.path.expanduser("~"), "Downloads", "burst-download.bin"),
     "THEME_MODE": "dark",
 }
 

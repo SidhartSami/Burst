@@ -25,6 +25,7 @@ from interfaces import get_active_interfaces_dict
 from torrent import start_torrent_download, active_torrents
 from speedtest import benchmark_interfaces
 import config
+from history_manager import load_history, save_to_history
 from setup_utils import apply_firewall_rules
 from contextlib import asynccontextmanager
 import tkinter as tk
@@ -150,14 +151,32 @@ async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
 
 @app.post("/download")
 async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
+    # Auto-detect download type
+    is_torrent = payload.url.startswith("magnet:") or payload.url.lower().endswith(".torrent")
+    
+    if is_torrent:
+        try:
+            job = await start_torrent_download(payload.url, payload.output_path, payload.interface_ips, payload.bandwidth_limits)
+            # Only broadcast if it's not an internal check (though pings usually aren't magnets)
+            if "BURST_INTERNAL_CHECK" not in payload.url:
+                await broadcast_event("new_job", {"job_id": job.job_id})
+            return {"job_id": job.job_id, "status": job.status, "type": "torrent"}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Regular multi-interface downloader
     all_ifaces = _interfaces_by_ip()
     selected = [all_ifaces[ip] for ip in payload.interface_ips if ip in all_ifaces]
     if not selected:
         raise HTTPException(status_code=400, detail="No valid interfaces selected")
     try:
         job = await manager.create_job(payload.url, payload.output_path, selected, payload.bandwidth_limits)
-        await broadcast_event("new_job", {"job_id": job.job_id})
-        return {"job_id": job.job_id, "status": job.status}
+        
+        # Don't notify UI about internal health checks
+        if "BURST_INTERNAL_CHECK" not in payload.url:
+            await broadcast_event("new_job", {"job_id": job.job_id})
+            
+        return {"job_id": job.job_id, "status": job.status, "type": "download"}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -199,29 +218,44 @@ async def add_interfaces_to_job(job_id: str, payload: AddInterfacesRequest) -> D
 
 @app.get("/active-jobs")
 async def get_active_jobs() -> Dict[str, Any]:
-    """Returns a list of all active (not completed/failed) job IDs."""
-    regular_ids = [jid for jid, job in manager.jobs.items() if job.status not in ("completed", "failed")]
+    """Returns a list of all active (not completed/failed) job IDs, excluding system pings."""
+    regular_ids = [
+        jid for jid, job in manager.jobs.items() 
+        if job.status not in ("completed", "failed")
+        and "BURST_INTERNAL_CHECK" not in job.url
+    ]
     torrent_ids = [jid for jid, job in active_torrents.items() if job.status not in ("completed", "failed")]
     return {"job_ids": regular_ids + torrent_ids}
 
 
 @app.get("/history")
 async def get_history():
-    # Regular jobs
-    all_jobs = [j.to_dict() for j in manager.jobs.values()]
-    # Torrent jobs
-    all_jobs += [j.to_dict() for j in active_torrents.values()]
+    # 1. Start with the persistent history from disk
+    all_history = load_history()
     
-    # Filter: Only show completed or failed jobs, and skip internal pings
-    finished = [
-        j for j in all_jobs 
+    # 2. Get current session jobs (regular and torrents)
+    current_jobs = [j.to_dict() for j in manager.jobs.values()]
+    current_jobs += [j.to_dict() for j in active_torrents.values()]
+    
+    # Filter: Only completed or failed jobs, skip system checks
+    finished_current = [
+        j for j in current_jobs 
         if j["status"] in ("completed", "failed") 
-        and j.get("filename") != "__ping__"
+        and j.get("filename") != "BURST_INTERNAL_CHECK"
+        and "BURST_INTERNAL_CHECK" not in (j.get("url") or "")
     ]
     
+    # 3. Merge them (disk history + current finished jobs)
+    # Using job_id to avoid duplicates
+    existing_ids = {item.get("job_id") for item in all_history}
+    for j in finished_current:
+        if j.get("job_id") not in existing_ids:
+            all_history.append(j)
+            save_to_history(j) # Persist it immediately if it's new
+            
     # Sort by finished_at desc
-    finished.sort(key=lambda x: x.get("finished_at", 0) or 0, reverse=True)
-    return {"history": finished}
+    all_history.sort(key=lambda x: x.get("finished_at", 0) or 0, reverse=True)
+    return {"history": all_history}
 
 
 # ---------------------------------------------------------------------------

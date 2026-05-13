@@ -139,14 +139,55 @@ def _build_connector(local_ip: str) -> aiohttp.TCPConnector:
 async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str, Any]:
     connector = _build_connector(preferred_ip) if preferred_ip else None
     timeout = aiohttp.ClientTimeout(total=config.get("REQUEST_TIMEOUT_SECONDS"))
+    
     async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=BROWSER_HEADERS) as session:
-        async with session.head(url, allow_redirects=True) as response:
-            response.raise_for_status()
-            total_size = int(response.headers.get("Content-Length", "0"))
-            supports_ranges = "bytes" in response.headers.get("Accept-Ranges", "").lower()
-            content_type = response.headers.get("Content-Type", "application/octet-stream")
+        # Try Stage 1: HEAD (Fastest)
+        try:
+            async with session.head(url, allow_redirects=True) as resp:
+                if resp.status < 400:
+                    total_size = int(resp.headers.get("Content-Length", "0"))
+                    supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
+                    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                    return {
+                        "url": str(resp.url),
+                        "content_length": total_size,
+                        "supports_ranges": supports_ranges,
+                        "content_type": content_type,
+                    }
+        except:
+            pass
+
+        # Try Stage 2: GET with Range (To check resume support)
+        try:
+            headers = dict(BROWSER_HEADERS)
+            headers["Range"] = "bytes=0-0"
+            async with session.get(url, allow_redirects=True, headers=headers) as resp:
+                if resp.status < 400:
+                    content_range = resp.headers.get("Content-Range", "")
+                    if "/" in content_range:
+                        total_size = int(content_range.split("/")[-1])
+                    else:
+                        total_size = int(resp.headers.get("Content-Length", "0"))
+                    
+                    supports_ranges = resp.status == 206 or "bytes" in resp.headers.get("Accept-Ranges", "").lower()
+                    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                    return {
+                        "url": str(resp.url),
+                        "content_length": total_size,
+                        "supports_ranges": supports_ranges,
+                        "content_type": content_type,
+                    }
+        except:
+            pass
+
+        # Try Stage 3: Super-Basic GET (Final Fallback)
+        async with session.get(url, allow_redirects=True) as resp:
+            resp.raise_for_status()
+            total_size = int(resp.headers.get("Content-Length", "0"))
+            supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
             return {
-                "url": str(response.url),
+                "url": str(resp.url),
                 "content_length": total_size,
                 "supports_ranges": supports_ranges,
                 "content_type": content_type,
@@ -180,6 +221,12 @@ class DownloadManager:
             final_path = f"{base}({counter}){ext}"
 
         job_id = str(uuid.uuid4())
+        # Ensure directory exists
+        try:
+            Path(final_path).parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"[MANAGER] Could not create directory: {e}")
+
         job = DownloadJob(job_id=job_id, url=url, output_path=final_path, bandwidth_limits=bandwidth_limits or {})
         self.jobs[job_id] = job
         self._locks[job_id] = asyncio.Lock()
