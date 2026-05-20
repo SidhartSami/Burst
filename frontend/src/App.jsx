@@ -94,26 +94,37 @@ function readDroppedUrl(event) {
   return "";
 }
 
-function PromptModal({ isOpen, title, defaultValue, onConfirm, onCancel }) {
+function PromptModal({ isOpen, title, hint, defaultValue, onConfirm, onCancel }) {
   const [value, setValue] = useState(defaultValue);
   if (!isOpen) return null;
   return (
     <div className="modal-overlay">
       <div className="modal-content slide-in">
         <h3>{title}</h3>
-        <input 
-          autoFocus 
-          type="number" 
-          value={value} 
+        <input
+          autoFocus
+          type="number"
+          value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && onConfirm(value)}
         />
+        {hint && <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>{hint}</div>}
         <div className="modal-actions">
           <button className="btn-secondary" onClick={onCancel}>Cancel</button>
           <button className="btn-primary" onClick={() => onConfirm(value)}>OK</button>
         </div>
       </div>
     </div>
+  );
+}
+
+function InfoTooltip({ text }) {
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', marginLeft: '4px' }}
+      className="info-tooltip-wrap">
+      <span className="info-tooltip-icon">ℹ</span>
+      <span className="info-tooltip-box">{text}</span>
+    </span>
   );
 }
 
@@ -129,6 +140,8 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
     : Object.values(status.interfaces || {});
 
   const [isOptimistic, setIsOptimistic] = useState(null);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const isDone = status.status === 'completed' || status.status === 'failed';
 
   const activeIfaces = status.type === "torrent"
     ? (status.interface_ips || []).length
@@ -140,7 +153,6 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
   const pct = Math.min(100, ((status.total_downloaded || 0) / Math.max(1, status.expected_size || 1)) * 100);
 
-  // Force speed to 0 if paused to avoid unprofessional jitter/rolling averages
   const speedRaw = status.type === "torrent"
     ? (status.speed_combined || 0) / (1024 * 1024)
     : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
@@ -148,22 +160,50 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
   const combinedCurrentSpeed = isPaused ? 0 : speedRaw;
   const eta = (!isPaused && combinedCurrentSpeed > 0) ? (status.expected_size - status.total_downloaded) / (combinedCurrentSpeed * 1024 * 1024) : 0;
 
+  const handleCancelClick = () => {
+    if (isDone) { onCancel(); return; }  // completed/failed — no confirmation needed
+    setConfirmingCancel(true);
+  };
+
   return (
     <div className="dl-card slide-in">
+      {/* Top row: filename + badge (left) | speed + buttons (right) */}
       <div className="dl-card-top">
         <div className="dl-title-row">
           <div className="dl-filename">{status.output_path?.split(/[\\/]/).pop() || "download.bin"}</div>
           <div className={`status-badge ${statusClass}`}>{statusLabel}</div>
         </div>
+
         <div className="dl-actions">
-          {status.status === 'downloading' && status.type !== 'torrent' && (
-            <button className="action-btn" onClick={onPause} title="Pause"><Pause size={16} /></button>
+          {!confirmingCancel && !isDone && combinedCurrentSpeed > 0 && (
+            <div className="dl-speed">{formatSpeed(combinedCurrentSpeed)}</div>
           )}
-          {(status.status === 'paused' || status.status === 'waiting_reconnect') && (
-            <button className="action-btn" onClick={onResume} title="Resume"><Play size={16} /></button>
+
+          {confirmingCancel ? (
+            <>
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Cancel?</span>
+              <button
+                className="action-btn"
+                style={{ background: 'var(--danger)', color: '#fff', padding: '2px 10px', borderRadius: '4px', fontSize: '12px', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                onClick={onCancel}
+              >Yes</button>
+              <button
+                className="action-btn"
+                style={{ background: 'transparent', color: 'var(--text-muted)', padding: '2px 8px', borderRadius: '4px', fontSize: '12px', border: '1px solid var(--border)', cursor: 'pointer' }}
+                onClick={() => setConfirmingCancel(false)}
+              >Keep</button>
+            </>
+          ) : (
+            <>
+              {status.status === 'downloading' && status.type !== 'torrent' && (
+                <button className="action-btn" onClick={onPause} title="Pause"><Pause size={15} /></button>
+              )}
+              {(status.status === 'paused' || status.status === 'waiting_reconnect') && (
+                <button className="action-btn" onClick={onResume} title="Resume"><Play size={15} /></button>
+              )}
+              <button className="action-btn" onClick={handleCancelClick} title="Dismiss"><X size={15} /></button>
+            </>
           )}
-          <button className="action-btn" onClick={onCancel} title="Cancel"><X size={16} /></button>
-          <div className="dl-speed">{formatSpeed(combinedCurrentSpeed)}</div>
         </div>
       </div>
 
@@ -176,19 +216,14 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
             isSelected = status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
             if (isSelected) {
               const speedBytes = status.speeds?.[iface.ip_address] || 0;
-              live = {
-                status: 'downloading',
-                speed_mb_s: speedBytes / (1024 * 1024)
-              };
+              live = { status: 'downloading', speed_mb_s: speedBytes / (1024 * 1024) };
             }
           } else {
             live = status.interfaces?.[iface.ip_address];
             isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
           }
 
-          if (isOptimistic && isOptimistic.ip === iface.ip_address) {
-            isSelected = isOptimistic.selected;
-          }
+          if (isOptimistic && isOptimistic.ip === iface.ip_address) isSelected = isOptimistic.selected;
 
           const speed = isPaused ? 0 : (live?.speed_mb_s || 0);
           const tone = toneFor(shortName(iface.name, iface.interface_type));
@@ -199,11 +234,9 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
               key={iface.ip_address}
               className={`iface-pill ${isSelected ? 'active' : ''}`}
               onClick={() => {
-                if (status.status === 'completed' || status.status === 'failed') return;
+                if (isDone) return;
                 setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
-                onToggle(iface.ip_address, isSelected).finally(() => {
-                  setTimeout(() => setIsOptimistic(null), 1000);
-                });
+                onToggle(iface.ip_address, isSelected).finally(() => { setTimeout(() => setIsOptimistic(null), 1000); });
               }}
             >
               <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
@@ -226,7 +259,6 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
     </div>
   );
 }
-
 export default function App() {
   const [activeTab, setActiveTab] = useState("active");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -237,7 +269,7 @@ export default function App() {
   const [renderedInterfaces, setRenderedInterfaces] = useState([]);
   const [selectedIps, setSelectedIps] = useState([]);
   const [url, setUrl] = useState("");
-  const [outputPath, setOutputPath] = useState("C:\\Downloads\\burst-download.bin");
+  const [outputPath, setOutputPath] = useState("C:/Burst-Downloads/burst-download.bin");
   const [activeJobs, setActiveJobs] = useState([]);
   const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState(() => {
@@ -278,7 +310,7 @@ export default function App() {
     // 1. Restore local defaults immediately
     const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
     setBandwidthLimits(savedLimits);
-    const savedPath = localStorage.getItem("burst_default_path") || "C:\\Downloads\\";
+    const savedPath = localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/";
     if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
 
     // 2. Fetch settings from backend in background
@@ -320,19 +352,25 @@ export default function App() {
         if (d.history && d.history.length > 0) {
           setHistory(prev => {
             if (prev.length > 0) return prev; // already have local history — don't stomp
-            return d.history.map(item => ({
-              id: item.job_id || item.id || crypto.randomUUID(),
-              filename: item.filename || item.output_path?.split(/[\\/]/).pop() || "download.bin",
-              path: item.output_path || item.path || "Unknown path",
-              size: item.total_downloaded || item.size || 0,
-              avgSpeed: item.speed_combined || item.avgSpeed || 0,
-              time_saved: item.time_saved || 0,
-              status: item.status || "completed",
-              timestamp: item.finished_at
-                ? new Date(item.finished_at * 1000).toLocaleString()
-                : (item.timestamp || new Date().toLocaleString()),
-              type: item.type || "download"
-            })).slice(0, 50);
+            return d.history.map(item => {
+              const duration = Math.max(0, (item.finished_at || 0) - (item.started_at || 0));
+              const computedAvgSpeed = duration > 0
+                ? (item.total_downloaded || item.size || 0) / duration
+                : (item.avgSpeed || item.speed_combined || 0); // fallback for old history entries
+              return {
+                id: item.job_id || item.id || crypto.randomUUID(),
+                filename: item.filename || item.output_path?.split(/[\\/]/).pop() || "download.bin",
+                path: item.output_path || item.path || "Unknown path",
+                size: item.total_downloaded || item.size || 0,
+                avgSpeed: computedAvgSpeed,
+                time_saved: item.time_saved || 0,
+                status: item.status || "completed",
+                timestamp: item.finished_at
+                  ? new Date(item.finished_at * 1000).toLocaleString()
+                  : (item.timestamp || new Date().toLocaleString()),
+                type: item.type || "download"
+              };
+            }).slice(0, 50);
           });
         }
       })
@@ -384,7 +422,7 @@ export default function App() {
         parts.pop();
         return parts.join("\\") + "\\";
       }
-      return "C:\\Downloads\\";
+      return "C:/Burst-Downloads/";
     };
 
     const baseDir = getBaseDir();
@@ -440,12 +478,19 @@ export default function App() {
   };
 
   const mergeInterfacesForUi = (incoming) => {
+    // Deduplicate incoming by ip_address first — keeps last entry per IP
+    const deduped = Object.values(
+      incoming.reduce((acc, iface) => { acc[iface.ip_address] = iface; return acc; }, {})
+    );
     setRenderedInterfaces((prev) => {
-      const nextMap = new Map(incoming.map((item) => [item.ip_address, item]));
+      const nextMap = new Map(deduped.map((item) => [item.ip_address, item]));
       const prevMap = new Map(prev.map((item) => [item.ip_address, item]));
       const merged = [];
+      const seen = new Set();
 
       for (const oldItem of prev) {
+        if (seen.has(oldItem.ip_address)) continue; // skip duplicates from prev
+        seen.add(oldItem.ip_address);
         const fresh = nextMap.get(oldItem.ip_address);
         if (!fresh) {
           if (!oldItem.exiting) merged.push({ ...oldItem, exiting: true, entering: false });
@@ -455,7 +500,7 @@ export default function App() {
         merged.push({ ...oldItem, ...fresh, entering: false, exiting: false });
       }
 
-      for (const fresh of incoming) {
+      for (const fresh of deduped) {
         if (!prevMap.has(fresh.ip_address)) {
           merged.push({ ...fresh, entering: true, exiting: false, speedFlash: false });
         }
@@ -575,12 +620,14 @@ export default function App() {
           setJobStatuses(prev => ({ ...prev, [id]: payload }));
           if (payload.status === "completed" || payload.status === "failed") {
             const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
+            // speed_combined is the live speed, zeroed at completion — compute true avg from bytes/time
+            const computedAvgSpeed = duration > 0 ? (payload.total_downloaded || 0) / duration : 0;
             const historyItem = {
               id: payload.job_id || crypto.randomUUID(),
               filename: payload.output_path?.split(/[\\/]/).pop() || "download.bin",
               path: payload.output_path || "Unknown path",
               size: payload.total_downloaded,
-              avgSpeed: payload.speed_combined || 0,
+              avgSpeed: computedAvgSpeed,
               time_saved: payload.time_saved || 0,
               status: payload.status,
               timestamp: new Date().toLocaleString(),
@@ -773,7 +820,16 @@ export default function App() {
                           {item.status === 'failed' ? <AlertCircle size={14} color="var(--danger)" /> : <CheckCircle2 size={14} color="var(--success)" />}
                           <div className="completed-filename">{item.filename}</div>
                           <div className="completed-meta">
-                            <span>{formatBytes(item.size)}</span>
+                            <span style={{
+                              display: 'inline-block',
+                              background: 'var(--surface-raised, var(--surface))',
+                              border: '1px solid var(--border)',
+                              borderRadius: '4px',
+                              padding: '1px 6px',
+                              fontSize: '11px',
+                              fontVariantNumeric: 'tabular-nums',
+                              color: 'var(--text-muted)'
+                            }}>{formatBytes(item.size)}</span>
                           </div>
                         </div>
                       ))
@@ -834,6 +890,9 @@ export default function App() {
                           <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
                         </div>
                       </td>
+                      <td style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace', paddingRight: '16px' }}>
+                        {iface.ip_address}
+                      </td>
                       <td className="conn-speed">
                         {iface.speed_mb_s ? `${iface.speed_mb_s.toFixed(2)} MB/s` : '0.00 MB/s'}
                       </td>
@@ -843,6 +902,7 @@ export default function App() {
                           <button className="btn-small" onClick={() => {
                             setPromptData({
                               title: "Set bandwidth limit (MB/s)",
+                              hint: "Enter 0 to remove the limit (unlimited).",
                               ip: iface.ip_address,
                               value: bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024).toString() : ""
                             });
@@ -881,19 +941,21 @@ export default function App() {
               ) : (
                 <div className="settings-grid">
                   <div className="settings-section-title">General</div>
+
+                  {/* DEFAULT DOWNLOAD PATH */}
                   <label className="setting-row">
                     <span>Default Download Path</span>
                     <div className="setting-input-wrap">
                       <input
                         type="text"
                         style={{ width: '240px' }}
-                        value={appSettings?.DEFAULT_DOWNLOAD_PATH || "C:\\Downloads"}
+                        value={appSettings?.DOWNLOAD_PATH || "C:/Burst-Downloads"}
                         onChange={(e) => {
-                          setAppSettings({ ...appSettings, DEFAULT_DOWNLOAD_PATH: e.target.value });
+                          setAppSettings({ ...appSettings, DOWNLOAD_PATH: e.target.value });
                         }}
                       />
                       <button className="btn-small" onClick={() => handleBrowsePath(p => {
-                        setAppSettings({ ...appSettings, DEFAULT_DOWNLOAD_PATH: p });
+                        setAppSettings({ ...appSettings, DOWNLOAD_PATH: p });
                         setToast("Path selected. Remember to Save Settings.");
                       })}>Browse</button>
                     </div>
@@ -923,16 +985,45 @@ export default function App() {
                     </div>
                   </label>
 
+                  {/* START ON BOOT TOGGLE — 3rd item */}
+                  <label className="setting-row" style={{ alignItems: 'flex-start' }}>
+                    <div>
+                      <span>Start Burst on Boot</span>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Burst runs silently in the background on startup</div>
+                    </div>
+                    <div className="setting-input-wrap">
+                      <div
+                        onClick={() => setAppSettings(prev => ({ ...prev, START_ON_BOOT: !prev.START_ON_BOOT }))}
+                        style={{
+                          width: '40px', height: '22px', borderRadius: '11px', cursor: 'pointer',
+                          background: appSettings?.START_ON_BOOT ? 'var(--accent)' : 'var(--border)',
+                          position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                        }}
+                      >
+                        <div style={{
+                          position: 'absolute', top: '3px',
+                          left: appSettings?.START_ON_BOOT ? '21px' : '3px',
+                          width: '16px', height: '16px', borderRadius: '50%',
+                          background: '#fff', transition: 'left 0.2s',
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                        }} />
+                      </div>
+                    </div>
+                  </label>
+
                   <div className="settings-section-title">Chunking</div>
                   {[
-                    { key: "BASE_CHUNK_SIZE", label: "Chunk size", unit: "MB", divisor: 1048576, step: 1 },
-                    { key: "MIN_CHUNK_SIZE", label: "Min chunk", unit: "KB", divisor: 1024, step: 64 },
-                    { key: "MAX_CHUNK_SIZE", label: "Max chunk", unit: "MB", divisor: 1048576, step: 1 },
-                  ].map(({ key, label, unit, divisor, step }) => {
+                    { key: "BASE_CHUNK_SIZE", label: "Chunk size", unit: "MB", divisor: 1048576, step: 1, info: "Default size of each download chunk per interface. Larger = fewer requests, better for fast stable links. Smaller = more adaptive on unstable connections." },
+                    { key: "MIN_CHUNK_SIZE", label: "Min chunk", unit: "KB", divisor: 1024, step: 64, info: "Floor chunk size. High-latency interfaces get smaller chunks so they don't hold up the download if they fall behind." },
+                    { key: "MAX_CHUNK_SIZE", label: "Max chunk", unit: "MB", divisor: 1048576, step: 1, info: "Ceiling chunk size. Prevents any single chunk from being so large that a slow interface causes a bottleneck." },
+                  ].map(({ key, label, unit, divisor, step, info }) => {
                     const displayVal = Math.round((appSettings[key] ?? 0) / divisor * 100) / 100;
                     return (
                       <label key={key} className="setting-row">
-                        <span>{label}</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          {label}
+                          <InfoTooltip text={info} />
+                        </span>
                         <div className="setting-input-wrap">
                           <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
                             const raw = Number(e.target.value) * divisor;
@@ -946,14 +1037,17 @@ export default function App() {
 
                   <div className="settings-section-title">Rebalancing</div>
                   {[
-                    { key: "WEIGHT_REBALANCE_INTERVAL_SECONDS", label: "Rebalance interval", unit: "sec", divisor: 1, step: 1 },
-                    { key: "MIN_INTERFACE_SPEED_THRESHOLD", label: "Min speed threshold", unit: "KB/s", divisor: 1 / 1024, step: 10 },
-                    { key: "SLOW_INTERFACE_GRACE_PERIOD", label: "Slow grace period", unit: "sec", divisor: 1, step: 1 },
-                  ].map(({ key, label, unit, divisor, step }) => {
+                    { key: "WEIGHT_REBALANCE_INTERVAL_SECONDS", label: "Rebalance interval", unit: "sec", divisor: 1, step: 1, info: "How often Burst recalculates bandwidth weights across interfaces based on live speed measurements." },
+                    { key: "MIN_INTERFACE_SPEED_THRESHOLD", label: "Min speed threshold", unit: "KB/s", divisor: 1 / 1024, step: 10, info: "If an interface falls below this speed for longer than the grace period, it gets paused and its chunks redistributed." },
+                    { key: "SLOW_INTERFACE_GRACE_PERIOD", label: "Slow grace period", unit: "sec", divisor: 1, step: 1, info: "How long an interface is allowed to stay below the min speed threshold before being paused. Prevents false positives on brief congestion." },
+                  ].map(({ key, label, unit, divisor, step, info }) => {
                     const displayVal = Math.round((appSettings[key] ?? 0) / divisor * 100) / 100;
                     return (
                       <label key={key} className="setting-row">
-                        <span>{label}</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          {label}
+                          <InfoTooltip text={info} />
+                        </span>
                         <div className="setting-input-wrap">
                           <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
                             const raw = Number(e.target.value) * divisor;
@@ -978,9 +1072,10 @@ export default function App() {
         </div>
       )}
 
-      <PromptModal 
+      <PromptModal
         isOpen={!!promptData}
         title={promptData?.title}
+        hint={promptData?.hint}
         defaultValue={promptData?.value}
         onCancel={() => setPromptData(null)}
         onConfirm={(val) => {
