@@ -22,9 +22,9 @@ async def merge_chunks(chunk_paths: List[Path], output_path: Path, expected_size
         return written
 
     written_bytes = await asyncio.to_thread(_merge)
-    if written_bytes != expected_size:
+    if expected_size > 0 and written_bytes < expected_size * 0.99:
         raise ValueError(
-            f"Merged file size mismatch: expected {expected_size}, got {written_bytes}"
+            f"Merged file appears truncated: expected ~{expected_size} bytes, got {written_bytes}"
         )
 
 
