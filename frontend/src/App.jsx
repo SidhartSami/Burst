@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
-  ? "http://127.0.0.1:8000"
+  ? "http://127.0.0.1:59284"
   : window.location.origin;
 const HISTORY_KEY = "burst_history";
 
@@ -49,12 +49,22 @@ function formatSpeed(mbps) {
   return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
 }
 
-function formatEta(seconds) {
-  if (!seconds || seconds <= 0 || !Number.isFinite(seconds)) return "~--";
-  if (seconds < 60) return `~${Math.round(seconds)}s`;
-  const mins = Math.floor(seconds / 60);
-  const sec = Math.round(seconds % 60);
-  return `~${mins}m ${sec}s`;
+function formatETA(seconds) {
+  if (!seconds || seconds <= 0 || !isFinite(seconds)) return "calculating...";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  return h > 0 ? `${d}d ${h}h` : `${d}d`;
 }
 
 function shortName(name, type) {
@@ -211,7 +221,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
       <div className="dl-bottom">
         <span>{pct.toFixed(1)}% • {formatBytes(status.total_downloaded)} / {formatBytes(status.expected_size)}</span>
-        <span>{!isPaused && status.status === 'downloading' ? formatEta(eta) : ''}</span>
+        <span>{!isPaused && status.status === 'downloading' ? formatETA(eta) : ''}</span>
       </div>
     </div>
   );
@@ -284,7 +294,51 @@ export default function App() {
         }
       })
       .catch(() => { });
-    // 3. Listen for global events (like new downloads from extension)
+
+    // 3. Fetch active jobs so background downloads added while UI was closed
+    //    are immediately visible on mount. The existing useEffect([activeJobs])
+    //    will automatically open a WebSocket for each new ID returned here.
+    fetch(`${API_BASE}/active-jobs`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.job_ids && d.job_ids.length > 0) {
+          setActiveJobs(prev => {
+            const merged = [...prev];
+            d.job_ids.forEach(id => { if (!merged.includes(id)) merged.push(id); });
+            return merged;
+          });
+        }
+      })
+      .catch(() => {});
+
+    // 4. Hydrate history from the backend (includes jobs from previous sessions).
+    //    We only set history from the server if localStorage is empty so we don't
+    //    overwrite user-visible state on a normal reload.
+    fetch(`${API_BASE}/history`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.history && d.history.length > 0) {
+          setHistory(prev => {
+            if (prev.length > 0) return prev; // already have local history — don't stomp
+            return d.history.map(item => ({
+              id: item.job_id || item.id || crypto.randomUUID(),
+              filename: item.filename || item.output_path?.split(/[\\/]/).pop() || "download.bin",
+              path: item.output_path || item.path || "Unknown path",
+              size: item.total_downloaded || item.size || 0,
+              avgSpeed: item.speed_combined || item.avgSpeed || 0,
+              time_saved: item.time_saved || 0,
+              status: item.status || "completed",
+              timestamp: item.finished_at
+                ? new Date(item.finished_at * 1000).toLocaleString()
+                : (item.timestamp || new Date().toLocaleString()),
+              type: item.type || "download"
+            })).slice(0, 50);
+          });
+        }
+      })
+      .catch(() => {});
+
+    // 5. Listen for global events (like new downloads from extension)
     const eventWsUrl = API_BASE.replace("http", "ws") + "/ws/events";
     let eventWs = new WebSocket(eventWsUrl);
     
@@ -758,7 +812,7 @@ export default function App() {
                           {item.status !== 'failed' && <span className="meta-tag">{formatSpeed(item.avgSpeed)} avg</span>}
                         </div>
                       </div>
-                      {item.time_saved > 0 && <div className="completed-saved">Saved {formatEta(item.time_saved)}</div>}
+                      {item.time_saved > 0 && <div className="completed-saved">Saved {formatETA(item.time_saved)}</div>}
                     </div>
                   ))}
                 </div>

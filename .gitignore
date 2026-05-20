@@ -39,7 +39,26 @@ build_v1/
 Output/
 *.exe
 
-# App Data
-backend/burst_settings.json
+# App Data / Runtime-generated files
+backend/burst_*.json
+burst_active_jobs.json
 backend/dht_state.dat
+dht_state.dat
 *.log
+
+# Keys / Secrets
+extension-chrome/key.pem
+extension-firefox/key.pem
+*.pem
+
+# Diff deliverables (dev-session artifacts)
+*.diff
+
+# Build artifacts
+*.spec.bak
+*.zip
+
+# Agent session artifacts
+task.md
+walkthrough.md
+implementation_plan.md

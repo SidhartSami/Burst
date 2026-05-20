@@ -113,17 +113,27 @@ def _add_trackers(handle):
 # ---------------------------------------------------------------------------
 
 class TorrentJob:
-    def __init__(self, magnet_uri: str, output_path: str, interface_ips: List[str]):
-        self.job_id = str(uuid.uuid4())
+    def __init__(self, magnet_uri: str, output_path: str, interface_ips: List[str], job_id: str = None, bandwidth_limits: dict = None, resume_data: dict = None):
+        self.job_id = job_id or str(uuid.uuid4())
         self.magnet_uri = magnet_uri
         self.output_path = output_path
         self.interface_ips = list(interface_ips)
+        self.bandwidth_limits = bandwidth_limits or {}
         self.filename = self._extract_name(magnet_uri)
 
         self.status = "fetching_metadata"
         self.progress = 0.0
         self.total_size = 0
         self.downloaded = 0
+        self.boosted = False
+        
+        if resume_data:
+            self.progress = resume_data.get("progress", 0.0)
+            self.total_size = resume_data.get("expected_size", 0)
+            self.downloaded = resume_data.get("total_downloaded", 0)
+            self.status = resume_data.get("status", "fetching_metadata")
+            self.boosted = resume_data.get("boosted", False)
+
         self.speed_combined = 0
         self.speeds: Dict[str, int] = {ip: 0 for ip in interface_ips}
         self.peers_per_interface: Dict[str, int] = {ip: 0 for ip in interface_ips}
@@ -161,18 +171,24 @@ class TorrentJob:
             "finished_at": self.finished_at,
             "error": self.error,
             "interface_ips": self.interface_ips,
+            "magnet_uri": self.magnet_uri,
+            "bandwidth_limits": self.bandwidth_limits,
+            "boosted": self.boosted,
         }
 
     def _extract_name(self, magnet_uri: str) -> str:
-        """Try to extract display name (&dn=) from magnet URI."""
+        """Try to extract display name (&dn=) from magnet URI or filename from path."""
         try:
-            if "?" in magnet_uri:
+            if "?" in magnet_uri and magnet_uri.startswith("magnet:"):
                 import urllib.parse
                 qs = magnet_uri.split("?", 1)[1]
                 params = urllib.parse.parse_qs(qs)
                 names = params.get("dn", [])
                 if names:
                     return names[0]
+            elif magnet_uri.endswith(".torrent"):
+                from pathlib import Path
+                return Path(magnet_uri).stem
         except:
             pass
         return "torrent"
@@ -232,6 +248,62 @@ class TorrentJob:
         self.finished_at = time.time()
         return {"status": "cancelled", "job_id": self.job_id}
 
+    async def pause(self) -> dict:
+        print(f"[TORRENT] Pausing job {self.job_id}")
+        self.status = "paused"
+        for ip, h in list(self.handles):
+            try:
+                h.pause()
+            except Exception as e:
+                print(f"[TORRENT] Pause handle error: {e}")
+        return {"status": "paused"}
+
+    async def resume(self) -> dict:
+        print(f"[TORRENT] Resuming job {self.job_id}")
+        self.status = "downloading"
+        for ip, h in list(self.handles):
+            try:
+                h.resume()
+            except Exception as e:
+                print(f"[TORRENT] Resume handle error: {e}")
+        return {"status": "resumed"}
+
+    async def toggle_boost(self, active_interfaces: List[dict] = None) -> dict:
+        self.boosted = not getattr(self, "boosted", False)
+        
+        if self.boosted:
+            # 1. Add all active interfaces if not already added
+            if active_interfaces:
+                for iface in active_interfaces:
+                    ip = iface["ip_address"]
+                    if ip not in self.interface_ips:
+                        try:
+                            await self.add_interface(ip, iface["name"])
+                        except Exception as e:
+                            print(f"[TORRENT BOOST] Failed to add interface {ip}: {e}")
+            
+            # 2. Increase speed and peer limit
+            for ip, ses in self.sessions:
+                try:
+                    settings = ses.get_settings()
+                    settings["num_want"] = 600
+                    settings["connection_speed"] = 100
+                    ses.apply_settings(settings)
+                except Exception as e:
+                    print(f"[TORRENT BOOST] Failed to increase settings: {e}")
+        else:
+            # Revert peer limit to standard
+            for ip, ses in self.sessions:
+                try:
+                    settings = ses.get_settings()
+                    settings["num_want"] = 300
+                    settings["connection_speed"] = 50
+                    ses.apply_settings(settings)
+                except Exception as e:
+                    print(f"[TORRENT BOOST] Failed to reset settings: {e}")
+                    
+        return {"status": "success", "boosted": self.boosted}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -242,20 +314,28 @@ async def start_torrent_download(
     output_path: str,
     interface_ips: List[str],
     bandwidth_limits: Optional[dict] = None,
+    job_id: Optional[str] = None,
+    resume_data: Optional[dict] = None,
 ) -> TorrentJob:
-    # Path collision handling
-    final_path = output_path
-    active_paths = [j.output_path for j in active_torrents.values() if j.status not in ("completed", "failed")]
-    if final_path in active_paths:
-        p = Path(final_path)
-        # For torrents, the output_path is often a directory, so we handle it slightly differently if needed
-        # but the logic remains same for simple collision
-        counter = 1
-        while f"{final_path}({counter})" in active_paths:
-            counter += 1
-        final_path = f"{final_path}({counter})"
+    # 1. Prevent duplicate jobs if the exact same torrent is already active/paused
+    if not job_id:
+        for existing_job in active_torrents.values():
+            if existing_job.magnet_uri == magnet_uri and existing_job.status not in ("completed", "failed"):
+                if existing_job.status in ("paused", "waiting_reconnect"):
+                    await existing_job.resume()
+                return existing_job
 
-    job = TorrentJob(magnet_uri, final_path, interface_ips)
+    # 2. Path collision handling — only for NEW downloads, not for loaded resumes
+    final_path = output_path
+    if not job_id:
+        active_paths = [j.output_path for j in active_torrents.values() if j.status not in ("completed", "failed")]
+        if final_path in active_paths:
+            counter = 1
+            while f"{final_path}({counter})" in active_paths:
+                counter += 1
+            final_path = f"{final_path}({counter})"
+
+    job = TorrentJob(magnet_uri, final_path, interface_ips, job_id=job_id, bandwidth_limits=bandwidth_limits, resume_data=resume_data)
     active_torrents[job.job_id] = job
     try:
         Path(final_path).mkdir(parents=True, exist_ok=True)
@@ -271,75 +351,89 @@ async def start_torrent_download(
 
 async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     # ── Phase 1: metadata with unbound session ─────────────────────────────
-    print("[TORRENT] Phase 1: fetching metadata with unbound session…")
+    is_local_file = job.magnet_uri.endswith(".torrent") and Path(job.magnet_uri).exists()
+    
+    if not is_local_file:
+        print("[TORRENT] Phase 1: fetching metadata with unbound session…")
 
-    meta_ses = lt.session(_make_settings(ip=None))
-    _load_dht_state(meta_ses)  # warm DHT from previous session
+        meta_ses = lt.session(_make_settings(ip=None))
+        _load_dht_state(meta_ses)  # warm DHT from previous session
 
-    meta_ses.add_dht_router("router.bittorrent.com", 6881)
-    meta_ses.add_dht_router("router.utorrent.com", 6881)
-    meta_ses.add_dht_router("dht.transmissionbt.com", 6881)
-    meta_ses.add_dht_router("dht.aelitis.com", 6881)
-    meta_ses.add_dht_router("router.bitcomet.com", 6881)
-    meta_ses.add_dht_router("dht.libtorrent.org", 25401)
+        meta_ses.add_dht_router("router.bittorrent.com", 6881)
+        meta_ses.add_dht_router("router.utorrent.com", 6881)
+        meta_ses.add_dht_router("dht.transmissionbt.com", 6881)
+        meta_ses.add_dht_router("dht.aelitis.com", 6881)
+        meta_ses.add_dht_router("router.bitcomet.com", 6881)
+        meta_ses.add_dht_router("dht.libtorrent.org", 25401)
 
-    job._meta_session = meta_ses
+        job._meta_session = meta_ses
 
-    params = lt.parse_magnet_uri(job.magnet_uri)
-    params.save_path = job.output_path
-    params.storage_mode = lt.storage_mode_t.storage_mode_sparse
+        params = lt.parse_magnet_uri(job.magnet_uri)
+        params.save_path = job.output_path
+        params.storage_mode = lt.storage_mode_t.storage_mode_sparse
 
-    meta_handle = meta_ses.add_torrent(params)
-    job._meta_handle = meta_handle
-    _add_trackers(meta_handle)
+        meta_handle = meta_ses.add_torrent(params)
+        job._meta_handle = meta_handle
+        _add_trackers(meta_handle)
 
-    METADATA_TIMEOUT = 180  # 3 min — longer timeout for cold DHT + ISP UDP blocks
-    start = time.time()
+        METADATA_TIMEOUT = 180  # 3 min — longer timeout for cold DHT + ISP UDP blocks
+        start = time.time()
 
-    while job._running:
-        await asyncio.sleep(1)
-        elapsed = time.time() - start
+        while job._running:
+            await asyncio.sleep(1)
+            elapsed = time.time() - start
 
+            try:
+                s = meta_handle.status()
+            except Exception as e:
+                print(f"[TORRENT] meta handle error: {e}")
+                continue
+
+            if s.has_metadata:
+                print(f"[TORRENT] Metadata received after {elapsed:.0f}s!")
+                job._torrent_info = meta_handle.torrent_file()
+                _save_dht_state(meta_ses)  # save DHT for next time — faster bootstrap
+                break
+
+            if elapsed > METADATA_TIMEOUT:
+                _save_dht_state(meta_ses)  # save even on timeout — DHT table is still valuable
+                job.status = "failed"
+                job.error = (
+                    "Could not fetch torrent metadata. "
+                    "Try a .torrent file instead of a magnet link."
+                )
+                job._running = False
+                job.finished_at = time.time()
+                print(f"[TORRENT] Metadata timeout. state={s.state} peers={s.num_peers}")
+                return
+
+            if int(elapsed) % 10 == 0 and elapsed >= 10:
+                dht_nodes = 0
+                try:
+                    dht_nodes = meta_ses.dht_status().nodes
+                except:
+                    pass
+                print(
+                    f"[TORRENT] Waiting for metadata… {elapsed:.0f}s "
+                    f"state={s.state} peers={s.num_peers} dht_nodes={dht_nodes}"
+                )
+                for t in meta_handle.trackers()[:4]:
+                    msg = t.get("message", "") or "no response yet"
+                    print(f"  {t['url']}: {msg}")
+
+        if not job._running:
+            return
+    else:
+        # Load local .torrent file
         try:
-            s = meta_handle.status()
+            job._torrent_info = lt.torrent_info(job.magnet_uri)
+            print(f"[TORRENT] Loaded local torrent file: {job.magnet_uri}")
         except Exception as e:
-            print(f"[TORRENT] meta handle error: {e}")
-            continue
-
-        if s.has_metadata:
-            print(f"[TORRENT] Metadata received after {elapsed:.0f}s!")
-            job._torrent_info = meta_handle.torrent_file()
-            _save_dht_state(meta_ses)  # save DHT for next time — faster bootstrap
-            break
-
-        if elapsed > METADATA_TIMEOUT:
-            _save_dht_state(meta_ses)  # save even on timeout — DHT table is still valuable
             job.status = "failed"
-            job.error = (
-                "Could not fetch torrent metadata. "
-                "Try a .torrent file instead of a magnet link."
-            )
+            job.error = f"Invalid .torrent file: {e}"
             job._running = False
             job.finished_at = time.time()
-            print(f"[TORRENT] Metadata timeout. state={s.state} peers={s.num_peers}")
             return
-
-        if int(elapsed) % 10 == 0 and elapsed >= 10:
-            dht_nodes = 0
-            try:
-                dht_nodes = meta_ses.dht_status().nodes
-            except:
-                pass
-            print(
-                f"[TORRENT] Waiting for metadata… {elapsed:.0f}s "
-                f"state={s.state} peers={s.num_peers} dht_nodes={dht_nodes}"
-            )
-            for t in meta_handle.trackers()[:4]:
-                msg = t.get("message", "") or "no response yet"
-                print(f"  {t['url']}: {msg}")
-
-    if not job._running:
-        return
 
     # ── Phase 2: bound sessions per interface ──────────────────────────────
     print("[TORRENT] Phase 2: starting per-interface bound sessions…")
@@ -384,6 +478,12 @@ async def _monitor_download(job: TorrentJob):
 
     while job._running:
         await asyncio.sleep(1)
+
+        if job.status == "paused":
+            job.speed_combined = 0
+            for ip in list(job.speeds.keys()):
+                job.speeds[ip] = 0
+            continue
 
         total_speed = 0
         max_progress = 0.0

@@ -1,9 +1,9 @@
 {
   "name": "com.burst.download.manager",
   "description": "Burst Download Manager Native Messaging Host",
-  "path": "native_host.bat",
+  "path": "native_host_firefox.exe",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://pblmhjepeacmfphcnaaekefjnipfkcfd/"
+  "allowed_extensions": [
+    "burst@sidhartsami.com"
   ]
 }
