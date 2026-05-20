@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Burst Settings</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="logo-wrap">
+      <img src="../icons/icon16.png" alt="Burst" />
+      <span class="logo">Burst</span>
+    </div>
+    <div class="status-dot" id="statusDot"></div>
+  </div>
+
+  <div class="status-label" id="statusLabel">Checking...</div>
+
+  <div class="divider"></div>
+
+  <div class="toggle-row">
+    <span>Intercept all downloads</span>
+    <label class="switch">
+      <input type="checkbox" id="interceptToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Active Adapters (Interfaces)</div>
+  <div id="interfacesList" class="interfaces-list">
+    <div class="interface-item loading">Connecting to Burst...</div>
+  </div>
+
+  <div class="footer">
+    <a href="#" id="openApp">Open Burst App</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

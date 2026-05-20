@@ -30,10 +30,13 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
   const url = downloadItem.url;
 
+  // Ignore blob and data URLs since Burst cannot download them outside the browser context
+  if (url.startsWith("blob:") || url.startsWith("data:")) return;
+
   // Only intercept real file downloads, not page navigations
   const isFileDownload =
     downloadItem.filename ||
-    /\.(zip|rar|7z|tar|gz|exe|msi|iso|mp4|mkv|mp3|pdf|apk|dmg|bin|img)(\?|$)/i.test(url);
+    /\.(zip|rar|7z|tar|gz|exe|msi|iso|mp4|mkv|mp3|pdf|apk|dmg|bin|img|torrent)(\?|$)/i.test(url);
 
   if (!isFileDownload) return;
 
@@ -56,17 +59,12 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 // ── Context menu — right-click any link ──────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "burst-download-link",
-    title: "Download with Burst",
-    contexts: ["link"],
-  });
-
-  chrome.contextMenus.create({
-    id: "burst-download-magnet",
-    title: "Send Magnet to Burst",
-    contexts: ["link"],
-    targetUrlPatterns: ["magnet:*"],
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "burst-download",
+      title: "Download with Burst",
+      contexts: ["link"],
+    });
   });
 });
 
@@ -77,8 +75,10 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   try {
     const result = await sendToBurst(url);
     if (result.success) {
-      const label = url.startsWith("magnet:") ? "Torrent queued in Burst" : "Download started in Burst";
-      notify(label, url.startsWith("magnet:") ? "Magnet link sent" : url.split("/").pop() || url);
+      const isTorrent = url.startsWith("magnet:") || url.includes(".torrent");
+      const label = isTorrent ? "Torrent queued in Burst" : "Download started in Burst";
+      const detail = isTorrent ? "Magnet link sent" : (url.split("/").pop()?.split("?")[0] || url);
+      notify(label, detail);
     } else {
       notify("Burst Error", result.error || "Unknown error", true);
     }

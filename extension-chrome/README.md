@@ -11,7 +11,7 @@ Chrome Extension (background.js)
         ↓  chrome.runtime.sendNativeMessage()
 Native Host (native_host.bat → native_host.py)
         ↓  HTTP POST
-Burst FastAPI (localhost:8000)
+Burst FastAPI (localhost:59284)
         ↓
 Download engine (bandwidth bonded)
 ```

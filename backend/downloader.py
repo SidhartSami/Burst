@@ -95,9 +95,10 @@ class DownloadJob:
     is_cancelled: bool = False
     retry_events: List[RetryEvent] = field(default_factory=list)
     bandwidth_limits: Dict[str, float] = field(default_factory=dict)
+    boosted: bool = False
     _queue: Any = field(default=None, repr=False)
     _chunk_files: Any = field(default=None, repr=False)
-    _workers: Any = field(default_factory=dict, repr=False)   # ip -> Task
+    _workers: Any = field(default_factory=dict, repr=False)   # ip -> Task (or list of Tasks when boosted)
     _chunk_failures: Any = field(default_factory=dict, repr=False)
     _total_chunks: int = field(default=0, repr=False)
     _ranges: List[Tuple[int, int, int]] = field(default_factory=list, repr=False)
@@ -128,6 +129,9 @@ class DownloadJob:
             "error": self.error, "is_cancelled": self.is_cancelled,
             "interfaces": iface_dict,
             "retry_events": [e.to_dict() for e in self.retry_events[-20:]],
+            "_ranges": self._ranges,
+            "bandwidth_limits": self.bandwidth_limits,
+            "boosted": self.boosted,
         }
 
 
@@ -234,6 +238,69 @@ class DownloadManager:
         self._job_tasks[job_id] = asyncio.create_task(self._run_job(job, interfaces))
         return job
 
+    async def resume_job(self, data: dict, interfaces: List[Dict[str, str]]) -> DownloadJob:
+        if not interfaces:
+            raise ValueError("At least one interface is required")
+            
+        job_id = data["job_id"]
+        job = DownloadJob(
+            job_id=job_id,
+            url=data["url"],
+            output_path=data["output_path"],
+            bandwidth_limits=data.get("bandwidth_limits", {}),
+            expected_size=data.get("expected_size", 0),
+            supports_ranges=data.get("supports_ranges", False),
+            total_downloaded=data.get("total_downloaded", 0),
+            boosted=data.get("boosted", False),
+        )
+        job._ranges = data.get("_ranges", [])
+        
+        # Restore interfaces progress if present to avoid UI flashing 0
+        for ip, iface_data in data.get("interfaces", {}).items():
+            job.progress[ip] = InterfaceProgress(
+                name=iface_data["name"],
+                ip_address=iface_data["ip_address"],
+                chunk_start=iface_data["chunk_start"],
+                chunk_end=iface_data["chunk_end"],
+                downloaded=iface_data.get("downloaded", 0),
+                status=iface_data.get("status", "pending"),
+            )
+        
+        self.jobs[job_id] = job
+        self._locks[job_id] = asyncio.Lock()
+        self._thread_locks[job_id] = threading.Lock()
+        
+        # Use the wrapper
+        self._job_tasks[job_id] = asyncio.create_task(self._resume_job_wrapper(job, interfaces))
+            
+        return job
+
+    async def _resume_job_wrapper(self, job: DownloadJob, interfaces: List[Dict[str, str]]) -> None:
+        job.started_at = time.time()
+        try:
+            if job.expected_size > 0 and job.supports_ranges and job._ranges:
+                job.status = "downloading"
+                await self._parallel_download(job, interfaces)
+            elif job.expected_size > 0 and not job.supports_ranges:
+                job.status = "downloading"
+                await self._single_download(job, interfaces[0])
+            else:
+                # Fallback to full _run_job
+                await self._run_job(job, interfaces)
+                return
+                
+            if job.is_cancelled:
+                if job.status != "failed":
+                    job.status = "failed"
+                    job.error = "Cancelled by user"
+            else:
+                job.status = "completed"
+            job.finished_at = time.time()
+        except Exception as exc:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = time.time()
+
     # ------------------------------------------------------------------
     # Latency measurement
     # ------------------------------------------------------------------
@@ -318,7 +385,7 @@ class DownloadManager:
         started = time.perf_counter()
         await asyncio.to_thread(
             self._download_with_requests, job, interface["ip_address"],
-            job.url, out_path, None, progress, started,
+            job.url, out_path, "wb", None, progress, started,
         )
         if job.is_cancelled:
             progress.status = "cancelled"
@@ -378,8 +445,13 @@ class DownloadManager:
             output_file = chunk_files[chunk_idx]
             prog.status = "downloading"
 
+            worker_id = uuid.uuid4()
+            if not hasattr(job, "_active_threads"):
+                job._active_threads = set()
+            job._active_threads.add(worker_id)
+
             try:
-                await self._download_range(job, iface, (start, end), output_file)
+                await self._download_range(job, iface, (start, end), output_file, worker_id)
                 prog.error = None
                 prog.consecutive_failures = 0
                 prog.chunks_completed += 1
@@ -419,6 +491,9 @@ class DownloadManager:
                     prog.error = str(e)
                     prog.speed_mb_s = 0.0
                     await asyncio.sleep(config.get("RETRY_DELAY_SECONDS"))
+            finally:
+                if hasattr(job, "_active_threads"):
+                    job._active_threads.discard(worker_id)
 
             # --- Slow-speed detection ---
             if prog.speed_mb_s > 0 and prog.speed_mb_s < min_speed:
@@ -448,18 +523,17 @@ class DownloadManager:
         prog.speed_mb_s = 0.0
         prog.current_chunk_idx = None
         
-        # 2. Cancel the worker if active
-        task = job._workers.get(ip)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-        
-        # 3. Clean up
-        if ip in job._workers:
-            del job._workers[ip]
+        # 2. Cancel the worker(s) if active
+        for key in list(job._workers.keys()):
+            if key == ip or key.startswith(f"{ip}_"):
+                task = job._workers[key]
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                del job._workers[key]
             
         print(f"[REMOVE_IFACE] Interface {ip} removed from job {job_id}")
         return {"removed": True}
@@ -494,8 +568,8 @@ class DownloadManager:
         if ip in job.progress:
             # Interface already known — restart its worker if it died
             prog = job.progress[ip]
-            existing_task = job._workers.get(ip)
-            if existing_task and not existing_task.done():
+            existing_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
+            if existing_tasks:
                 return {"reused": True}  # Already actively working
             # Reset state and respawn worker
             prog.status = "pending"
@@ -534,14 +608,17 @@ class DownloadManager:
                 chunk_idx = other_prog.current_chunk_idx
                 print(f"[ADD_IFACE] Stealing from {busiest_ip} (chunk {chunk_idx}, remaining: {busiest_remaining} bytes)")
                 
-                # Cancel the busiest worker
-                old_task = job._workers.get(busiest_ip)
-                if old_task and not old_task.done():
+                # Cancel all busiest workers
+                old_tasks = [t for k, t in job._workers.items() if (k == busiest_ip or k.startswith(f"{busiest_ip}_")) and not t.done()]
+                for old_task in old_tasks:
                     old_task.cancel()
                     try:
                         await old_task
                     except (asyncio.CancelledError, Exception):
                         pass
+                for key in list(job._workers.keys()):
+                    if key == busiest_ip or key.startswith(f"{busiest_ip}_"):
+                        del job._workers[key]
                 
                 # Find the chunk range to split
                 range_idx = -1
@@ -592,10 +669,13 @@ class DownloadManager:
             print(f"[ADD_IFACE] Job is paused, just marking {ip} as pending")
             return {"added": True, "paused": True}
 
-        print(f"[ADD_IFACE] Spawning/Restarting download worker for {ip}")
+        print(f"[ADD_IFACE] Spawning/Restarting download worker(s) for {ip}")
         self._rebalance_weights(job)
-        task = asyncio.create_task(self._worker(job, interface, job._queue, job._chunk_files))
-        job._workers[ip] = task
+        num_workers = 3 if getattr(job, "boosted", False) else 1
+        for idx in range(num_workers):
+            task_key = f"{ip}_{idx}" if num_workers > 1 else ip
+            task = asyncio.create_task(self._worker(job, interface, job._queue, job._chunk_files))
+            job._workers[task_key] = task
         return {"spawned": True, "queue_size": job._queue.qsize()}
 
     async def remove_interface(self, job_id: str, ip: str) -> Dict[str, Any]:
@@ -609,14 +689,17 @@ class DownloadManager:
         if prog.status == "excluded":
             return {"status": "already_excluded"}
 
-        # Cancel the worker
-        task = job._workers.get(ip)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Cancel the worker(s)
+        for key in list(job._workers.keys()):
+            if key == ip or key.startswith(f"{ip}_"):
+                task = job._workers[key]
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                del job._workers[key]
         
         # If it was middle of a chunk, return chunk to queue
         if prog.current_chunk_idx is not None and job._queue:
@@ -633,8 +716,9 @@ class DownloadManager:
         prog.status = "excluded"
         prog.current_chunk_idx = None
         prog.speed_mb_s = 0
-        if ip in job._workers:
-            del job._workers[ip]
+        for key in list(job._workers.keys()):
+            if key == ip or key.startswith(f"{ip}_"):
+                del job._workers[key]
 
         self._rebalance_weights(job)
         return {"status": "success", "removed": ip, "queue_size": job._queue.qsize() if job._queue else 0}
@@ -688,9 +772,12 @@ class DownloadManager:
             if prog.status not in ("excluded", "cancelled", "completed"):
                 prog.status = "pending"
                 iface_dict = {"ip_address": ip, "name": prog.name}
-                task = asyncio.create_task(self._worker(job, iface_dict, job._queue, job._chunk_files))
-                job._workers[ip] = task
-                spawned += 1
+                num_workers = 3 if getattr(job, "boosted", False) else 1
+                for idx in range(num_workers):
+                    task_key = f"{ip}_{idx}" if num_workers > 1 else ip
+                    task = asyncio.create_task(self._worker(job, iface_dict, job._queue, job._chunk_files))
+                    job._workers[task_key] = task
+                    spawned += 1
         
         return {"status": "resumed", "workers_spawned": spawned}
 
@@ -711,6 +798,46 @@ class DownloadManager:
         job.finished_at = time.time()
         return {"status": "cancelled", "job_id": job_id}
 
+    async def toggle_boost(self, job_id: str, active_interfaces: List[Dict[str, str]] = None) -> Dict[str, Any]:
+        job = self.get_job(job_id)
+        if not job:
+            raise ValueError("Job not found")
+        
+        job.boosted = not getattr(job, 'boosted', False)
+        
+        if job.status == "downloading" and job._queue:
+            if job.boosted:
+                # 1. Add all active interfaces if they are not already in the job
+                if active_interfaces:
+                    for iface in active_interfaces:
+                        ip = iface["ip_address"]
+                        if ip not in job.progress or job.progress[ip].status in ("excluded", "cancelled"):
+                            try:
+                                await self.add_interface(job_id, iface)
+                            except Exception as e:
+                                print(f"[BOOST] Failed to add interface {ip}: {e}")
+                
+                # 2. Spawn extra workers for all active/pending interfaces
+                for ip, prog in job.progress.items():
+                    if prog.status not in ("excluded", "cancelled", "completed"):
+                        iface_dict = {"ip_address": ip, "name": prog.name}
+                        # We want 3 workers total per interface
+                        for idx in range(1, 3):
+                            task_key = f"{ip}_{idx}"
+                            if task_key not in job._workers or job._workers[task_key].done():
+                                task = asyncio.create_task(self._worker(job, iface_dict, job._queue, job._chunk_files))
+                                job._workers[task_key] = task
+            else:
+                # Scale down: cancel extra workers (idx >= 1)
+                for key in list(job._workers.keys()):
+                    if "_" in key:
+                        task = job._workers[key]
+                        if not task.done():
+                            task.cancel()
+                        del job._workers[key]
+                        
+        return {"status": "success", "boosted": job.boosted}
+
     # ------------------------------------------------------------------
     # Parallel download with latency-aware chunking
     # ------------------------------------------------------------------
@@ -721,40 +848,56 @@ class DownloadManager:
             lat = await self._measure_latency(job.url, iface["ip_address"])
             latencies[iface["ip_address"]] = lat
 
-        # Compute per-interface chunk size based on latency
-        min_lat = max(min(latencies.values()), 1.0)
-        base = config.get("BASE_CHUNK_SIZE")
-        min_cs = config.get("MIN_CHUNK_SIZE")
-        max_cs = config.get("MAX_CHUNK_SIZE")
-
-        # Use the average chunk size for queue generation
-        avg_chunk = base
-        if latencies:
-            normalized = [min_lat / max(lat, 1.0) for lat in latencies.values()]
-            sizes = [max(min_cs, min(max_cs, int(base * n))) for n in normalized]
-            avg_chunk = max(min_cs, sum(sizes) // len(sizes))
-
-        # Build chunk ranges
-        ranges = []
-        cursor = 0
-        idx = 0
-        while cursor < job.expected_size:
-            end = min(cursor + avg_chunk - 1, job.expected_size - 1)
-            ranges.append((idx, cursor, end))
-            cursor = end + 1
-            idx += 1
-
-        job._total_chunks = len(ranges)
         temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
         temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        if job._ranges:
+            # Resuming from a loaded job
+            ranges = job._ranges
+        else:
+            # Compute per-interface chunk size based on latency
+            min_lat = max(min(latencies.values()), 1.0)
+            base = config.get("BASE_CHUNK_SIZE")
+            min_cs = config.get("MIN_CHUNK_SIZE")
+            max_cs = config.get("MAX_CHUNK_SIZE")
+
+            # Use the average chunk size for queue generation
+            avg_chunk = base
+            if latencies:
+                normalized = [min_lat / max(lat, 1.0) for lat in latencies.values()]
+                sizes = [max(min_cs, min(max_cs, int(base * n))) for n in normalized]
+                avg_chunk = max(min_cs, sum(sizes) // len(sizes))
+
+            # Build chunk ranges
+            ranges = []
+            cursor = 0
+            idx = 0
+            while cursor < job.expected_size:
+                end = min(cursor + avg_chunk - 1, job.expected_size - 1)
+                ranges.append((idx, cursor, end))
+                cursor = end + 1
+                idx += 1
+            job._ranges = ranges
+            
+        job._total_chunks = len(ranges)
         chunk_files: Dict[int, Path] = {
-            i: temp_dir / f"chunk_{i:05d}.part" for i in range(len(ranges))
+            r[0]: temp_dir / f"chunk_{r[0]:05d}.part" for r in ranges
         }
 
         job._queue = asyncio.Queue()
         job._chunk_files = chunk_files
-        job._ranges = ranges
+        
+        # Reset total_downloaded to 0 and recalculate to avoid double counting
+        job.total_downloaded = 0
+        
+        # Only queue chunks that are not completely finished
         for r in ranges:
+            chunk_idx, r_start, r_end = r
+            part_file = chunk_files[chunk_idx]
+            if part_file.exists() and part_file.stat().st_size >= (r_end - r_start + 1):
+                # Already complete, don't queue
+                job.total_downloaded += (r_end - r_start + 1)
+                continue
             job._queue.put_nowait(r)
 
         # Initialize progress and spawn workers
@@ -766,8 +909,11 @@ class DownloadManager:
                 chunk_start=0, chunk_end=job.expected_size,
                 status="pending", latency_ms=round(lat, 1),
             )
-            task = asyncio.create_task(self._worker(job, iface, job._queue, chunk_files))
-            job._workers[ip] = task
+            num_workers = 3 if getattr(job, "boosted", False) else 1
+            for idx in range(num_workers):
+                task_key = f"{ip}_{idx}" if num_workers > 1 else ip
+                task = asyncio.create_task(self._worker(job, iface, job._queue, chunk_files))
+                job._workers[task_key] = task
 
         self._rebalance_weights(job)
 
@@ -797,17 +943,20 @@ class DownloadManager:
             # Proactively restart dead workers in recoverable states
             if not job._queue.empty():
                 for ip, prog in job.progress.items():
-                    task = job._workers.get(ip)
-                    if task and task.done() and prog.status in ("paused_slow", "disconnected", "pending"):
+                    active_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
+                    if not active_tasks and prog.status in ("paused_slow", "disconnected", "pending"):
                         prog.status = "pending"
                         prog.consecutive_failures = 0
                         prog._slow_since = None
                         prog._cooldown_until = 0.0
                         iface_dict = {"ip_address": ip, "name": prog.name}
-                        new_task = asyncio.create_task(
-                            self._worker(job, iface_dict, job._queue, chunk_files)
-                        )
-                        job._workers[ip] = new_task
+                        num_workers = 3 if getattr(job, "boosted", False) else 1
+                        for idx in range(num_workers):
+                            task_key = f"{ip}_{idx}" if num_workers > 1 else ip
+                            new_task = asyncio.create_task(
+                                self._worker(job, iface_dict, job._queue, chunk_files)
+                            )
+                            job._workers[task_key] = new_task
 
             # Check completion
             all_done = all(w.done() for w in job._workers.values())
@@ -843,10 +992,30 @@ class DownloadManager:
             pass
 
     async def _download_range(self, job: DownloadJob, interface: Dict[str, str],
-                              byte_range: Tuple[int, int], output_file: Path) -> None:
+                              byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID) -> None:
         start, end = byte_range
         if start > end:
             return
+            
+        mode = "wb"
+        downloaded_so_far = 0
+        if output_file.exists():
+            downloaded_so_far = output_file.stat().st_size
+            if downloaded_so_far >= (end - start + 1):
+                # Chunk already fully downloaded
+                job.total_downloaded += (end - start + 1)
+                progress = job.progress[interface["ip_address"]]
+                progress.downloaded += (end - start + 1)
+                return
+            if downloaded_so_far > 0:
+                mode = "ab"
+                start += downloaded_so_far
+                # Pre-fill progress for what's already downloaded
+                progress = job.progress[interface["ip_address"]]
+                progress.downloaded += downloaded_so_far
+                with self._thread_locks[job.job_id]:
+                    job.total_downloaded += downloaded_so_far
+                
         progress = job.progress[interface["ip_address"]]
         progress.status = "downloading"
         progress.error = None
@@ -854,7 +1023,8 @@ class DownloadManager:
         headers = {"Range": f"bytes={start}-{end}"}
         await asyncio.to_thread(
             self._download_with_requests, job, interface["ip_address"],
-            job.url, output_file, headers, progress, started,
+            job.url, output_file, mode, headers, progress, started,
+            worker_id, downloaded_so_far
         )
 
     # ------------------------------------------------------------------
@@ -890,9 +1060,10 @@ class DownloadManager:
     # Core byte-level download with sliding-window speed measurement
     # ------------------------------------------------------------------
     def _download_with_requests(self, job: DownloadJob, interface_ip: str,
-                                url: str, output_file: Path,
+                                url: str, output_file: Path, mode: str,
                                 headers: Optional[Dict[str, str]],
-                                progress: InterfaceProgress, started: float) -> None:
+                                progress: InterfaceProgress, started: float,
+                                worker_id: uuid.UUID, downloaded_so_far: int = 0) -> None:
         last_error: Optional[Exception] = None
         retry_attempts = config.get("RETRY_ATTEMPTS")
         retry_delay = config.get("RETRY_DELAY_SECONDS")
@@ -944,12 +1115,14 @@ class DownloadManager:
                     throttle_window_start = time.monotonic()
                     throttle_window_bytes = 0
 
-                    with output_file.open("wb") as handle:
+                    with output_file.open(mode) as handle:
                         for data in response.iter_content(chunk_size=io_size):
                             if job.is_cancelled:
                                 raise ValueError("Job cancelled")
                             if job.status == "paused":
                                 raise ValueError("Job paused")
+                            if worker_id not in getattr(job, "_active_threads", set()):
+                                raise ValueError("Worker thread cancelled/orphaned")
                             if not data:
                                 continue
                             handle.write(data)
@@ -987,10 +1160,11 @@ class DownloadManager:
                 return
             except (requests.RequestException, ValueError, Exception) as exc:
                 last_error = exc
-                if chunk_downloaded > 0:
-                    progress.downloaded -= chunk_downloaded
+                total_to_subtract = chunk_downloaded + downloaded_so_far
+                if total_to_subtract > 0:
+                    progress.downloaded -= total_to_subtract
                     with self._thread_locks[job.job_id]:
-                        job.total_downloaded -= chunk_downloaded
+                        job.total_downloaded -= total_to_subtract
                 progress._speed_samples.clear()
                 if attempt < retry_attempts and not job.is_cancelled and job.status != "paused":
                     time.sleep(retry_delay)

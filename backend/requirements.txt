@@ -6,3 +6,7 @@ psutil
 python-multipart
 websockets
 libtorrent
+pystray
+pillow
+typer
+rich

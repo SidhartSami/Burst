@@ -86,8 +86,9 @@ _DEFAULTS: Dict[str, Any] = {
     "SPEEDTEST_URL": SPEEDTEST_URL,
     "SPEEDTEST_TIMEOUT": SPEEDTEST_TIMEOUT,
     "HTTP_HANDLER_SIZE_THRESHOLD": HTTP_HANDLER_SIZE_THRESHOLD,
-    "DOWNLOAD_PATH": os.path.join(os.path.expanduser("~"), "Downloads", "burst-download.bin"),
-    "THEME_MODE": "dark",
+    "DOWNLOAD_PATH": "C:\\Burst",
+    "THEME_MODE": "system",
+    "START_ON_BOOT": True,
 }
 
 

@@ -19,7 +19,7 @@
   ],
 
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"]
   },
 
   "action": {
@@ -27,6 +27,15 @@
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
+    }
+  },
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "burst@sidhartsami.com",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
 

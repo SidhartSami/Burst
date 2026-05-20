@@ -497,6 +497,7 @@ input[type=number] {
   flex-direction: column;
   gap: 12px;
   transition: box-shadow 0.2s;
+  position: relative; /* Added for absolute positioning of cancel button */
 }
 
 .dl-card:hover {
@@ -506,19 +507,27 @@ input[type=number] {
 .dl-card-top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
 }
 
 .dl-title-row {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 1;
+  min-width: 0;
+  margin-right: 16px;
 }
 
 .dl-filename {
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .status-badge {
@@ -527,6 +536,7 @@ input[type=number] {
   padding: 2px 6px;
   border-radius: 4px;
   text-transform: uppercase;
+  flex-shrink: 0; /* Prevent the status badge from shrinking */
 }
 
 .status-badge.downloading {
@@ -559,12 +569,33 @@ input[type=number] {
   font-size: 13px;
   color: var(--accent);
   font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .dl-actions {
   display: flex;
-  gap: 4px;
+  gap: 8px;
   align-items: center;
+  flex-shrink: 0;
+  margin-right: 0px;
+}
+
+.cancel-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.cancel-btn:hover {
+  background: rgba(232, 17, 35, 0.1);
+  color: #e81123;
 }
 
 .action-btn {
@@ -581,6 +612,112 @@ input[type=number] {
 .action-btn:hover {
   background: var(--surface-hover);
   color: var(--text);
+}
+
+.boost-btn {
+  position: relative;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.boost-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.boost-btn.active-boost {
+  color: var(--accent);
+  background: transparent;
+}
+
+/* Custom Switch Toggle */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--surface-hover);
+  border: 1px solid var(--border);
+  transition: .2s ease;
+  border-radius: 22px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 14px;
+  width: 14px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--text-muted);
+  transition: .2s ease;
+  border-radius: 50%;
+}
+
+.switch input:checked + .slider {
+  background-color: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.switch input:checked + .slider:before {
+  transform: translateX(18px);
+  background-color: var(--accent);
+}
+
+/* Custom Confirm Modal */
+.confirm-modal {
+  width: 380px !important;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+  padding: 24px;
+  text-align: left;
+}
+
+.confirm-modal-title {
+  font-family: 'Bricolage Grotesque', sans-serif;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  margin-bottom: 12px !important;
+  color: var(--text);
+}
+
+.confirm-modal-message {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
 }
 
 .iface-pills {
@@ -689,11 +826,20 @@ input[type=number] {
   margin-bottom: 8px;
   border-color: transparent;
   background: rgba(255, 255, 255, 0.03);
+  align-items: center;
 }
 
 .completed-row.mini .completed-filename {
   font-size: 13px;
   font-weight: 500;
+  margin-bottom: 0;
+  flex: 0 1 auto;
+}
+
+.completed-row.mini .completed-meta {
+  display: flex;
+  align-items: center;
+  margin-left: 2px;
 }
 
 .completed-info {
@@ -1041,4 +1187,83 @@ input[type=number] {
 
 .btn-primary-small:hover {
   background: var(--accent-hover);
+}
+
+/* Settings Tooltips and Speed Limiter helper styles */
+.setting-label-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.tooltip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s ease;
+}
+
+.tooltip-trigger:hover {
+  color: var(--accent);
+}
+
+.tooltip-content {
+  visibility: hidden;
+  opacity: 0;
+  width: 250px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 12px;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  position: absolute;
+  bottom: 130%;
+  left: -20px;
+  transform: translateY(4px);
+  z-index: 1000;
+  transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s ease;
+  pointer-events: none;
+  font-family: "DM Sans", sans-serif;
+  font-weight: normal;
+  white-space: normal;
+  text-transform: none;
+}
+
+.tooltip-content::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 22px;
+  border-width: 5px;
+  border-style: solid;
+  border-color: var(--border) transparent transparent transparent;
+}
+
+.tooltip-trigger:hover .tooltip-content {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.prompt-description {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: -10px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.tab-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: -10px;
+  margin-bottom: 20px;
+  line-height: 1.5;
 }

@@ -28,8 +28,6 @@ import config
 from history_manager import load_history, save_to_history
 from setup_utils import apply_firewall_rules
 from contextlib import asynccontextmanager
-import tkinter as tk
-from tkinter import filedialog
 
 
 class DownloadRequest(BaseModel):
@@ -64,19 +62,55 @@ class SettingsUpdate(BaseModel):
     settings: Dict[str, Any]
 
 
+async def history_saver_loop():
+    saved_ids = set()
+    try:
+        saved_ids = {item.get("job_id") for item in load_history()}
+    except Exception as e:
+        print(f"[HISTORY_LOOP] Init error: {e}")
+    
+    while True:
+        try:
+            current_jobs = list(manager.jobs.values()) + list(active_torrents.values())
+            for job in current_jobs:
+                jid = job.job_id
+                if jid not in saved_ids and job.status in ("completed", "failed"):
+                    if getattr(job, "url", None) and "BURST_INTERNAL_CHECK" in job.url:
+                        continue
+                    save_to_history(job.to_dict())
+                    saved_ids.add(jid)
+        except Exception as e:
+            print(f"[HISTORY_LOOP] error: {e}")
+        await asyncio.sleep(1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run firewall setup in a separate thread so it doesn't block the startup
+    # Run firewall and native messaging host setup in a separate thread so it doesn't block startup
     from threading import Thread
-    Thread(target=apply_firewall_rules, daemon=True).start()
+    from setup_utils import apply_firewall_rules, setup_native_host
+    def startup_setup():
+        apply_firewall_rules()
+        setup_native_host()
+        
+    Thread(target=startup_setup, daemon=True).start()
     
-    # Start polling loop
+    # Load state
+    await load_state()
+
+    # Start polling loops
     task = asyncio.create_task(interface_polling_loop())
+    state_task = asyncio.create_task(save_state_loop())
+    history_task = asyncio.create_task(history_saver_loop())
     yield
     # Shutdown: Clean up if needed
     task.cancel()
+    state_task.cancel()
+    history_task.cancel()
     try:
         await task
+        await state_task
+        await history_task
     except asyncio.CancelledError:
         pass
 
@@ -84,6 +118,11 @@ app = FastAPI(title="Burst API", version="0.2.0", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 event_bus: Set[WebSocket] = set()
+
+# Global reference for window and quitting flag
+window_ref = None
+is_quitting = False
+uvicorn_server = None
 
 async def broadcast_event(event_type: str, data: Any):
     """Notify all global event listeners."""
@@ -151,8 +190,17 @@ async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
 
 @app.post("/download")
 async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
+    # Show the hidden window on new actual download
+    if "BURST_INTERNAL_CHECK" not in payload.url:
+        global window_ref
+        if window_ref:
+            try:
+                window_ref.show()
+            except Exception as e:
+                print(f"Error showing window: {e}")
+
     # Auto-detect download type
-    is_torrent = payload.url.startswith("magnet:") or payload.url.lower().endswith(".torrent")
+    is_torrent = payload.url.startswith("magnet:")
     
     if is_torrent:
         try:
@@ -160,6 +208,7 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
             # Only broadcast if it's not an internal check (though pings usually aren't magnets)
             if "BURST_INTERNAL_CHECK" not in payload.url:
                 await broadcast_event("new_job", {"job_id": job.job_id})
+                save_state()
             return {"job_id": job.job_id, "status": job.status, "type": "torrent"}
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -175,6 +224,7 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
         # Don't notify UI about internal health checks
         if "BURST_INTERNAL_CHECK" not in payload.url:
             await broadcast_event("new_job", {"job_id": job.job_id})
+            save_state()
             
         return {"job_id": job.job_id, "status": job.status, "type": "download"}
     except Exception as exc:
@@ -258,6 +308,13 @@ async def get_history():
     return {"history": all_history}
 
 
+@app.post("/history/clear")
+async def clear_history_api():
+    from history_manager import clear_history
+    clear_history()
+    return {"status": "success"}
+
+
 # ---------------------------------------------------------------------------
 # Settings endpoints
 # ---------------------------------------------------------------------------
@@ -268,19 +325,34 @@ async def get_settings() -> Dict[str, Any]:
 
 @app.post("/settings")
 async def update_settings(payload: SettingsUpdate) -> Dict[str, Any]:
+    # Check if START_ON_BOOT state changes
+    old_settings = config.load_settings()
+    old_boot = old_settings.get("START_ON_BOOT", True)
+    new_boot = payload.settings.get("START_ON_BOOT", True)
+    
     updated = config.save_settings(payload.settings)
+    
+    if old_boot != new_boot:
+        from setup_utils import apply_autostart_rules
+        apply_autostart_rules(new_boot)
+        
     return {"settings": updated}
 
 
 @app.post("/settings/reset")
 async def reset_settings() -> Dict[str, Any]:
-    return {"settings": config.reset_settings()}
+    settings = config.reset_settings()
+    from setup_utils import apply_autostart_rules
+    apply_autostart_rules(settings.get("START_ON_BOOT", True))
+    return {"settings": settings}
 
 
 @app.get("/select-path")
 async def select_path():
     """Opens a native directory selection dialog and returns the selected path."""
     try:
+        import tkinter as tk
+        from tkinter import filedialog
         root = tk.Tk()
         root.withdraw()
         root.attributes('-topmost', True)
@@ -387,6 +459,73 @@ async def interface_polling_loop():
             pass
         await asyncio.sleep(3)
 
+import json
+
+async def load_state():
+    try:
+        if os.path.exists("burst_active_jobs.json"):
+            with open("burst_active_jobs.json", "r") as f:
+                state = json.load(f)
+            
+            # Use active interfaces to map them back
+            all_ifaces = get_active_interfaces_dict()
+            
+            for t_job in state.get("torrents", []):
+                try:
+                    await start_torrent_download(
+                        magnet_uri=t_job["magnet_uri"],
+                        output_path=t_job["output_path"],
+                        interface_ips=t_job["interface_ips"],
+                        bandwidth_limits=t_job.get("bandwidth_limits", {}),
+                        job_id=t_job["job_id"],
+                        resume_data=t_job
+                    )
+                except Exception as e:
+                    print(f"Error resuming torrent job: {e}")
+                    
+            for d_job in state.get("downloads", []):
+                try:
+                    interfaces = []
+                    for ip in d_job.get("interfaces", {}):
+                        # Match with active interfaces if possible
+                        matched = next((i for i in all_ifaces if i["ip_address"] == ip), None)
+                        if matched:
+                            interfaces.append(matched)
+                        else:
+                            interfaces.append({"name": "Unknown", "ip_address": ip})
+                            
+                    if not interfaces:
+                        if all_ifaces:
+                            interfaces.append(all_ifaces[0])
+                            
+                    await manager.resume_job(d_job, interfaces)
+                except Exception as e:
+                    print(f"Error resuming download job: {e}")
+    except Exception as e:
+        print(f"Failed to load state: {e}")
+
+def save_state():
+    try:
+        downloads = [
+            j.to_dict() for j in manager.jobs.values()
+            if j.status not in ("completed", "failed", "cancelled")
+            and "BURST_INTERNAL_CHECK" not in j.url
+        ]
+        torrents = [
+            j.to_dict() for j in active_torrents.values()
+            if j.status not in ("completed", "failed", "cancelled")
+        ]
+        
+        with open("burst_active_jobs.json", "w") as f:
+            json.dump({"downloads": downloads, "torrents": torrents}, f)
+    except Exception as e:
+        print(f"State save error: {e}")
+
+async def save_state_loop():
+    while True:
+        save_state()
+        await asyncio.sleep(5)
+
 # startup/shutdown handled by lifespan decorator
 
 @app.post("/download/{job_id}/add_interface")
@@ -431,39 +570,102 @@ async def remove_interface_from_job(job_id: str, payload: RemoveInterfaceRequest
 
 @app.post("/download/{job_id}/pause")
 async def pause_download(job_id: str) -> Dict[str, Any]:
-    try:
-        return await manager.pause_job(job_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    # Check regular manager first
+    job = manager.get_job(job_id)
+    if job:
+        try:
+            res = await manager.pause_job(job_id)
+            save_state()
+            return res
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+            
+    # Check torrent manager
+    tjob = active_torrents.get(job_id)
+    if tjob:
+        res = await tjob.pause()
+        save_state()
+        return res
+        
+    raise HTTPException(status_code=404, detail="Job not found")
 
 @app.post("/download/{job_id}/resume")
 async def resume_download(job_id: str) -> Dict[str, Any]:
-    try:
-        return await manager.resume_job(job_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    # Check regular manager first
+    job = manager.get_job(job_id)
+    if job:
+        try:
+            res = await manager.resume_job(job_id)
+            save_state()
+            return res
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+            
+    # Check torrent manager
+    tjob = active_torrents.get(job_id)
+    if tjob:
+        res = await tjob.resume()
+        save_state()
+        return res
+        
+    raise HTTPException(status_code=404, detail="Job not found")
 
 @app.post("/download/{job_id}/cancel")
 async def cancel_download(job_id: str) -> Dict[str, Any]:
     # Check regular manager first
     job = manager.get_job(job_id)
     if job:
-        return await manager.cancel_job(job_id)
+        res = await manager.cancel_job(job_id)
+        save_state()
+        return res
     
     # Check torrent manager
     tjob = active_torrents.get(job_id)
     if tjob:
-        return await tjob.cancel()
+        res = await tjob.cancel()
+        save_state()
+        return res
     
+    raise HTTPException(status_code=404, detail="Job not found")
+
+@app.post("/download/{job_id}/boost")
+async def toggle_boost_download(job_id: str) -> Dict[str, Any]:
+    active_ifaces = get_active_interfaces_dict()
+    # Check regular manager first
+    job = manager.get_job(job_id)
+    if job:
+        try:
+            res = await manager.toggle_boost(job_id, active_ifaces)
+            save_state()
+            return res
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+            
+    # Check torrent manager
+    tjob = active_torrents.get(job_id)
+    if tjob:
+        res = await tjob.toggle_boost(active_ifaces)
+        save_state()
+        return res
+        
     raise HTTPException(status_code=404, detail="Job not found")
 
 @app.post("/torrent/start")
 async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
+    # Show the hidden window on new torrent download
+    global window_ref
+    if window_ref:
+        try:
+            window_ref.show()
+        except Exception as e:
+            print(f"Error showing window: {e}")
+
     if not req.interface_ips:
         raise HTTPException(status_code=400, detail="No interfaces selected")
     try:
         job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, req.bandwidth_limits)
         await broadcast_event("new_job", {"job_id": job.job_id})
+        save_state()
         return {"job_id": job.job_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -474,6 +676,24 @@ async def get_torrent_status(job_id: str) -> Dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
+
+@app.post("/show")
+async def show_window_endpoint():
+    global window_ref
+    if window_ref:
+        try:
+            window_ref.show()
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "detail": str(e)}
+    return {"status": "no_window"}
+
+@app.post("/shutdown")
+async def shutdown_endpoint():
+    global uvicorn_server
+    if uvicorn_server:
+        uvicorn_server.should_exit = True
+    return {"status": "shutting_down"}
 
 # ---------------------------------------------------------------------------
 # Serve Production UI
@@ -503,13 +723,116 @@ if os.path.exists(frontend_dist):
             return FileResponse(file_path)
         return FileResponse(os.path.join(frontend_dist, "index.html"))
 
+def setup_tray(window):
+    try:
+        import pystray
+        from PIL import Image
+        import threading
+        import sys
+        import os
+
+        def load_tray_icon():
+            try:
+                # Try standard assets/logo.png path (dev)
+                logo_path = resource_path("assets/logo.png")
+                if os.path.exists(logo_path):
+                    return Image.open(logo_path)
+                # Try root logo.png path (PyInstaller bundle root)
+                root_logo_path = resource_path("logo.png")
+                if os.path.exists(root_logo_path):
+                    return Image.open(root_logo_path)
+            except:
+                pass
+            # Fallback block
+            return Image.new('RGB', (64, 64), color=(0, 102, 204))
+
+        def on_open(icon, item):
+            window.show()
+
+        def on_exit(icon, item):
+            global is_quitting
+            is_quitting = True
+            try:
+                import requests as req
+                req.post("http://127.0.0.1:59284/shutdown", timeout=2)
+            except Exception:
+                pass
+            icon.stop()
+            try:
+                window.destroy()
+            except:
+                pass
+            sys.exit(0)
+
+        image = load_tray_icon()
+        menu = pystray.Menu(
+            pystray.MenuItem('Open Burst', on_open, default=True),
+            pystray.MenuItem('Quit', on_exit)
+        )
+        icon = pystray.Icon("Burst", image, "Burst Download Manager", menu)
+        
+        t = threading.Thread(target=icon.run, daemon=True)
+        t.start()
+        print("System tray icon started successfully.")
+    except Exception as e:
+        print(f"Failed to initialize system tray: {e}")
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "pip":
+        from cli import run_pip_cli
+        run_pip_cli()
+        sys.exit(0)
+
     import uvicorn
     import webview
     from threading import Thread
+    import sys
+    import urllib.request
+
+    # Parse headless argument
+    headless = False
+    if "--headless" in sys.argv:
+        headless = True
+        sys.argv.remove("--headless")
+
+    # 0. Single instance check using socket (more reliable than HTTP timeout)
+    import socket
+    is_running = False
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.connect(("127.0.0.1", 59284))
+        is_running = True
+    except:
+        pass
+
+    startup_url = None
+    if is_running:
+        if len(sys.argv) > 1:
+            try:
+                import os
+                sys.path.insert(0, os.path.dirname(__file__))
+                from native_host import handle
+                handle({"url": sys.argv[1]})
+            except Exception as e:
+                print("Error sending to running instance:", e)
+        else:
+            # Wake up/show the existing UI
+            try:
+                import urllib.request
+                req = urllib.request.Request("http://127.0.0.1:59284/show", method="POST")
+                with urllib.request.urlopen(req) as response:
+                    pass
+            except Exception as e:
+                print("Error waking up running instance UI:", e)
+        sys.exit(0)
+    else:
+        if len(sys.argv) > 1:
+            startup_url = sys.argv[1]
 
     # 1. Define the server thread
     def start_server():
+        global uvicorn_server
         # Full silent config for Uvicorn
         full_silence_config = {
             "version": 1,
@@ -526,52 +849,100 @@ if __name__ == "__main__":
             },
         }
         # Passing 'app' object directly is safer for PyInstaller
-        uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_config=full_silence_config, use_colors=False)
+        config_obj = uvicorn.Config(app, host="127.0.0.1", port=59284, reload=False, log_config=full_silence_config, use_colors=False)
+        uvicorn_server = uvicorn.Server(config_obj)
+        uvicorn_server.run()
 
     # 2. Start server in background
     t = Thread(target=start_server)
     t.daemon = True
     t.start()
 
-    # 3. Create the API for Window Controls
+    # 3. Wait for server to be fully ready before initializing the UI thread
+    import time
+    import urllib.request
+    server_ready = False
+    for _ in range(40):  # Wait up to 4 seconds
+        try:
+            urllib.request.urlopen("http://127.0.0.1:59284/interfaces?benchmark=false", timeout=0.1)
+            server_ready = True
+            break
+        except Exception:
+            time.sleep(0.1)
+    if not server_ready:
+        webview.create_window(
+            "Burst Startup Error",
+            html="<h3>Burst could not start</h3><p>The local API did not become ready. Please restart Burst.</p>",
+            width=420,
+            height=180,
+            resizable=False,
+        )
+        webview.start()
+        sys.exit(1)
+    time.sleep(0.3)  # Grace period to let background state loads complete smoothly
+
+    # 4. Create the API for Window Controls
     class WindowAPI:
         def __init__(self):
-            self.window = None
+            self._window = None
         def set_window(self, window):
-            self.window = window
+            self._window = window
 
         def close(self):
-            if self.window: self.window.destroy()
+            if self._window: self._window.hide()
         def minimize(self):
-            if self.window: self.window.minimize()
+            if self._window: self._window.minimize()
         def maximize(self):
-            if self.window:
-                if self.window.fullscreen:
-                    self.window.toggle_fullscreen()
+            if self._window:
+                if self._window.fullscreen:
+                    self._window.toggle_fullscreen()
                 else:
-                    self.window.maximize()
+                    self._window.maximize()
 
     api = WindowAPI()
 
-    # 4. Define the background loader
+    # 5. Define the background loader (handles startup URL only)
     def load_logic(window):
-        # Wait for server to be ready
-        import time
-        time.sleep(2)
-        window.load_url("http://127.0.0.1:8000")
+        if startup_url:
+            try:
+                import os
+                import sys
+                sys.path.insert(0, os.path.dirname(__file__))
+                from native_host import handle
+                handle({"url": startup_url})
+            except Exception as e:
+                print(f"Failed to process startup URL: {e}")
 
-    # 5. Create and Start instantly
+    # 6. Create and Start directly with URL to prevent threading exceptions
     window = webview.create_window(
         "Burst", 
-        url=None, # Start empty so it's instant
+        url="http://127.0.0.1:59284",
         width=950, 
         height=680, 
         frameless=True, 
         easy_drag=True,
         resizable=False,
+        hidden=headless,
         js_api=api
     )
     api.set_window(window)
+    
+    # Keep reference to the window globally
+    window_ref = window
+
+    # Intercept window close (closing) event to hide instead of destroy
+    def on_closing():
+        global is_quitting
+        if is_quitting:
+            return True
+        if window:
+            window.hide()
+        return False
+        
+    window.events.closing += on_closing
+
+    # Start the system tray icon
+    setup_tray(window)
     
     # Start the engine - this runs the load_logic in the background
     webview.start(load_logic, window)

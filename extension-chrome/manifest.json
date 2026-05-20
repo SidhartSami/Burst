@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyb2vnMJoyzaeBTqviOtHFO5fWmbqrNafjFf4dNEvTxdzsjHXNmgYehT2IuriowJhBLKK7wIoaKMIKflbpRqP+NajFipmpETdaCplq0KaJHMpRL8BiIC+Pg7VrB9SM4g0MOJcNj35grQxdoURRqH7RmGZcFBbCgoJAQoS3B9acM1C+wd8s+S3hAdNpMSD2hwVFqO3UqNUp1OGE9p5F3jEB+JnQ3185oMoHZBagPKdmfNkmfzitgZqasAVFFvVjbYK4tDhnfjCHiwb3p0NzbmJ3Eje85EG14Hm2GgaCFPLWlBcWC3E4NZyYGbsw4EL6xiRkZFDO+XwENn4ZJS6Ex1j1wIDAQAB",
+  "name": "Burst Download Manager",
+  "version": "1.0.0",
+  "description": "Send downloads and magnet links to Burst for maximum bandwidth bonding.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "nativeMessaging",
+    "contextMenus",
+    "storage",
+    "notifications"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "burst@sidhartsami.com"
+    }
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
