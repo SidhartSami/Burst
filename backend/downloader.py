@@ -238,7 +238,7 @@ class DownloadManager:
         self._job_tasks[job_id] = asyncio.create_task(self._run_job(job, interfaces))
         return job
 
-    async def resume_job(self, data: dict, interfaces: List[Dict[str, str]]) -> DownloadJob:
+    async def resume_job_from_state(self, data: dict, interfaces: List[Dict[str, str]]) -> DownloadJob:
         if not interfaces:
             raise ValueError("At least one interface is required")
             

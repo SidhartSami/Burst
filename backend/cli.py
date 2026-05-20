@@ -37,24 +37,25 @@ console = Console()
 
 
 def _attach_console() -> None:
-    """Attach to the parent console or allocate a new one for windowed build."""
+    """Attach to the parent console for windowed build."""
     if os.name != "nt":
         return
     try:
         # Try to attach to the calling terminal first (cmd, powershell)
+        # -1 is ATTACH_PARENT_PROCESS
         if ctypes.windll.kernel32.AttachConsole(-1):
+            # Re-map standard streams to the attached console
+            # Use 'w' mode for console output, ensure correct encoding
             sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="ignore")
             sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
             sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
-            console.file = sys.stdout
-            return
             
-        # Fallback: Allocate a new console if run as windowed without a parent terminal
-        ctypes.windll.kernel32.AllocConsole()
-        sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="ignore")
-        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
-        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="ignore")
-        console.file = sys.stdout
+            # Sync Python's high-level sys.stdout with the new file handles
+            import io
+            sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding="utf-8", line_buffering=True)
+            sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding="utf-8", line_buffering=True)
+            
+            console.file = sys.stdout
     except Exception:
         pass
 
@@ -73,11 +74,19 @@ def _pip_command() -> List[str]:
 
 
 def _run_command(command: List[str]) -> subprocess.CompletedProcess[str]:
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
     return subprocess.run(
         command,
         text=True,
         capture_output=True,
         check=False,
+        startupinfo=startupinfo,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     )
 
 
@@ -248,7 +257,19 @@ def install(ctx: typer.Context) -> None:
             + ["install", "--find-links", str(tmp_dir), "--no-index", "--no-input"]
             + [str(path) for path in artifacts]
         )
-        result = subprocess.run(install_command, check=False)
+        
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        result = subprocess.run(
+            install_command, 
+            check=False,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        )
         if result.returncode != 0:
             raise RuntimeError(f"pip install failed with exit code {result.returncode}")
 
@@ -262,7 +283,14 @@ def install(ctx: typer.Context) -> None:
 
 def run_pip_cli() -> None:
     _attach_console()
-    if len(sys.argv) < 3 or sys.argv[2] != "install":
-        console.print("[red]Error:[/red] expected 'burst pip install <packages>'")
-        raise typer.Exit(1)
-    app(args=sys.argv[3:], prog_name="burst pip install")
+    
+    # Filter out any 'pip' arguments that might be present due to the alias or user input
+    # e.g., 'Burst.exe pip install' or 'Burst.exe pip pip install'
+    filtered_args = [arg for arg in sys.argv[1:] if arg != "pip"]
+    
+    if not filtered_args or filtered_args[0] != "install":
+        console.print("[red]Error:[/red] expected 'burst-cli pip install <packages>' or 'burst-cli install <packages>'")
+        sys.exit(1)
+        
+    # Pass everything after 'install' to the pip app
+    app(args=filtered_args[1:], prog_name="burst-cli pip install")

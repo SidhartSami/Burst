@@ -5,6 +5,16 @@ import asyncio
 import time
 import sys
 import os
+import ctypes
+
+# ---------------------------------------------------------------------------
+# Console Management for Windowed Mode
+# ---------------------------------------------------------------------------
+def hide_console():
+    """Hides the console window if running as a frozen executable."""
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        # SW_HIDE = 0
+        ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
 
 # Redirect stdout/stderr to devnull for --noconsole mode
 if sys.stdout is None:
@@ -16,7 +26,7 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 import os
 
@@ -114,7 +124,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-app = FastAPI(title="Burst API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Burst API", version="1.2.1", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 event_bus: Set[WebSocket] = set()
@@ -243,8 +253,14 @@ async def get_download_status(job_id: str) -> Dict[str, Any]:
 async def cancel_download(job_id: str) -> Dict[str, Any]:
     job = manager.get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        tjob = active_torrents.get(job_id)
+        if not tjob:
+            raise HTTPException(status_code=404, detail="Job not found")
+        tjob.is_cancelled = True
+        save_state()
+        return {"status": "cancelled"}
     job.is_cancelled = True
+    save_state()
     return {"status": "cancelled"}
 
 
@@ -471,6 +487,8 @@ async def load_state():
             all_ifaces = get_active_interfaces_dict()
             
             for t_job in state.get("torrents", []):
+                if t_job.get("status") in ("cancelled", "failed"):
+                    continue
                 try:
                     await start_torrent_download(
                         magnet_uri=t_job["magnet_uri"],
@@ -482,8 +500,10 @@ async def load_state():
                     )
                 except Exception as e:
                     print(f"Error resuming torrent job: {e}")
-                    
+
             for d_job in state.get("downloads", []):
+                if d_job.get("status") in ("cancelled", "failed"):
+                    continue
                 try:
                     interfaces = []
                     for ip in d_job.get("interfaces", {}):
@@ -493,12 +513,12 @@ async def load_state():
                             interfaces.append(matched)
                         else:
                             interfaces.append({"name": "Unknown", "ip_address": ip})
-                            
+
                     if not interfaces:
                         if all_ifaces:
                             interfaces.append(all_ifaces[0])
-                            
-                    await manager.resume_job(d_job, interfaces)
+
+                    await manager.resume_job_from_state(d_job, interfaces)
                 except Exception as e:
                     print(f"Error resuming download job: {e}")
     except Exception as e:
@@ -509,11 +529,13 @@ def save_state():
         downloads = [
             j.to_dict() for j in manager.jobs.values()
             if j.status not in ("completed", "failed", "cancelled")
+            and not getattr(j, "is_cancelled", False)
             and "BURST_INTERNAL_CHECK" not in j.url
         ]
         torrents = [
             j.to_dict() for j in active_torrents.values()
             if j.status not in ("completed", "failed", "cancelled")
+            and not getattr(j, "is_cancelled", False)
         ]
         
         with open("burst_active_jobs.json", "w") as f:
@@ -564,6 +586,17 @@ async def remove_interface_from_job(job_id: str, payload: RemoveInterfaceRequest
         
     try:
         result = await manager.remove_interface(job_id, payload.interface_ip)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/download/{job_id}/interface/{ip}/exclude")
+async def exclude_interface(job_id: str, ip: str) -> Dict[str, Any]:
+    job = manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        result = await manager.remove_interface(job_id, ip)
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -704,24 +737,38 @@ def resource_path(relative_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.join(os.path.dirname(__file__), "..")
+        # In dev, we are in backend/main.py, so we go up one level to the root
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
     return os.path.join(base_path, relative_path)
 
 frontend_dist = resource_path("frontend/dist")
 
-if os.path.exists(frontend_dist):
-    # Mount assets folder for JS/CSS
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+# Mount assets folder for JS/CSS if it exists
+assets_dir = os.path.join(frontend_dist, "assets")
+if os.path.exists(assets_dir):
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-    # Catch-all to serve index.html for any other URL (SPA support)
-    @app.get("/{full_path:path}")
-    async def serve_frontend(full_path: str):
-        # Check if the requested path is a file in the dist root (like favicon.ico)
-        file_path = os.path.join(frontend_dist, full_path)
-        if full_path and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+@app.get("/", include_in_schema=False)
+async def serve_index():
+    index_path = os.path.join(frontend_dist, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse(content=f"<h3>Burst UI Error</h3><p>index.html not found at: {index_path}</p>", status_code=404)
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_frontend(full_path: str):
+    # Check if the requested path is a file in the dist root (like favicon.ico)
+    file_path = os.path.join(frontend_dist, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    # SPA Fallback: serve index.html for unknown routes
+    index_path = os.path.join(frontend_dist, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    
+    return HTMLResponse(content="<h3>Burst UI Not Found</h3>", status_code=404)
 
 def setup_tray(window):
     try:
@@ -778,10 +825,24 @@ def setup_tray(window):
         print(f"Failed to initialize system tray: {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "pip":
-        from cli import run_pip_cli
-        run_pip_cli()
-        sys.exit(0)
+    # 1. Handle CLI commands (NO elevation needed)
+    # Check if 'pip' is anywhere in the arguments to avoid logic leaks
+    if any(arg == "pip" for arg in sys.argv):
+        try:
+            from cli import run_pip_cli
+            run_pip_cli()
+        finally:
+            # Absolute exit to prevent any fall-through to elevation code
+            os._exit(0)
+
+    # 2. Handle GUI elevation
+    # The main app needs admin for firewall rules and interface binding
+    from setup_utils import is_admin, request_elevation
+    if not is_admin():
+        request_elevation()
+    
+    # Hide the console window immediately for GUI mode
+    hide_console()
 
     import uvicorn
     import webview
@@ -858,30 +919,7 @@ if __name__ == "__main__":
     t.daemon = True
     t.start()
 
-    # 3. Wait for server to be fully ready before initializing the UI thread
-    import time
-    import urllib.request
-    server_ready = False
-    for _ in range(40):  # Wait up to 4 seconds
-        try:
-            urllib.request.urlopen("http://127.0.0.1:59284/interfaces?benchmark=false", timeout=0.1)
-            server_ready = True
-            break
-        except Exception:
-            time.sleep(0.1)
-    if not server_ready:
-        webview.create_window(
-            "Burst Startup Error",
-            html="<h3>Burst could not start</h3><p>The local API did not become ready. Please restart Burst.</p>",
-            width=420,
-            height=180,
-            resizable=False,
-        )
-        webview.start()
-        sys.exit(1)
-    time.sleep(0.3)  # Grace period to let background state loads complete smoothly
-
-    # 4. Create the API for Window Controls
+    # 3. Create the API for Window Controls
     class WindowAPI:
         def __init__(self):
             self._window = None
@@ -901,8 +939,26 @@ if __name__ == "__main__":
 
     api = WindowAPI()
 
-    # 5. Define the background loader (handles startup URL only)
+    # 4. Define the background loader (handles backend status polling and startup URL)
     def load_logic(window):
+        import time
+        import urllib.request
+        server_ready = False
+        for _ in range(40):  # Wait up to 4 seconds
+            try:
+                urllib.request.urlopen("http://127.0.0.1:59284/interfaces?benchmark=false", timeout=0.1)
+                server_ready = True
+                break
+            except Exception:
+                time.sleep(0.1)
+        
+        if not server_ready:
+            window.load_html("<h3>Burst could not start</h3><p>The local API did not become ready. Please restart Burst.</p>")
+            return
+            
+        time.sleep(0.3)  # Grace period to let background state loads complete smoothly
+        window.load_url("http://127.0.0.1:59284")
+
         if startup_url:
             try:
                 import os
@@ -913,10 +969,69 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Failed to process startup URL: {e}")
 
-    # 6. Create and Start directly with URL to prevent threading exceptions
+    # 5. Create and Start directly with beautiful HTML loading page to prevent delays
+    loading_html = """<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0f0f11;
+            color: #f3f4f6;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        .container {
+            text-align: center;
+        }
+        .logo {
+            font-size: 2.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 1rem;
+            letter-spacing: -0.05em;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(249, 115, 22, 0.1);
+            border-radius: 50%;
+            border-top-color: #f97316;
+            animation: spin 1s ease-in-out infinite;
+            margin: 0 auto 1.5rem auto;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .status {
+            font-size: 0.875rem;
+            color: #9ca3af;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">BURST</div>
+        <div class="spinner"></div>
+        <div class="status">Connecting to engine...</div>
+    </div>
+</body>
+</html>"""
+
     window = webview.create_window(
         "Burst", 
-        url="http://127.0.0.1:59284",
+        html=loading_html,
         width=950, 
         height=680, 
         frameless=True, 

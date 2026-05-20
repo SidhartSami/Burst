@@ -9,6 +9,25 @@ def is_admin():
     except:
         return False
 
+def request_elevation():
+    """
+    Relaunches the current process with administrator privileges using the 'runas' verb.
+    This triggers the Windows UAC prompt.
+    """
+    if not is_admin():
+        # Prepare arguments: exclude the first arg (executable path)
+        args = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
+        try:
+            # ShellExecuteW with 'runas' triggers UAC elevation
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, args, None, 1
+            )
+            sys.exit(0)
+        except Exception as e:
+            print(f"Elevation request failed: {e}")
+            return False
+    return True
+
 def apply_firewall_rules():
     if not is_admin():
         print("Skipping firewall setup (not running as Admin).")

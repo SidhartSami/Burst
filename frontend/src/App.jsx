@@ -27,6 +27,21 @@ const API_BASE = (window.location.port === "5173" || window.location.port === "4
   : window.location.origin;
 const HISTORY_KEY = "burst_history";
 
+const CHROME_SVG = (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" fill="#4285F4"/>
+    <path d="M12 17C14.7614 17 17 14.7614 17 12C17 9.23858 14.7614 7 12 7C9.23858 7 7 9.23858 7 12C7 14.7614 9.23858 17 12 17Z" fill="white"/>
+    <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" fill="#4285F4"/>
+  </svg>
+);
+
+const FIREFOX_SVG = (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12Z" fill="#FF7139"/>
+    <path d="M12 17C14.7614 17 17 14.7614 17 12C17 9.23858 14.7614 7 12 7C9.23858 7 7 9.23858 7 12C7 14.7614 9.23858 17 12 17Z" fill="white"/>
+  </svg>
+);
+
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -94,9 +109,27 @@ function readDroppedUrl(event) {
   return "";
 }
 
-function PromptModal({ isOpen, title, hint, defaultValue, onConfirm, onCancel }) {
+function PromptModal({ isOpen, title, message, hint, defaultValue, onConfirm, onCancel, type }) {
   const [value, setValue] = useState(defaultValue);
   if (!isOpen) return null;
+
+  if (type === "confirm") {
+    return (
+      <div className="modal-overlay">
+        <div className="modal-content slide-in" style={{ width: '380px' }}>
+          <h3 style={{ marginBottom: '12px' }}>{title}</h3>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.5', marginBottom: '24px' }}>
+            {message}
+          </p>
+          <div className="modal-actions">
+            <button className="btn-secondary" onClick={onCancel}>Cancel</button>
+            <button className="btn-danger" onClick={() => onConfirm(value)}>Confirm</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="modal-overlay">
       <div className="modal-content slide-in">
@@ -151,14 +184,16 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
   const statusLabel = isPaused ? 'PAUSED' : status.status;
   const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (isPaused ? 'paused' : 'downloading'));
 
-  const pct = Math.min(100, ((status.total_downloaded || 0) / Math.max(1, status.expected_size || 1)) * 100);
+  const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
+  const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
+  const safePct = Math.max(0, pct);
 
   const speedRaw = status.type === "torrent"
     ? (status.speed_combined || 0) / (1024 * 1024)
     : currentInterfacesProgress.reduce((sum, item) => sum + Number(item.speed_mb_s || 0), 0);
 
   const combinedCurrentSpeed = isPaused ? 0 : speedRaw;
-  const eta = (!isPaused && combinedCurrentSpeed > 0) ? (status.expected_size - status.total_downloaded) / (combinedCurrentSpeed * 1024 * 1024) : 0;
+  const eta = (!isPaused && combinedCurrentSpeed > 0) ? (status.expected_size - safeDownloaded) / (combinedCurrentSpeed * 1024 * 1024) : 0;
 
   const handleCancelClick = () => {
     if (isDone) { onCancel(); return; }  // completed/failed — no confirmation needed
@@ -196,10 +231,14 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
           ) : (
             <>
               {status.status === 'downloading' && status.type !== 'torrent' && (
-                <button className="action-btn" onClick={onPause} title="Pause"><Pause size={15} /></button>
-              )}
-              {(status.status === 'paused' || status.status === 'waiting_reconnect') && (
-                <button className="action-btn" onClick={onResume} title="Resume"><Play size={15} /></button>
+                <button
+                  className={`action-btn boost-btn ${status.boosted ? 'active-boost' : ''}`}
+                  onClick={() => fetch(`${API_BASE}/download/${jid}/boost`, { method: 'POST' })}
+                  title="Boost bonded speed"
+                  style={{ color: status.boosted ? 'var(--accent)' : 'var(--text-muted)' }}
+                >
+                  <Zap size={15} fill={status.boosted ? 'var(--accent)' : 'none'} />
+                </button>
               )}
               <button className="action-btn" onClick={handleCancelClick} title="Dismiss"><X size={15} /></button>
             </>
@@ -233,6 +272,10 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
             <div
               key={iface.ip_address}
               className={`iface-pill ${isSelected ? 'active' : ''}`}
+              style={{
+                opacity: isPaused ? 0.4 : 1,
+                filter: isPaused ? 'grayscale(60%)' : 'none',
+              }}
               onClick={() => {
                 if (isDone) return;
                 setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
@@ -253,7 +296,11 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
       </div>
 
       <div className="dl-bottom">
-        <span>{pct.toFixed(1)}% • {formatBytes(status.total_downloaded)} / {formatBytes(status.expected_size)}</span>
+        {isPaused ? (
+          <span>Paused • {safePct.toFixed(1)}%</span>
+        ) : (
+          <span>{pct.toFixed(1)}% • {formatBytes(safeDownloaded)} / {formatBytes(status.expected_size)}</span>
+        )}
         <span>{!isPaused && status.status === 'downloading' ? formatETA(eta) : ''}</span>
       </div>
     </div>
@@ -293,8 +340,12 @@ export default function App() {
   const [bandwidthLimits, setBandwidthLimits] = useState({});
   const [appSettings, setAppSettings] = useState(null);
   const [promptData, setPromptData] = useState(null); // { title, value, ip }
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [bannerDismissed, setBannerDismissed] = useState(() => localStorage.getItem("burst_banner_dismissed") === "true");
 
   const jobSocketsRef = useRef({});
+  const dragCounter = useRef(0);
 
   useEffect(() => {
     if (isDarkMode) document.body.classList.add("dark");
@@ -313,46 +364,42 @@ export default function App() {
     const savedPath = localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/";
     if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
 
-    // 2. Fetch settings from backend in background
-    fetch(`${API_BASE}/settings`)
-      .then(r => r.json())
-      .then(d => {
-        setAppSettings(d.settings);
-        if (d.settings.THEME_MODE) {
-          setThemeMode(d.settings.THEME_MODE);
+    // 2. Fetch all configuration and active jobs concurrently to avoid waterfalls
+    Promise.all([
+      fetch(`${API_BASE}/settings`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/active-jobs`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/history`).then(r => r.json()).catch(() => null)
+    ])
+      .then(([settingsData, activeJobsData, historyData]) => {
+        // Handle settings
+        if (settingsData && settingsData.settings) {
+          setAppSettings(settingsData.settings);
+          if (settingsData.settings.THEME_MODE) {
+            setThemeMode(settingsData.settings.THEME_MODE);
+          }
+          if (settingsData.settings.DOWNLOAD_PATH && !url) {
+            setOutputPath(settingsData.settings.DOWNLOAD_PATH);
+          }
+          // Check onboarding completion
+          if (settingsData.settings.ONBOARDING_COMPLETE === false) {
+            setShowOnboarding(true);
+          }
         }
-        if (d.settings.DOWNLOAD_PATH && !url) {
-          setOutputPath(d.settings.DOWNLOAD_PATH);
-        }
-      })
-      .catch(() => { });
 
-    // 3. Fetch active jobs so background downloads added while UI was closed
-    //    are immediately visible on mount. The existing useEffect([activeJobs])
-    //    will automatically open a WebSocket for each new ID returned here.
-    fetch(`${API_BASE}/active-jobs`)
-      .then(r => r.json())
-      .then(d => {
-        if (d.job_ids && d.job_ids.length > 0) {
+        // Handle active jobs
+        if (activeJobsData && activeJobsData.job_ids && activeJobsData.job_ids.length > 0) {
           setActiveJobs(prev => {
             const merged = [...prev];
-            d.job_ids.forEach(id => { if (!merged.includes(id)) merged.push(id); });
+            activeJobsData.job_ids.forEach(id => { if (!merged.includes(id)) merged.push(id); });
             return merged;
           });
         }
-      })
-      .catch(() => {});
 
-    // 4. Hydrate history from the backend (includes jobs from previous sessions).
-    //    We only set history from the server if localStorage is empty so we don't
-    //    overwrite user-visible state on a normal reload.
-    fetch(`${API_BASE}/history`)
-      .then(r => r.json())
-      .then(d => {
-        if (d.history && d.history.length > 0) {
+        // Handle history
+        if (historyData && historyData.history && historyData.history.length > 0) {
           setHistory(prev => {
             if (prev.length > 0) return prev; // already have local history — don't stomp
-            return d.history.map(item => {
+            return historyData.history.map(item => {
               const duration = Math.max(0, (item.finished_at || 0) - (item.started_at || 0));
               const computedAvgSpeed = duration > 0
                 ? (item.total_downloaded || item.size || 0) / duration
@@ -373,8 +420,7 @@ export default function App() {
             }).slice(0, 50);
           });
         }
-      })
-      .catch(() => {});
+      });
 
     // 5. Listen for global events (like new downloads from extension)
     const eventWsUrl = API_BASE.replace("http", "ws") + "/ws/events";
@@ -433,21 +479,10 @@ export default function App() {
       setOutputPath(baseDir + magnetName);
       return;
     }
-    try {
-      const urlObj = new URL(newUrl);
-      const pathname = urlObj.pathname;
-      if (pathname && pathname !== "/") {
-        const segments = pathname.split("/");
-        const lastSegment = segments[segments.length - 1];
-        if (lastSegment && !lastSegment.includes("?") && lastSegment.includes(".")) {
-          setOutputPath(baseDir + lastSegment);
-          return;
-        }
-      }
-      setOutputPath(baseDir + "burst-download.bin");
-    } catch {
-      setOutputPath(baseDir + "burst-download.bin");
-    }
+    const filename = newUrl.split("/").pop()?.split("?")[0] || "burst-download.bin";
+    const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+    const safeDir = bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
+    setOutputPath(safeDir + filename);
   };
 
   const handleBrowsePath = async (callback) => {
@@ -663,20 +698,124 @@ export default function App() {
       });
   }, [jobStatuses, activeJobs]);
 
-  const clearHistory = () => setHistory([]);
+  const clearHistory = () => {
+    setPromptData({
+      title: "Clear History?",
+      message: "Are you sure you want to permanently clear your download history? This action cannot be undone.",
+      type: "confirm",
+      onConfirm: () => {
+        fetch(`${API_BASE}/history/clear`, { method: "POST" });
+        setHistory([]);
+        setPromptData(null);
+      }
+    });
+  };
 
   const activeConnectionCount = interfaces.length;
 
   return (
-    <div className={`app-container ${isDarkMode ? 'dark' : ''}`} onDragOver={e => { e.preventDefault(); setDragOverlay(true); }}>
-      {dragOverlay && (
-        <div className="drag-overlay" onDragLeave={() => setDragOverlay(false)} onDrop={e => {
-          e.preventDefault();
+    <div
+      className={`app-container ${isDarkMode ? 'dark' : ''}`}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        dragCounter.current += 1;
+        if (dragCounter.current === 1) {
+          setDragOverlay(true);
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        dragCounter.current -= 1;
+        if (dragCounter.current === 0) {
           setDragOverlay(false);
-          const droppedUrl = readDroppedUrl(e);
-          if (droppedUrl) handleUrlChange(droppedUrl);
-        }}>
+        }
+      }}
+    >
+      {dragOverlay && (
+        <div
+          className="drag-overlay"
+          onDragEnter={(e) => {
+            e.preventDefault();
+            dragCounter.current += 1;
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            dragCounter.current -= 1;
+            if (dragCounter.current === 0) {
+              setDragOverlay(false);
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            dragCounter.current = 0;
+            setDragOverlay(false);
+            const droppedUrl = readDroppedUrl(e);
+            if (droppedUrl) {
+              handleUrlChange(droppedUrl);
+              setTimeout(() => startDownload(droppedUrl, outputPath), 0);
+            }
+          }}
+        >
           <div className="drag-overlay-content">Drop URL to download</div>
+        </div>
+      )}
+
+      {showOnboarding && (
+        <div className="onboarding-fullscreen">
+          <div className="onboarding-content">
+            <img src="/logo.png" alt="Burst" className="onboarding-logo" />
+            {onboardingStep === 1 ? (
+              <>
+                <h2 className="onboarding-title">Welcome to Burst</h2>
+                <p className="onboarding-text">
+                  The download manager that uses all your connections at once.
+                </p>
+                <button
+                  className="onboarding-start-btn"
+                  onClick={() => setOnboardingStep(2)}
+                >
+                  Get Started →
+                </button>
+              </>
+            ) : (
+              <>
+                <h2 className="onboarding-title">Download faster from your browser</h2>
+                <p className="onboarding-text">
+                  Install our extension to right-click any link and send it directly to Burst.
+                </p>
+                <div className="extension-grid">
+                  <button
+                    className="extension-btn chrome"
+                    onClick={() => window.open('https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd', '_blank')}
+                  >
+                    {CHROME_SVG} Add to Chrome
+                  </button>
+                  <button
+                    className="extension-btn firefox"
+                    onClick={() => window.open('https://addons.mozilla.org/firefox/addon/burst-download-manager', '_blank')}
+                  >
+                    {FIREFOX_SVG} Add to Firefox
+                  </button>
+                </div>
+                <button
+                  className="onboarding-skip"
+                  onClick={async () => {
+                    await fetch(`${API_BASE}/settings`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ settings: { ...appSettings, ONBOARDING_COMPLETE: true } })
+                    });
+                    setShowOnboarding(false);
+                  }}
+                >
+                  Skip and start using Burst
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -773,6 +912,19 @@ export default function App() {
               </div>
 
               <div className="content-body">
+                {interfaces.length <= 1 && appSettings?.ONBOARDING_COMPLETE && !bannerDismissed && (
+                  <div className="interface-hint-bar" style={{ marginBottom: '16px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                    <Zap size={13} className="hint-icon" />
+                    <span>Connect a second interface (Ethernet, hotspot) to start bonding speeds</span>
+                    <a className="hint-link" onClick={() => setActiveTab('connections')}>View Connections →</a>
+                    <button className="close-btn" onClick={() => {
+                      setBannerDismissed(true);
+                      localStorage.setItem("burst_banner_dismissed", "true");
+                    }}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
                 <div className="section-label">Active Downloads</div>
                 {activeJobs.length === 0 && (
                     <div className="empty-state slide-in">
@@ -1059,6 +1211,9 @@ export default function App() {
                     );
                   })}
 
+                  <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
+                    Burst v1.2.1
+                  </div>
                 </div>
               )}
             </div>
@@ -1075,10 +1230,12 @@ export default function App() {
       <PromptModal
         isOpen={!!promptData}
         title={promptData?.title}
+        message={promptData?.message}
         hint={promptData?.hint}
         defaultValue={promptData?.value}
+        type={promptData?.type}
         onCancel={() => setPromptData(null)}
-        onConfirm={(val) => {
+        onConfirm={promptData?.onConfirm || ((val) => {
           const num = parseFloat(val);
           const ip = promptData.ip;
           if (num > 0) {
@@ -1089,7 +1246,7 @@ export default function App() {
             setBandwidthLimits(newLimits);
           }
           setPromptData(null);
-        }}
+        })}
       />
     </div>
   );

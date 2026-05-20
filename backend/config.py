@@ -63,6 +63,11 @@ SPEEDTEST_TIMEOUT: int = 20
 # ---------------------------------------------------------------------------
 HTTP_HANDLER_SIZE_THRESHOLD: int = 50 * 1024 * 1024   # 50 MB
 
+# ---------------------------------------------------------------------------
+# App version
+# ---------------------------------------------------------------------------
+APP_VERSION = "1.2.1"
+
 
 # ---------------------------------------------------------------------------
 # Runtime settings helpers
@@ -89,6 +94,7 @@ _DEFAULTS: Dict[str, Any] = {
     "DOWNLOAD_PATH": "C:/Burst-Downloads",
     "THEME_MODE": "system",
     "START_ON_BOOT": True,
+    "ONBOARDING_COMPLETE": False,
 }
 
 
