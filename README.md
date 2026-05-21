@@ -57,7 +57,6 @@ python backend/main.py
 
 # Build exe
 pyinstaller Burst.spec
-pyinstaller burst-cli.spec
 
 # Build installer
 iscc installer.iss
