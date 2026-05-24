@@ -1810,15 +1810,20 @@ export default function App() {
                         placeholder="Paste a URL, magnet link, or .torrent..."
                         value={url}
                         onChange={(e) => handleUrlChange(e.target.value)}
-                        style={{ paddingRight: ytLoading ? '42px' : undefined }}
                       />
-                      {/* yt-dlp loading spinner inside input */}
+                      {/* yt-dlp detecting spinner — floated left of the Download button */}
                       {ytLoading && (
                         <span style={{
-                          position: 'absolute', right: '120px', top: '50%', transform: 'translateY(-50%)',
-                          color: 'var(--text-muted)', display: 'flex', alignItems: 'center'
+                          position: 'absolute',
+                          right: '108px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          color: 'var(--text-muted)',
+                          pointerEvents: 'none',
                         }}>
-                          <Loader size={14} className="spin-anim" />
+                          <Loader size={13} className="spin-anim" />
                         </span>
                       )}
                       <button
@@ -1833,7 +1838,7 @@ export default function App() {
 
                     {/* yt-dlp quality picker — shown when a video URL is detected */}
                     {ytInfo && ytInfo.supported && (
-                      <div className="yt-picker" style={{
+                      <div style={{
                         display: 'flex', alignItems: 'center', gap: '12px',
                         background: 'var(--surface)', border: '1px solid var(--border)',
                         borderRadius: '8px', padding: '10px 12px', marginTop: '8px',
@@ -1848,7 +1853,7 @@ export default function App() {
                             onError={e => e.target.style.display = 'none'}
                           />
                         )}
-                        {/* Meta */}
+                        {/* Title + duration */}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{
                             fontSize: '13px', fontWeight: 600, color: 'var(--text)',
@@ -1869,19 +1874,22 @@ export default function App() {
                           style={{
                             background: 'var(--surface-2)', border: '1px solid var(--border)',
                             borderRadius: '6px', color: 'var(--text)', fontSize: '12px',
-                            padding: '5px 8px', cursor: 'pointer', flexShrink: 0
+                            padding: '5px 8px', cursor: 'pointer', flexShrink: 0,
+                            outline: 'none',
                           }}
                         >
                           {ytInfo.formats.map(f => (
                             <option key={f.id} value={f.id}>
-                              {f.label === 'Audio only'
-                                ? '♪ Audio only'
-                                : `⬛ ${f.label}`}
+                              {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
                             </option>
                           ))}
                         </select>
-                        {/* Download button */}
-                        <button className="btn-primary" onClick={handleYtDlpDownload} style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}>
+                        {/* Download */}
+                        <button
+                          className="btn-primary"
+                          onClick={handleYtDlpDownload}
+                          style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}
+                        >
                           <Download size={14} /> Download
                         </button>
                         {/* Dismiss */}
