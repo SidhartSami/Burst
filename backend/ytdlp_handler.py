@@ -2,13 +2,13 @@
 Burst — yt-dlp integration handler.
 
 Provides two async-safe functions:
-  - fetch_info(url)      -> metadata dict (formats, title, thumbnail, duration)
+  - fetch_info(url)           -> metadata dict (formats, title, thumbnail, duration)
   - start_ytdlp_download(...) -> background download with live progress via callback
 """
 from __future__ import annotations
 
 import asyncio
-import shutil
+import pathlib
 import uuid
 import os
 import time
@@ -26,9 +26,6 @@ except ImportError:
 _executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ytdlp")
 
 TIMEOUT_SECONDS = 20
-
-# Check once at startup whether ffmpeg is on PATH (needed for merging DASH streams)
-FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 
 
 def _friendly_ytdlp_error(raw: str) -> str:
@@ -49,7 +46,7 @@ def _friendly_ytdlp_error(raw: str) -> str:
     if "no video formats found" in r:
         return "No downloadable formats found for this URL"
     if "ffmpeg" in r or "ffprobe" in r:
-        return "ffmpeg is required to merge video+audio streams — install ffmpeg and add it to PATH"
+        return "ffmpeg error — the video merge failed"
     # Strip yt-dlp internal prefix noise
     for prefix in ("ERROR: ", "youtube ", "[youtube] "):
         if raw.lower().startswith(prefix.lower()):
@@ -69,17 +66,16 @@ def _format_duration(seconds: Optional[int]) -> str:
 
 
 def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build a clean, de-duplicated format list sorted by quality (best first)."""
+    """Build a clean, de-duplicated format list sorted best-first."""
     formats = info.get("formats") or []
     seen_labels: set = set()
     result: List[Dict[str, Any]] = []
 
-    # Priority heights in preferred descending order
     prio = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
 
-    # Collect best format per height (highest tbr wins)
+    # Collect best adaptive (video-only DASH) format per height
     height_best: Dict[str, Dict] = {}
-    # Also keep a "safe" (pre-merged) format per height for when ffmpeg is missing
+    # Collect best pre-merged (progressive) format per height — no ffmpeg needed
     height_safe: Dict[str, Dict] = {}
     audio_best: Optional[Dict] = None
 
@@ -88,12 +84,10 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         acodec = f.get("acodec", "none")
         ext = f.get("ext", "")
 
-        # Skip manifests / storyboards
         if ext in ("mhtml", "vtt", "json3"):
             continue
 
         if vcodec == "none" and acodec != "none":
-            # Audio-only — keep best by abr/tbr
             score = (f.get("abr") or 0) + (f.get("tbr") or 0)
             best_score = (audio_best.get("abr") or 0) + (audio_best.get("tbr") or 0) if audio_best else 0
             if audio_best is None or score > best_score:
@@ -105,24 +99,19 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
             lbl = f"{h}p"
             tbr = f.get("tbr") or 0
 
-            # Track best adaptive (video-only) format per height
+            # Best adaptive (DASH) format
             existing = height_best.get(lbl)
             if existing is None or tbr > (existing.get("tbr") or 0):
                 height_best[lbl] = f
 
-            # Track best pre-merged (video+audio) format per height — no ffmpeg needed
+            # Best pre-merged (progressive, has audio track)
             if acodec != "none":
                 existing_safe = height_safe.get(lbl)
                 if existing_safe is None or tbr > (existing_safe.get("tbr") or 0):
                     height_safe[lbl] = f
 
-    # Build result in priority order
     for lbl in prio:
-        # Prefer pre-merged if ffmpeg is unavailable
-        if not FFMPEG_AVAILABLE and lbl in height_safe:
-            f = height_safe[lbl]
-        else:
-            f = height_best.get(lbl)
+        f = height_best.get(lbl)
         if f and lbl not in seen_labels:
             seen_labels.add(lbl)
             result.append({
@@ -134,7 +123,7 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "has_audio": f.get("acodec", "none") != "none",
             })
 
-    # Any remaining heights not in prio list (sorted best-first)
+    # Any non-standard heights
     for lbl, f in sorted(
         height_best.items(),
         key=lambda x: -(int(x[0].rstrip("p")) if x[0].rstrip("p").isdigit() else 0),
@@ -150,7 +139,6 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "has_audio": f.get("acodec", "none") != "none",
             })
 
-    # Audio-only at the end
     if audio_best:
         result.append({
             "id": audio_best.get("format_id", "bestaudio"),
@@ -196,7 +184,6 @@ def _fetch_info_sync(url: str) -> Dict[str, Any]:
                 "duration_str": _format_duration(info.get("duration")),
                 "uploader": info.get("uploader", ""),
                 "formats": formats,
-                "ffmpeg_available": FFMPEG_AVAILABLE,
                 "error": None,
             }
     except yt_dlp.utils.DownloadError as e:
@@ -244,7 +231,6 @@ class YtDlpJob:
         self.error: Optional[str] = None
         self.is_cancelled: bool = False
 
-        # Progress fields used by the frontend
         self.percent: float = 0.0
         self.speed_bytes: float = 0.0
         self.eta: Optional[float] = None
@@ -253,8 +239,8 @@ class YtDlpJob:
 
     def to_dict(self) -> Dict[str, Any]:
         total_speed = self.speed_bytes / (1024 * 1024) if self.speed_bytes else 0.0
-        iface_dict = {}
-        if total_speed > 0 or self.status == "downloading":
+        iface_dict: Dict[str, Any] = {}
+        if self.status == "downloading" or total_speed > 0:
             iface_dict["ytdlp"] = {
                 "name": "yt-dlp",
                 "ip_address": "ytdlp",
@@ -293,7 +279,6 @@ class YtDlpJob:
         }
 
 
-# Global registry of yt-dlp jobs
 _ytdlp_jobs: Dict[str, YtDlpJob] = {}
 
 
@@ -305,69 +290,30 @@ def get_all_ytdlp_jobs() -> Dict[str, YtDlpJob]:
     return _ytdlp_jobs
 
 
-def _build_format_selector(format_id: str, label: str) -> str:
-    """
-    Build the yt-dlp format selector string.
-
-    YouTube serves HD video (720p+) as separate video+audio DASH streams.
-    Merging requires ffmpeg. If ffmpeg is unavailable, fall back to a
-    pre-merged progressive format at a lower quality.
-    """
-    is_audio_only = label == "Audio only" or format_id == "bestaudio"
-
-    if is_audio_only:
-        # Best audio stream, preferring m4a for compatibility
-        return "bestaudio[ext=m4a]/bestaudio/best"
-
-    if FFMPEG_AVAILABLE:
-        # Preferred: exact format + best audio merged into mp4
-        # Falls back through several options if the exact ID isn't available
-        return (
-            f"{format_id}+bestaudio[ext=m4a]"
-            f"/{format_id}+bestaudio"
-            f"/{format_id}"
-            f"/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
-            f"/bestvideo+bestaudio"
-            f"/best[ext=mp4]/best"
-        )
-    else:
-        # No ffmpeg — use pre-merged progressive formats only (usually ≤720p on YouTube)
-        # Try to honour the requested quality as closely as possible
-        return (
-            f"best[height<={_label_to_height(label)}][ext=mp4]"
-            f"/best[height<={_label_to_height(label)}]"
-            f"/best[ext=mp4]/best"
-        )
-
-
-def _label_to_height(label: str) -> int:
-    """Extract numeric height from label like '720p' -> 720."""
-    try:
-        return int(label.rstrip("p"))
-    except Exception:
-        return 9999
-
-
 def _download_sync(
     job: YtDlpJob,
     format_id: str,
+    ffmpeg_path: Optional[str],
     on_progress: Callable,
     on_done: Callable,
     on_error: Callable,
-):
-    """Blocking yt-dlp download — runs in a thread."""
+) -> None:
+    """Blocking yt-dlp download — runs in a thread pool."""
 
-    # Resolve output directory
-    output_dir = job.output_path
-    if not os.path.isdir(output_dir):
-        output_dir = os.path.dirname(output_dir) or output_dir
+    # output_path is ALWAYS a directory for yt-dlp downloads
+    output_dir = pathlib.Path(job.output_path)
+    # Guard: if the path looks like a file (has extension), use its parent
+    if output_dir.suffix and not output_dir.is_dir():
+        output_dir = output_dir.parent
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        on_error(f"Cannot create output directory: {e}")
+        on_error(f"Cannot create output folder: {e}")
         return
 
-    def progress_hook(d: Dict[str, Any]):
+    is_audio_only = job.label == "Audio only"
+
+    def progress_hook(d: Dict[str, Any]) -> None:
         if job.is_cancelled:
             raise yt_dlp.utils.DownloadError("Cancelled by user")
         status = d.get("status", "")
@@ -376,25 +322,44 @@ def _download_sync(
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             job.expected_size = max(job.expected_size, total)
             if job.expected_size:
-                job.percent = min(99.0, (job.total_downloaded / job.expected_size) * 100)
+                job.percent = min(99.0, job.total_downloaded / job.expected_size * 100)
             job.speed_bytes = d.get("speed") or 0.0
             job.eta = d.get("eta")
             fn = d.get("filename", "")
             if fn:
-                job.filename = fn
+                job.filename = str(pathlib.Path(fn).name)
             on_progress()
         elif status == "finished":
             fn = d.get("filename", "")
             if fn:
-                job.filename = fn
+                job.filename = str(pathlib.Path(fn).name)
 
-    fmt_selector = _build_format_selector(format_id, job.label)
+    # Build format selector
+    if is_audio_only:
+        fmt = "bestaudio[ext=m4a]/bestaudio/best"
+    else:
+        # With ffmpeg: request exact DASH stream + best audio, merge to mp4
+        # Without ffmpeg: request best pre-merged progressive only
+        if ffmpeg_path:
+            fmt = (
+                f"{format_id}+bestaudio[ext=m4a]"
+                f"/{format_id}+bestaudio"
+                f"/{format_id}"
+                f"/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo+bestaudio"
+                f"/best[ext=mp4]/best"
+            )
+        else:
+            fmt = "best[ext=mp4]/best"
+
+    # outtmpl: always folder + title.ext — NEVER derive from URL
+    outtmpl = str(output_dir / "%(title)s.%(ext)s")
 
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
-        "format": fmt_selector,
-        "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+        "format": fmt,
+        "outtmpl": outtmpl,
         "progress_hooks": [progress_hook],
         "noplaylist": True,
         "socket_timeout": 30,
@@ -402,15 +367,17 @@ def _download_sync(
         "fragment_retries": 3,
     }
 
-    # Only request ffmpeg merging if ffmpeg is available
-    if FFMPEG_AVAILABLE and job.label != "Audio only":
-        ydl_opts["merge_output_format"] = "mp4"
-    elif FFMPEG_AVAILABLE and job.label == "Audio only":
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
+    if ffmpeg_path:
+        ffmpeg_dir = str(pathlib.Path(ffmpeg_path).parent)
+        ydl_opts["ffmpeg_location"] = ffmpeg_dir
+        if is_audio_only:
+            ydl_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+        else:
+            ydl_opts["merge_output_format"] = "mp4"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -429,9 +396,21 @@ async def start_ytdlp_download(
     label: str,
     broadcast_fn: Callable,
 ) -> YtDlpJob:
-    """Create a YtDlpJob and kick off the download in a thread."""
+    """
+    Ensure ffmpeg is available, then kick off a yt-dlp download.
+    ffmpeg is downloaded automatically on first use.
+    """
     if not YTDLP_AVAILABLE:
         raise RuntimeError("yt-dlp is not installed")
+
+    # --- Ensure ffmpeg (downloads ~70 MB once, then cached forever) ---
+    from ffmpeg_manager import ensure_ffmpeg
+    ffmpeg_path = await ensure_ffmpeg(broadcast_fn)
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "ffmpeg could not be downloaded automatically. "
+            "Please install ffmpeg manually and add it to PATH."
+        )
 
     job_id = str(uuid.uuid4())
     job = YtDlpJob(job_id, url, output_path, label)
@@ -439,12 +418,12 @@ async def start_ytdlp_download(
 
     loop = asyncio.get_event_loop()
 
-    def on_progress():
+    def on_progress() -> None:
         asyncio.run_coroutine_threadsafe(
             broadcast_fn("job_progress", job.to_dict()), loop
         )
 
-    def on_done():
+    def on_done() -> None:
         job.status = "completed"
         job.finished_at = time.time()
         job.percent = 100.0
@@ -452,7 +431,7 @@ async def start_ytdlp_download(
             broadcast_fn("job_complete", job.to_dict()), loop
         )
 
-    def on_error(msg: str):
+    def on_error(msg: str) -> None:
         job.status = "failed"
         job.error = msg
         job.finished_at = time.time()
@@ -460,13 +439,13 @@ async def start_ytdlp_download(
             broadcast_fn("job_error", {"job_id": job_id, "error": msg}), loop
         )
 
-    def run():
+    def run() -> None:
         job.status = "downloading"
         job.started_at = time.time()
         asyncio.run_coroutine_threadsafe(
             broadcast_fn("job_progress", job.to_dict()), loop
         )
-        _download_sync(job, format_id, on_progress, on_done, on_error)
+        _download_sync(job, format_id, ffmpeg_path, on_progress, on_done, on_error)
 
     loop.run_in_executor(_executor, run)
     return job

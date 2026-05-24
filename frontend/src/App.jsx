@@ -625,6 +625,10 @@ export default function App() {
   const ytDebounceRef = useRef(null);
   const ytCheckedUrlRef = useRef("");               // avoid duplicate fetches
 
+  // ffmpeg auto-download progress toast
+  // null | { status: 'downloading'|'done'|'error', percent: number, error: string }
+  const [ffmpegToast, setFfmpegToast] = useState(null);
+
   const jobSocketsRef = useRef({});
   const dragCounter = useRef(0);
 
@@ -745,8 +749,18 @@ export default function App() {
           setActiveJobs(prev => prev.includes(jobId) ? prev : [...prev, jobId]);
         }
         setActiveTab("active");
-        // Refresh schedules list
         fetch(`${API_BASE}/schedules`).then(r => r.json()).then(d => setSchedules(d.schedules || [])).catch(() => {});
+      } else if (msg.type === "ffmpeg_progress") {
+        const { status, percent, error } = msg.data;
+        if (status === "downloading") {
+          setFfmpegToast({ status: "downloading", percent: percent || 0 });
+        } else if (status === "done") {
+          setFfmpegToast({ status: "done", percent: 100 });
+          setTimeout(() => setFfmpegToast(null), 2500);
+        } else if (status === "error") {
+          setFfmpegToast({ status: "error", error: error || "Download failed" });
+          setTimeout(() => setFfmpegToast(null), 6000);
+        }
       }
     };
 
@@ -828,7 +842,11 @@ export default function App() {
         const data = await resp.json();
         if (data.supported) {
           setYtInfo(data);
-          setYtFormat(data.formats?.[0]?.id || "");
+          // Default: prefer 1080p, then second item, then first
+          const fmts = data.formats || [];
+          const prefer1080 = fmts.find(f => f.label === '1080p');
+          const defaultFmt = prefer1080 || fmts[1] || fmts[0];
+          setYtFormat(defaultFmt?.id || "");
         } else {
           setYtInfo(false); // explicitly not supported
         }
@@ -847,30 +865,30 @@ export default function App() {
     const cleanUrl = url.trim();
     const selectedFmt = ytInfo.formats?.find(f => f.id === ytFormat);
     const label = selectedFmt?.label || ytFormat;
-    // Use the directory part of outputPath as the save folder
-    const baseDir = (() => {
-      if (outputPath) {
-        const parts = outputPath.split(/[\\\/]/);
-        parts.pop();
-        return parts.join("/") + "/";
-      }
-      return "C:/Burst-Downloads/";
+
+    // Always send the download directory (never a file path) to the backend.
+    // The backend appends %(title)s.%(ext)s itself.
+    const dlDir = (() => {
+      const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+      return bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
     })();
+
+    // Switch to Active tab immediately so user sees the job appear
+    setUrl("");
+    setYtInfo(null);
+    ytCheckedUrlRef.current = "";
+    setActiveTab("active");
 
     try {
       const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: baseDir, label })
+        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Failed to start");
       if (data.job_id) {
         setActiveJobs(prev => prev.includes(data.job_id) ? prev : [...prev, data.job_id]);
-        setUrl("");
-        setYtInfo(null);
-        ytCheckedUrlRef.current = "";
-        setActiveTab("active");
       }
     } catch (err) {
       setToast(friendlyError(err.message));
@@ -2617,6 +2635,47 @@ export default function App() {
       {toast && (
         <div style={{ position: 'fixed', bottom: '24px', right: '32px', background: 'var(--text)', color: 'var(--bg)', padding: '8px 16px', borderRadius: '4px', fontSize: '13px', zIndex: 9999, animation: 'slideIn 0.2s ease' }}>
           {toast}
+        </div>
+      )}
+
+      {/* ffmpeg auto-download progress toast */}
+      {ffmpegToast && (
+        <div style={{
+          position: 'fixed',
+          bottom: toast ? '70px' : '24px',
+          right: '24px',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: '10px',
+          padding: '12px 16px',
+          fontSize: '13px',
+          zIndex: 9998,
+          minWidth: '260px',
+          maxWidth: '320px',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+          animation: 'slideIn 0.2s ease',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: ffmpegToast.status === 'downloading' ? '8px' : '0' }}>
+            {ffmpegToast.status === 'downloading' && <Loader size={13} className="spin-anim" style={{ color: 'var(--accent)', flexShrink: 0 }} />}
+            {ffmpegToast.status === 'done' && <CheckCircle2 size={13} style={{ color: '#22c55e', flexShrink: 0 }} />}
+            {ffmpegToast.status === 'error' && <AlertTriangle size={13} style={{ color: '#ef4444', flexShrink: 0 }} />}
+            <span style={{ color: 'var(--text)', fontWeight: 500 }}>
+              {ffmpegToast.status === 'downloading' && `Downloading ffmpeg… ${ffmpegToast.percent}%`}
+              {ffmpegToast.status === 'done' && 'ffmpeg ready ✓'}
+              {ffmpegToast.status === 'error' && `ffmpeg failed: ${ffmpegToast.error}`}
+            </span>
+          </div>
+          {ffmpegToast.status === 'downloading' && (
+            <div style={{ height: '3px', background: 'var(--border)', borderRadius: '2px', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${ffmpegToast.percent}%`,
+                background: 'var(--accent)',
+                borderRadius: '2px',
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
+          )}
         </div>
       )}
 
