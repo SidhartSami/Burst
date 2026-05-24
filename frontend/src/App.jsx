@@ -27,7 +27,8 @@ import {
   ChevronUp,
   Layers,
   ArrowLeft,
-  Shield
+  Shield,
+  Clock
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -564,6 +565,17 @@ export default function App() {
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [verificationResult, setVerificationResult] = useState(null);
   const [verificationError, setVerificationError] = useState(null);
+
+  // Schedule state
+  const [scheduleUrl, setScheduleUrl] = useState("");
+  const [schedulePath, setSchedulePath] = useState("C:/Burst-Downloads/");
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleTime, setScheduleTime] = useState("");
+  const [scheduleRepeat, setScheduleRepeat] = useState("once");
+  const [scheduleError, setScheduleError] = useState(null);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [schedules, setSchedules] = useState([]);
+  const [missedSchedules, setMissedSchedules] = useState([]);
   const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState(() => {
     const saved = localStorage.getItem(HISTORY_KEY);
@@ -626,9 +638,11 @@ export default function App() {
     Promise.all([
       fetch(`${API_BASE}/settings`).then(r => r.json()).catch(() => null),
       fetch(`${API_BASE}/active-jobs`).then(r => r.json()).catch(() => null),
-      fetch(`${API_BASE}/history`).then(r => r.json()).catch(() => null)
+      fetch(`${API_BASE}/history`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/schedules`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/schedules/missed`).then(r => r.json()).catch(() => null),
     ])
-      .then(([settingsData, activeJobsData, historyData]) => {
+      .then(([settingsData, activeJobsData, historyData, schedulesData, missedData]) => {
         // Handle settings
         if (settingsData && settingsData.settings) {
           setAppSettings(settingsData.settings);
@@ -679,6 +693,14 @@ export default function App() {
             }).slice(0, 50);
           });
         }
+
+        // Handle schedules
+        if (schedulesData && schedulesData.schedules) {
+          setSchedules(schedulesData.schedules);
+        }
+        if (missedData && missedData.missed && missedData.missed.length > 0) {
+          setMissedSchedules(missedData.missed);
+        }
       });
 
     // 5. Listen for global events (like new downloads from extension)
@@ -705,6 +727,15 @@ export default function App() {
         setClipboardToast({ url: detectedUrl, ts: now });
         // Auto-dismiss after 10s
         setTimeout(() => setClipboardToast(prev => (prev && prev.url === detectedUrl) ? null : prev), 10000);
+      } else if (msg.type === "scheduled_start") {
+        const { filename, job_id: jobId } = msg.data;
+        setToast(`\u23F0 Scheduled download started: ${filename || "download"}`);
+        if (jobId) {
+          setActiveJobs(prev => prev.includes(jobId) ? prev : [...prev, jobId]);
+        }
+        setActiveTab("active");
+        // Refresh schedules list
+        fetch(`${API_BASE}/schedules`).then(r => r.json()).then(d => setSchedules(d.schedules || [])).catch(() => {});
       }
     };
 
@@ -1162,6 +1193,110 @@ export default function App() {
     }
   };
 
+  // ---- Schedule helpers ----
+
+  const formatScheduleTime = (isoStr) => {
+    if (!isoStr) return "";
+    try {
+      const d = new Date(isoStr);
+      const now = new Date();
+      const todayStr = now.toDateString();
+      const tomorrowStr = new Date(now.getTime() + 86400000).toDateString();
+      const dStr = d.toDateString();
+      const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (dStr === todayStr) return `Today at ${timeStr}`;
+      if (dStr === tomorrowStr) return `Tomorrow at ${timeStr}`;
+      return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) + ` at ${timeStr}`;
+    } catch { return isoStr; }
+  };
+
+  const extractScheduleName = (url) => {
+    if (!url) return "download";
+    try {
+      const u = new URL(url);
+      const segs = u.pathname.split("/").filter(Boolean);
+      const last = segs[segs.length - 1] || u.hostname;
+      return last.length > 40 ? last.slice(0, 40) + "…" : last;
+    } catch {
+      return url.length > 40 ? url.slice(0, 40) + "…" : url;
+    }
+  };
+
+  const handleScheduleSubmit = async () => {
+    setScheduleError(null);
+    const cleanUrl = scheduleUrl.trim();
+    const cleanPath = schedulePath.trim();
+
+    if (!cleanUrl) { setScheduleError("URL is required"); return; }
+    if (!scheduleDate || !scheduleTime) { setScheduleError("Date and time are required"); return; }
+
+    const isoString = `${scheduleDate}T${scheduleTime}:00`;
+    const fireAt = new Date(isoString);
+    if (isNaN(fireAt.getTime()) || fireAt <= new Date()) {
+      setScheduleError("Please pick a future time");
+      return;
+    }
+
+    setScheduleLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: cleanUrl,
+          output_path: cleanPath,
+          scheduled_time: isoString,
+          repeat: scheduleRepeat,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setScheduleError(data.detail || "Failed to schedule download");
+      } else {
+        setSchedules(prev => [...prev, data].sort((a, b) => a.scheduled_time.localeCompare(b.scheduled_time)));
+        setScheduleUrl("");
+        setScheduleDate("");
+        setScheduleTime("");
+        setScheduleRepeat("once");
+        setToast("Download scheduled!");
+      }
+    } catch (err) {
+      setScheduleError("Connection error — could not schedule download");
+    } finally {
+      setScheduleLoading(false);
+    }
+  };
+
+  const handleCancelSchedule = async (scheduleId) => {
+    try {
+      await fetch(`${API_BASE}/schedules/${scheduleId}`, { method: "DELETE" });
+      setSchedules(prev => prev.filter(s => s.schedule_id !== scheduleId));
+    } catch {
+      setToast("Failed to cancel schedule");
+    }
+  };
+
+  const handleDismissMissed = async () => {
+    try {
+      await fetch(`${API_BASE}/schedules/missed`, { method: "DELETE" });
+      setMissedSchedules([]);
+    } catch { }
+  };
+
+  const handleReschedule = (entry) => {
+    // Pre-fill the form with the missed schedule's data
+    setScheduleUrl(entry.url || "");
+    setSchedulePath(entry.output_path || "C:/Burst-Downloads/");
+    setScheduleRepeat(entry.repeat || "once");
+    // Default to tomorrow same time
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    setScheduleDate(tomorrow.toISOString().split("T")[0]);
+    const origTime = entry.scheduled_time ? entry.scheduled_time.split("T")[1]?.slice(0, 5) : "";
+    setScheduleTime(origTime || "09:00");
+    setActiveTab("schedule");
+  };
+
   const activeConnectionCount = interfaces.length;
 
   return (
@@ -1301,6 +1436,30 @@ export default function App() {
             </button>
             <button className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')} title="History">
               <History size={16} /> {!isSidebarCollapsed && "History"}
+            </button>
+            <button
+              className={`nav-item ${activeTab === 'schedule' ? 'active' : ''}`}
+              onClick={() => {
+                setActiveTab('schedule');
+                fetch(`${API_BASE}/schedules`).then(r => r.json()).then(d => setSchedules(d.schedules || [])).catch(() => {});
+              }}
+              title="Schedule"
+              style={{ position: 'relative' }}
+            >
+              <Clock size={16} />
+              {!isSidebarCollapsed && "Schedule"}
+              {missedSchedules.length > 0 && (
+                <span style={{
+                  position: 'absolute',
+                  top: '6px',
+                  right: isSidebarCollapsed ? '6px' : '10px',
+                  width: '7px',
+                  height: '7px',
+                  borderRadius: '50%',
+                  background: 'var(--warning)',
+                  flexShrink: 0,
+                }} />
+              )}
             </button>
             <button className={`nav-item ${activeTab === 'connections' ? 'active' : ''}`} onClick={() => setActiveTab('connections')} title="Connections">
               <Zap size={16} /> {!isSidebarCollapsed && "Connections"}
@@ -1900,6 +2059,157 @@ export default function App() {
                   ))}
                 </div>
               ))}
+            </div>
+          )}
+
+          {activeTab === 'schedule' && (
+            <div className="schedule-page">
+
+              {/* Missed schedules banner */}
+              {missedSchedules.length > 0 && (
+                <div className="schedule-missed-banner">
+                  <div className="schedule-missed-banner-header">
+                    <span>⚠ {missedSchedules.length} missed schedule{missedSchedules.length > 1 ? 's' : ''} while app was closed</span>
+                    <button className="schedule-missed-dismiss" onClick={handleDismissMissed}>Dismiss</button>
+                  </div>
+                  {missedSchedules.map(entry => (
+                    <div className="schedule-missed-item" key={entry.schedule_id}>
+                      <Clock size={11} />
+                      <span>{extractScheduleName(entry.url)}</span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>— was {formatScheduleTime(entry.scheduled_time)}</span>
+                      <button className="schedule-missed-reschedule" onClick={() => handleReschedule(entry)}>Reschedule</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add Scheduled Download */}
+              <div className="schedule-section">
+                <div className="schedule-section-label">Add Scheduled Download</div>
+                <div className="schedule-form">
+                  <input
+                    id="schedule-url-input"
+                    type="text"
+                    className="schedule-input"
+                    placeholder="https://example.com/file.zip or magnet:?xt=…"
+                    value={scheduleUrl}
+                    onChange={e => { setScheduleUrl(e.target.value); setScheduleError(null); }}
+                  />
+
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <input
+                      id="schedule-path-input"
+                      type="text"
+                      className="schedule-input"
+                      placeholder="Save path (e.g. C:/Burst-Downloads/)"
+                      value={schedulePath}
+                      onChange={e => setSchedulePath(e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="btn-secondary"
+                      style={{ height: '38px', padding: '0 12px', flexShrink: 0, fontSize: '12px' }}
+                      onClick={async () => {
+                        try {
+                          const r = await fetch(`${API_BASE}/select-path`);
+                          const d = await r.json();
+                          if (d.path) setSchedulePath(d.path + "/");
+                        } catch { }
+                      }}
+                      title="Pick folder"
+                    >
+                      <FolderOpen size={15} />
+                    </button>
+                  </div>
+
+                  <div className="schedule-datetime-row">
+                    <input
+                      id="schedule-date-input"
+                      type="date"
+                      className="schedule-input"
+                      value={scheduleDate}
+                      min={new Date().toISOString().split("T")[0]}
+                      onChange={e => { setScheduleDate(e.target.value); setScheduleError(null); }}
+                    />
+                    <input
+                      id="schedule-time-input"
+                      type="time"
+                      className="schedule-input"
+                      value={scheduleTime}
+                      onChange={e => { setScheduleTime(e.target.value); setScheduleError(null); }}
+                    />
+                  </div>
+
+                  <div className="schedule-bottom-row">
+                    <select
+                      id="schedule-repeat-select"
+                      className="schedule-select"
+                      value={scheduleRepeat}
+                      onChange={e => setScheduleRepeat(e.target.value)}
+                    >
+                      <option value="once">Once</option>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                    </select>
+                    <button
+                      id="schedule-submit-btn"
+                      className="schedule-btn"
+                      onClick={handleScheduleSubmit}
+                      disabled={scheduleLoading}
+                    >
+                      {scheduleLoading
+                        ? <div className="spinner-small" style={{ width: '13px', height: '13px', borderWidth: '2px' }} />
+                        : <Clock size={14} />
+                      }
+                      Schedule
+                    </button>
+                  </div>
+
+                  {scheduleError && (
+                    <div className="schedule-error">
+                      <AlertCircle size={13} />
+                      {scheduleError}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="schedule-divider" />
+
+              {/* Upcoming list */}
+              <div className="schedule-section" style={{ paddingBottom: '6px' }}>
+                <div className="schedule-section-label">Upcoming</div>
+              </div>
+              <div className="schedule-list">
+                {schedules.length === 0 ? (
+                  <div className="schedule-empty">
+                    <Clock size={32} strokeWidth={1.2} style={{ opacity: 0.3 }} />
+                    <span>No downloads scheduled</span>
+                  </div>
+                ) : (
+                  schedules.map(entry => (
+                    <div className="schedule-row" key={entry.schedule_id}>
+                      <div className="schedule-row-icon">
+                        <Clock size={16} />
+                      </div>
+                      <div className="schedule-row-body">
+                        <div className="schedule-row-name">{extractScheduleName(entry.url)}</div>
+                        <div className="schedule-row-time">{formatScheduleTime(entry.scheduled_time)}</div>
+                      </div>
+                      <span className={`schedule-badge ${entry.repeat}`}>
+                        {entry.repeat === 'once' ? 'Once' : entry.repeat === 'daily' ? 'Daily' : 'Weekly'}
+                      </span>
+                      <button
+                        className="schedule-cancel-btn"
+                        onClick={() => handleCancelSchedule(entry.schedule_id)}
+                        title="Cancel schedule"
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           )}
 

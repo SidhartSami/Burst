@@ -13,3 +13,4 @@ rich
 pywin32
 beautifulsoup4
 lxml
+apscheduler
