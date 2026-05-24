@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ResponsiveContainer, AreaChart, Area } from "recharts";
+import { friendlyError } from "./utils/errors";
 import {
   AlertTriangle,
   AlertCircle,
@@ -223,7 +225,7 @@ function InfoTooltip({ text }) {
   );
 }
 
-function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps }) {
+function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps, isExpanded, onToggleExpand, showHint }) {
   if (!status) return null;
 
   const currentInterfacesProgress = status.type === "torrent"
@@ -243,6 +245,101 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
     : Object.values(status.interfaces || {}).filter(i => i.status !== "excluded" && i.status !== "cancelled").length;
 
   const isPaused = status.status === 'paused' || status.status === 'waiting_reconnect' || (status.status === 'downloading' && activeIfaces === 0);
+
+  const [showHintState, setShowHintState] = useState(showHint);
+  const [hintOpacity, setHintOpacity] = useState(1);
+
+  useEffect(() => {
+    if (showHint) {
+      const fadeTimer = setTimeout(() => {
+        setHintOpacity(0);
+      }, 2500);
+      const removeTimer = setTimeout(() => {
+        setShowHintState(false);
+      }, 3000);
+      return () => {
+        clearTimeout(fadeTimer);
+        clearTimeout(removeTimer);
+      };
+    }
+  }, [showHint]);
+
+  const getZeroBaseline = () => {
+    const initialPoint = {};
+    availableInterfaces.forEach(iface => {
+      initialPoint[iface.ip_address] = 0;
+    });
+    return Array.from({ length: 60 }, () => ({ ...initialPoint }));
+  };
+
+  const [speedHistory, setSpeedHistory] = useState(getZeroBaseline);
+
+  // Buffer real-time speed data (last 60 samples)
+  useEffect(() => {
+    if (status.status !== 'downloading' || isPaused) {
+      setSpeedHistory(getZeroBaseline());
+      return;
+    }
+
+    const newPoint = {};
+    availableInterfaces.forEach(iface => {
+      let isSelected = false;
+      let speed = 0;
+      if (status.type === "torrent") {
+        isSelected = status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
+        if (isSelected) {
+          const speedBytes = status.speeds?.[iface.ip_address] || 0;
+          speed = speedBytes / (1024 * 1024);
+        }
+      } else {
+        const live = status.interfaces?.[iface.ip_address];
+        isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
+        if (isSelected) {
+          speed = live?.speed_mb_s || 0;
+        }
+      }
+      if (isSelected) {
+        newPoint[iface.ip_address] = speed;
+      }
+    });
+
+    setSpeedHistory(prev => {
+      const next = [...prev, newPoint];
+      if (next.length > 60) {
+        next.shift();
+      }
+      return next;
+    });
+  }, [status, availableInterfaces, isPaused]);
+
+  // Log raw error message to console for debugging when failed
+  useEffect(() => {
+    if (status.status === 'failed' && status.error) {
+      console.error(`[Download Error Debug] Job ${jid} failed with raw error:`, status.error);
+    }
+  }, [status.status, status.error, jid]);
+
+  const activeIfacesList = useMemo(() => {
+    return availableInterfaces.filter(iface => {
+      if (status.type === "torrent") {
+        return status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
+      } else {
+        const live = status.interfaces?.[iface.ip_address];
+        return !!live && live.status !== "excluded" && live.status !== "cancelled";
+      }
+    });
+  }, [availableInterfaces, status]);
+
+  const chartData = useMemo(() => {
+    if (speedHistory.length === 0) return [];
+    if (speedHistory.length === 1) {
+      return [speedHistory[0], speedHistory[0]];
+    }
+    return speedHistory;
+  }, [speedHistory]);
+
+  const showSparkline = status.status === 'downloading' && !isPaused && activeIfacesList.length > 0 && chartData.length > 0;
+
   const statusLabel = isPaused ? 'PAUSED' : status.status;
   const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (isPaused ? 'paused' : 'downloading'));
 
@@ -308,49 +405,126 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
         </div>
       </div>
 
-      <div className="iface-pills">
-        {availableInterfaces.map(iface => {
-          let live = null;
-          let isSelected = false;
+      <div className="iface-pills" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
+          {availableInterfaces.map(iface => {
+            let live = null;
+            let isSelected = false;
 
-          if (status.type === "torrent") {
-            isSelected = status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
-            if (isSelected) {
-              const speedBytes = status.speeds?.[iface.ip_address] || 0;
-              live = { status: 'downloading', speed_mb_s: speedBytes / (1024 * 1024) };
+            if (status.type === "torrent") {
+              isSelected = status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
+              if (isSelected) {
+                const speedBytes = status.speeds?.[iface.ip_address] || 0;
+                live = { status: 'downloading', speed_mb_s: speedBytes / (1024 * 1024) };
+              }
+            } else {
+              live = status.interfaces?.[iface.ip_address];
+              isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
             }
-          } else {
-            live = status.interfaces?.[iface.ip_address];
-            isSelected = !!live && live.status !== "excluded" && live.status !== "cancelled";
-          }
 
-          if (isOptimistic && isOptimistic.ip === iface.ip_address) isSelected = isOptimistic.selected;
+            if (isOptimistic && isOptimistic.ip === iface.ip_address) isSelected = isOptimistic.selected;
 
-          const speed = isPaused ? 0 : (live?.speed_mb_s || 0);
-          const tone = toneFor(shortName(iface.name, iface.interface_type));
-          const isShared = allUsedIps.filter(ip => ip === iface.ip_address).length > 1;
+            const speed = isPaused ? 0 : (live?.speed_mb_s || 0);
+            const tone = toneFor(shortName(iface.name, iface.interface_type));
+            const isShared = allUsedIps.filter(ip => ip === iface.ip_address).length > 1;
 
-          return (
-            <div
-              key={iface.ip_address}
-              className={`iface-pill ${isSelected ? 'active' : ''}`}
+            return (
+              <div
+                key={iface.ip_address}
+                className={`iface-pill ${isSelected ? 'active' : ''}`}
+                style={{
+                  opacity: isPaused ? 0.4 : 1,
+                  filter: isPaused ? 'grayscale(60%)' : 'none',
+                }}
+                onClick={() => {
+                  if (isDone) return;
+                  setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
+                  onToggle(iface.ip_address, isSelected).finally(() => { setTimeout(() => setIsOptimistic(null), 1000); });
+                }}
+              >
+                <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
+                {shortName(iface.name, iface.interface_type)}
+                {isSelected && speed > 0 && <span style={{ opacity: 0.8 }}>{Number(speed).toFixed(1)} MB/s</span>}
+                {isSelected && isShared && status.status === 'downloading' && <AlertTriangle size={12} style={{ color: 'var(--warning)', marginLeft: '2px' }} title="Shared with another download" />}
+              </div>
+            );
+          })}
+        </div>
+
+        {status.status === 'downloading' && !isPaused && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            {showHintState && (
+              <span className="sparkline-hint" style={{
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                opacity: hintOpacity,
+                transition: 'opacity 0.5s ease',
+                pointerEvents: 'none'
+              }}>
+                speed graph
+              </span>
+            )}
+            <button
+              onClick={onToggleExpand}
               style={{
-                opacity: isPaused ? 0.4 : 1,
-                filter: isPaused ? 'grayscale(60%)' : 'none',
+                background: 'none',
+                border: 'none',
+                padding: '4px',
+                cursor: 'pointer',
+                color: 'var(--text-muted)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'transform 0.15s ease',
               }}
-              onClick={() => {
-                if (isDone) return;
-                setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
-                onToggle(iface.ip_address, isSelected).finally(() => { setTimeout(() => setIsOptimistic(null), 1000); });
-              }}
+              title={isExpanded ? "Collapse speed graph" : "Expand speed graph"}
             >
-              <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
-              {shortName(iface.name, iface.interface_type)}
-              {isSelected && speed > 0 && <span style={{ opacity: 0.8 }}>{Number(speed).toFixed(1)} MB/s</span>}
-              {isSelected && isShared && status.status === 'downloading' && <AlertTriangle size={12} style={{ color: 'var(--warning)', marginLeft: '2px' }} title="Shared with another download" />}
-            </div>
-          );
-        })}
+              {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          height: isExpanded && showSparkline ? '40px' : '0px',
+          opacity: isExpanded && showSparkline ? 1 : 0,
+          overflow: 'hidden',
+          transition: 'height 150ms ease, opacity 150ms ease, margin-top 150ms ease, margin-bottom 150ms ease',
+          marginTop: isExpanded && showSparkline ? '6px' : '0px',
+          marginBottom: isExpanded && showSparkline ? '12px' : '0px',
+          width: '100%',
+        }}
+      >
+        {showSparkline && (
+          <div className="dl-sparkline" style={{ height: '40px', width: '100%', overflow: 'hidden' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart
+                data={chartData}
+                margin={{ top: 2, right: 0, left: 0, bottom: 2 }}
+              >
+                {activeIfacesList.map(iface => {
+                  const tone = toneFor(shortName(iface.name, iface.interface_type));
+                  const color = tone.dot;
+                  return (
+                    <Area
+                      key={iface.ip_address}
+                      type="monotone"
+                      dataKey={iface.ip_address}
+                      stroke={color}
+                      fill={color}
+                      fillOpacity={0.1}
+                      strokeWidth={1.5}
+                      dot={false}
+                      activeDot={false}
+                      isAnimationActive={false}
+                    />
+                  );
+                })}
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </div>
 
       <div className="progress-track">
@@ -360,6 +534,8 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
       <div className="dl-bottom">
         {isPaused ? (
           <span>Paused • {safePct.toFixed(1)}%</span>
+        ) : status.status === 'failed' ? (
+          <span style={{ color: 'var(--danger)', fontWeight: 500 }}>{friendlyError(status.error)}</span>
         ) : (
           <span>{pct.toFixed(1)}% • {formatBytes(safeDownloaded)} / {formatBytes(status.expected_size)}</span>
         )}
@@ -380,6 +556,8 @@ export default function App() {
   const [url, setUrl] = useState("");
   const [outputPath, setOutputPath] = useState("C:/Burst-Downloads/burst-download.bin");
   const [activeJobs, setActiveJobs] = useState([]);
+  const [expandedGraphs, setExpandedGraphs] = useState({});
+  const hasShownGraphHintRef = useRef(false);
   const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState(() => {
     const saved = localStorage.getItem(HISTORY_KEY);
@@ -696,7 +874,8 @@ export default function App() {
         setActiveTab("active");
       }
     } catch (err) {
-      setToast(err.message);
+      console.error("[Download Click Error Debug]:", err);
+      setToast(friendlyError(err.message));
     }
   };
 
@@ -762,13 +941,15 @@ export default function App() {
       });
       const data = await resp.json();
       if (data.error) {
-        setBatchError(data.error);
+        console.error("[Batch Scan Error Debug]:", data.error);
+        setBatchError(friendlyError(data.error));
       } else if (data.urls && data.urls.length > 0) {
         setBatchResults(data.urls.map(u => ({ ...u, checked: true })));
       } else {
         setBatchError("No downloadable files found on this page.");
       }
     } catch (err) {
+      console.error("[Batch Scan Exception Debug]:", err);
       setBatchError("Scan failed. Check the URL and try again.");
     } finally {
       setBatchScanning(false);
@@ -799,7 +980,8 @@ export default function App() {
       setShowBatchResultsView(false);
       setUrl("");
     } catch (err) {
-      setToast(err.message || "Failed to queue downloads");
+      console.error("[Batch Download Error Debug]:", err);
+      setToast(friendlyError(err.message || "Failed to queue downloads"));
     }
   };
 
@@ -1353,31 +1535,42 @@ export default function App() {
                         <p>Paste a link above to start your first speed-bonded download.</p>
                       </div>
                     )}
-                    {activeJobs.map(jid => (
-                      <DownloadCard
-                        key={jid}
-                        jid={jid}
-                        status={jobStatuses[jid]}
-                        availableInterfaces={renderedInterfaces}
-                        allUsedIps={allUsedIps}
-                        onToggle={async (ip, selected) => {
-                          const endpoint = selected ? 'remove_interface' : 'add_interface';
-                          return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ interface_ip: ip })
-                          }).then(async r => {
-                            if (!r.ok) setToast(await r.text());
-                          });
-                        }}
-                        onCancel={() => {
-                          fetch(`${API_BASE}/download/${jid}/cancel`, { method: "POST" });
-                          setActiveJobs(prev => prev.filter(x => x !== jid));
-                        }}
-                        onPause={() => fetch(`${API_BASE}/download/${jid}/pause`, { method: "POST" })}
-                        onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
-                      />
-                    ))}
+                    {activeJobs.map(jid => {
+                      const isFirstCard = jid === activeJobs[0];
+                      let showHint = false;
+                      if (isFirstCard && !hasShownGraphHintRef.current) {
+                        showHint = true;
+                        hasShownGraphHintRef.current = true;
+                      }
+                      return (
+                        <DownloadCard
+                          key={jid}
+                          jid={jid}
+                          status={jobStatuses[jid]}
+                          availableInterfaces={renderedInterfaces}
+                          allUsedIps={allUsedIps}
+                          isExpanded={!!expandedGraphs[jid]}
+                          onToggleExpand={() => setExpandedGraphs(prev => ({ ...prev, [jid]: !prev[jid] }))}
+                          showHint={showHint}
+                          onToggle={async (ip, selected) => {
+                            const endpoint = selected ? 'remove_interface' : 'add_interface';
+                            return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ interface_ip: ip })
+                            }).then(async r => {
+                              if (!r.ok) setToast(await r.text());
+                            });
+                          }}
+                          onCancel={() => {
+                            fetch(`${API_BASE}/download/${jid}/cancel`, { method: "POST" });
+                            setActiveJobs(prev => prev.filter(x => x !== jid));
+                          }}
+                          onPause={() => fetch(`${API_BASE}/download/${jid}/pause`, { method: "POST" })}
+                          onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
+                        />
+                      );
+                    })}
 
                     {/* Recently Completed Section */}
                     {history.length > 0 && (
