@@ -95,6 +95,7 @@ _DEFAULTS: Dict[str, Any] = {
     "THEME_MODE": "system",
     "START_ON_BOOT": True,
     "ONBOARDING_COMPLETE": False,
+    "CLIPBOARD_MONITOR_ENABLED": False,
 }
 
 

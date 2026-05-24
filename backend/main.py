@@ -72,6 +72,16 @@ class SettingsUpdate(BaseModel):
     settings: Dict[str, Any]
 
 
+class BatchScanRequest(BaseModel):
+    url: str = Field(min_length=5)
+    output_path: str = Field(min_length=1)
+
+
+class BatchDownloadRequest(BaseModel):
+    urls: List[str]
+    output_path: str
+
+
 async def history_saver_loop():
     saved_ids = set()
     try:
@@ -102,11 +112,17 @@ async def lifespan(app: FastAPI):
     def startup_setup():
         apply_firewall_rules()
         setup_native_host()
-        
+
     Thread(target=startup_setup, daemon=True).start()
-    
+
     # Load state
     await load_state()
+
+    # Start clipboard monitor (enabled by setting)
+    clipboard_stop = asyncio.Event()
+    app.state.clipboard_stop = clipboard_stop
+    loop = asyncio.get_event_loop()
+    _start_clipboard_monitor_if_enabled(app, clipboard_stop, loop)
 
     # Start polling loops
     task = asyncio.create_task(interface_polling_loop())
@@ -114,6 +130,8 @@ async def lifespan(app: FastAPI):
     history_task = asyncio.create_task(history_saver_loop())
     yield
     # Shutdown: Clean up if needed
+    if not clipboard_stop.is_set():
+        clipboard_stop.set()
     task.cancel()
     state_task.cancel()
     history_task.cancel()
@@ -123,6 +141,30 @@ async def lifespan(app: FastAPI):
         await history_task
     except asyncio.CancelledError:
         pass
+
+
+def _start_clipboard_monitor_if_enabled(app, stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
+    """Start clipboard monitor if the setting is enabled. Safe to call on non-Windows."""
+    settings = config.load_settings()
+    if not settings.get("CLIPBOARD_MONITOR_ENABLED", False):
+        return
+    _launch_clipboard_thread(stop_event, loop)
+
+
+def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
+    """Actually launch the clipboard monitor in a daemon thread."""
+    import threading
+    def bridge():
+        from clipboard_monitor import start_monitor
+        def on_url_detected(url: str):
+            print(f"[clipboard] URL detected: {url}", flush=True)
+            asyncio.run_coroutine_threadsafe(
+                broadcast_event("clipboard_url", {"url": url}),
+                loop
+            )
+        start_monitor(on_url_detected, stop_event, poll_interval=2.0)
+    t = threading.Thread(target=bridge, daemon=True)
+    t.start()
 
 app = FastAPI(title="Burst API", version="1.2.1", lifespan=lifespan)
 manager = DownloadManager()
@@ -187,8 +229,104 @@ async def speedtest() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Analyze & download endpoints
+# URL type detection
 # ---------------------------------------------------------------------------
+@app.get("/url-type")
+async def get_url_type(url: str) -> Dict[str, Any]:
+    """Lightweight check — is this URL a file or an HTML page? Does a HEAD request, fallback to GET."""
+    try:
+        import aiohttp
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+        }
+        async with aiohttp.ClientSession() as session:
+            ct = ""
+            status = 0
+            try:
+                async with session.head(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as resp:
+                    ct = resp.headers.get("Content-Type", "")
+                    status = resp.status
+            except Exception:
+                pass
+            
+            # Fall back to GET if HEAD fails, returns non-2xx/non-3xx, or returns no content type
+            if status < 200 or status >= 400 or not ct:
+                try:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as resp:
+                        ct = resp.headers.get("Content-Type", "")
+                        status = resp.status
+                except Exception as e:
+                    return {"type": "file", "error": str(e)}
+
+            if "text/html" in ct or "application/xhtml" in ct:
+                # Try to extract page title quickly
+                title = None
+                try:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as get_resp:
+                        if get_resp.status == 200:
+                            text = await get_resp.text()
+                            import re
+                            m = re.search(r"<title[^>]*>([^<]+)</title>", text, re.IGNORECASE)
+                            if m:
+                                title = m.group(1).strip()
+                except Exception:
+                    pass
+                return {"type": "html_page", "title": title}
+            return {"type": "file"}
+    except Exception as e:
+        return {"type": "file", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Batch scan endpoint
+# ---------------------------------------------------------------------------
+@app.post("/batch-scan")
+async def batch_scan(payload: BatchScanRequest) -> Dict[str, Any]:
+    """Scan a webpage for downloadable links. Returns a list of {url, filename}."""
+    from batch_downloader import scan_page
+
+    try:
+        result = await asyncio.wait_for(
+            scan_page(payload.url),
+            timeout=30.0
+        )
+        return result
+    except asyncio.TimeoutError:
+        return {"urls": [], "total": 0, "error": "Scan timed out after 30 seconds"}
+
+
+@app.post("/batch-download")
+async def batch_download(payload: BatchDownloadRequest) -> Dict[str, Any]:
+    """Start downloads for multiple URLs at once. Returns list of job_ids."""
+    from batch_downloader import guess_filename
+    all_ifaces = _interfaces_by_ip()
+    default_ips = list(all_ifaces.keys())
+    job_ids = []
+    errors = []
+
+    for url in payload.urls:
+        try:
+            # Determine filename for this URL
+            filename = guess_filename(url)
+            output = payload.output_path
+            # If output_path is a directory, append filename
+            if not output.endswith("/") and not output.endswith("\\"):
+                if "." not in output.split("\\")[-1]:
+                    output = output + "/" + filename
+            else:
+                output = output + filename
+
+            selected = [all_ifaces[ip] for ip in default_ips if ip in all_ifaces]
+            job = await manager.create_job(url.strip(), output, selected, None)
+            await broadcast_event("new_job", {"job_id": job.job_id})
+            save_state()
+            job_ids.append(job.job_id)
+        except Exception as e:
+            errors.append({"url": url, "error": str(e)})
+
+    return {"job_ids": job_ids, "errors": errors if errors else None}
 @app.post("/analyze")
 async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
     try:
@@ -336,7 +474,14 @@ async def clear_history_api():
 # ---------------------------------------------------------------------------
 @app.get("/settings")
 async def get_settings() -> Dict[str, Any]:
-    return {"settings": config.load_settings()}
+    settings = config.load_settings()
+    import platform
+    if platform.system() == "Windows":
+        try:
+            import win32clipboard
+        except ImportError:
+            settings["CLIPBOARD_MONITOR_REASON"] = "pywin32_not_installed"
+    return {"settings": settings}
 
 
 @app.post("/settings")
@@ -361,6 +506,42 @@ async def reset_settings() -> Dict[str, Any]:
     from setup_utils import apply_autostart_rules
     apply_autostart_rules(settings.get("START_ON_BOOT", True))
     return {"settings": settings}
+
+
+@app.post("/settings/clipboard-monitor")
+async def set_clipboard_monitor(enabled: bool) -> Dict[str, Any]:
+    """Enable or disable the clipboard monitor. ctypes-based, no pywin32 required."""
+    import platform
+    if platform.system() != "Windows":
+        return {"supported": False}
+
+    reason = None
+    supported = True
+    try:
+        import win32clipboard
+    except ImportError:
+        reason = "pywin32_not_installed"
+        supported = False
+
+    # Persist the setting
+    updated = config.save_settings({"CLIPBOARD_MONITOR_ENABLED": enabled})
+    # Start or stop the monitor
+    app_state = app.state
+    stop_event: asyncio.Event = getattr(app_state, "clipboard_stop", None)
+    if not stop_event:
+        stop_event = asyncio.Event()
+        app_state.clipboard_stop = stop_event
+    if enabled:
+        loop = asyncio.get_event_loop()
+        _launch_clipboard_thread(stop_event, loop)
+    else:
+        if not stop_event.is_set():
+            stop_event.set()
+
+    if reason:
+        updated["CLIPBOARD_MONITOR_REASON"] = reason
+
+    return {"supported": supported, "enabled": enabled, "settings": updated, "reason": reason}
 
 
 @app.get("/select-path")
@@ -835,14 +1016,16 @@ if __name__ == "__main__":
             # Absolute exit to prevent any fall-through to elevation code
             os._exit(0)
 
-    # 2. Handle GUI elevation
-    # The main app needs admin for firewall rules and interface binding
+    # If running with python directly, we might not want elevation immediately
+    # or we might be in an environment where we can't elevate easily.
+    # For dev purposes, let's allow bypassing elevation if requested or if in dev.
     from setup_utils import is_admin, request_elevation
-    if not is_admin():
+    if not is_admin() and getattr(sys, 'frozen', False):
         request_elevation()
-    
-    # Hide the console window immediately for GUI mode
-    hide_console()
+
+    # Hide the console window immediately for GUI mode (only when frozen)
+    if getattr(sys, 'frozen', False):
+        hide_console()
 
     import uvicorn
     import webview

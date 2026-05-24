@@ -19,7 +19,12 @@ import {
   Play,
   Moon,
   Sun,
-  Menu
+  Menu,
+  Scan,
+  ChevronDown,
+  ChevronUp,
+  Layers,
+  ArrowLeft
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -28,18 +33,39 @@ const API_BASE = (window.location.port === "5173" || window.location.port === "4
 const HISTORY_KEY = "burst_history";
 
 const CHROME_SVG = (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" fill="#4285F4"/>
-    <path d="M12 17C14.7614 17 17 14.7614 17 12C17 9.23858 14.7614 7 12 7C9.23858 7 7 9.23858 7 12C7 14.7614 9.23858 17 12 17Z" fill="white"/>
-    <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" fill="#4285F4"/>
+  <svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px"
+    viewBox="0 0 512 512">
+  <path fill="#FFFFFF" d="M255.73,383.71c70.3,0,127.3-56.99,127.3-127.3s-56.99-127.3-127.3-127.3s-127.3,56.99-127.3,127.3
+    S185.42,383.71,255.73,383.71z"/>
+  <linearGradient id="SVGID_1_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8515.121" cx="-7907.187">
+    <stop  offset="0" style={{stopColor:"#ffbd4f"}}/>
+    <stop  offset="1" style={{stopColor:"#ff980e"}}/>
+  </linearGradient>
+  <path fill="url(#SVGID_1_)" d="M145.48,320.08L35.26,129.17c-22.35,38.7-34.12,82.6-34.12,127.29s11.76,88.59,34.11,127.29
+    c22.35,38.7,54.49,70.83,93.2,93.17c38.71,22.34,82.61,34.09,127.3,34.08l110.22-190.92v-0.03c-11.16,19.36-27.23,35.44-46.58,46.62
+    c-19.35,11.18-41.3,17.07-63.65,17.07s-44.3-5.88-63.66-17.05C172.72,355.52,156.65,339.44,145.48,320.08z"/>
+  <linearGradient id="SVGID_2_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8482.089" cx="-7936.711">
+    <stop  offset="0" style={{stopColor:"#fcc934"}}/>
+    <stop  offset="1" style={{stopColor:"#fbbc04"}}/>
+  </linearGradient>
+  <path fill="url(#SVGID_2_)" d="M365.96,320.08L255.74,510.99c44.69,0.01,88.59-11.75,127.29-34.1
+    c38.7-22.34,70.84-54.48,93.18-93.18c22.34-38.7,34.1-82.61,34.09-127.3c-0.01-44.69-11.78-88.59-34.14-127.28H255.72l-0.03,0.02
+    c22.35-0.01,44.31,5.86,63.66,17.03c19.36,11.17,35.43,27.24,46.61,46.59c11.18,19.35,17.06,41.31,17.06,63.66
+    C383.03,278.77,377.14,300.72,365.96,320.08L365.96,320.08z"/>
+  <path fill="#1A73E8" d="M255.73,357.21c55.66,0,100.78-45.12,100.78-100.78s-45.12-100.78-100.78-100.78
+    s-100.78,45.12-100.78,100.78S200.07,357.21,255.73,357.21z"/>
+  <linearGradient id="SVGID_3_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="118.081" cy="-8535.981" cx="-7915.977">
+    <stop  offset="0" style={{stopColor:"#d93025"}}/>
+    <stop  offset="1" style={{stopColor:"#ea4335"}}/>
+  </linearGradient>
+  <path fill="url(#SVGID_3_)" d="M255.73,129.14h220.45C453.84,90.43,421.7,58.29,383,35.95C344.3,13.6,300.4,1.84,255.71,1.84
+    c-44.69,0-88.59,11.77-127.29,34.12c-38.7,22.35-70.83,54.5-93.16,93.2l110.22,190.92l0.03,0.02
+    c-11.18-19.35-17.08-41.3-17.08-63.65s5.87-44.31,17.04-63.66c11.17-19.36,27.24-35.43,46.6-46.6
+    C211.42,135.01,233.38,129.13,255.73,129.14z"/>
   </svg>
 );
-
 const FIREFOX_SVG = (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M22 12C22 17.5228 17.5228 22 12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12Z" fill="#FF7139"/>
-    <path d="M12 17C14.7614 17 17 14.7614 17 12C17 9.23858 14.7614 7 12 7C9.23858 7 7 9.23858 7 12C7 14.7614 9.23858 17 12 17Z" fill="white"/>
-  </svg>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 87.419 81.967"><defs><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8515.121" cx="-7907.187" id="b"><stop stop-color="#ffbd4f" offset=".129"/><stop stop-color="#ffac31" offset=".186"/><stop stop-color="#ff9d17" offset=".247"/><stop stop-color="#ff980e" offset=".283"/><stop stop-color="#ff563b" offset=".403"/><stop stop-color="#ff3750" offset=".467"/><stop stop-color="#f5156c" offset=".71"/><stop stop-color="#eb0878" offset=".782"/><stop stop-color="#e50080" offset=".86"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8482.089" cx="-7936.711" id="c"><stop stop-color="#960e18" offset=".3"/><stop stop-opacity=".74" stop-color="#b11927" offset=".351"/><stop stop-opacity=".343" stop-color="#db293d" offset=".435"/><stop stop-opacity=".094" stop-color="#f5334b" offset=".497"/><stop stop-opacity="0" stop-color="#ff3750" offset=".53"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="58.534" cy="-8533.457" cx="-7926.97" id="d"><stop stop-color="#fff44f" offset=".132"/><stop stop-color="#ffdc3e" offset=".252"/><stop stop-color="#ff9d12" offset=".506"/><stop stop-color="#ff980e" offset=".526"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="38.471" cy="-8460.984" cx="-7945.648" id="e"><stop stop-color="#3a8ee6" offset=".353"/><stop stop-color="#5c79f0" offset=".472"/><stop stop-color="#9059ff" offset=".669"/><stop stop-color="#c139e6" offset="1"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="matrix(.972 -.235 .275 1.138 10095.002 7833.794)" r="20.397" cy="-8491.546" cx="-7935.62" id="f"><stop stop-opacity="0" stop-color="#9059ff" offset=".206"/><stop stop-opacity=".064" stop-color="#8c4ff3" offset=".278"/><stop stop-opacity=".45" stop-color="#7716a8" offset=".747"/><stop stop-opacity=".6" stop-color="#6e008b" offset=".975"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="27.676" cy="-8518.427" cx="-7937.731" id="g"><stop stop-color="#ffe226" offset="0"/><stop stop-color="#ffdb27" offset=".121"/><stop stop-color="#ffc82a" offset=".295"/><stop stop-color="#ffa930" offset=".502"/><stop stop-color="#ff7e37" offset=".732"/><stop stop-color="#ff7139" offset=".792"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="118.081" cy="-8535.981" cx="-7915.977" id="h"><stop stop-color="#fff44f" offset=".113"/><stop stop-color="#ff980e" offset=".456"/><stop stop-color="#ff5634" offset=".622"/><stop stop-color="#ff3647" offset=".716"/><stop stop-color="#e31587" offset=".904"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="matrix(.105 .995 -.653 .069 -4680.304 8470.187)" r="86.499" cy="-8522.859" cx="-7927.165" id="i"><stop stop-color="#fff44f" offset="0"/><stop stop-color="#ffe847" offset=".06"/><stop stop-color="#ffc830" offset=".168"/><stop stop-color="#ff980e" offset=".304"/><stop stop-color="#ff8b16" offset=".356"/><stop stop-color="#ff672a" offset=".455"/><stop stop-color="#ff3647" offset=".57"/><stop stop-color="#e31587" offset=".737"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="73.72" cy="-8508.176" cx="-7938.383" id="j"><stop stop-color="#fff44f" offset=".137"/><stop stop-color="#ff980e" offset=".48"/><stop stop-color="#ff5634" offset=".592"/><stop stop-color="#ff3647" offset=".655"/><stop stop-color="#e31587" offset=".904"/></radialGradient><radialGradient gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.686" cy="-8503.861" cx="-7918.923" id="k"><stop stop-color="#fff44f" offset=".094"/><stop stop-color="#ffe141" offset=".231"/><stop stop-color="#ffaf1e" offset=".509"/><stop stop-color="#ff980e" offset=".626"/></radialGradient><linearGradient gradientTransform="translate(3.7 -.004)" gradientUnits="userSpaceOnUse" y2="74.468" x2="6.447" y1="12.393" x1="70.786" id="a"><stop stop-color="#fff44f" offset=".048"/><stop stop-color="#ffe847" offset=".111"/><stop stop-color="#ffc830" offset=".225"/><stop stop-color="#ff980e" offset=".368"/><stop stop-color="#ff8b16" offset=".401"/><stop stop-color="#ff672a" offset=".462"/><stop stop-color="#ff3647" offset=".534"/><stop stop-color="#e31587" offset=".705"/></linearGradient><linearGradient gradientTransform="translate(3.7 -.004)" gradientUnits="userSpaceOnUse" y2="66.806" x2="15.267" y1="12.061" x1="70.013" id="l"><stop stop-opacity=".8" stop-color="#fff44f" offset=".167"/><stop stop-opacity=".634" stop-color="#fff44f" offset=".266"/><stop stop-opacity=".217" stop-color="#fff44f" offset=".489"/><stop stop-opacity="0" stop-color="#fff44f" offset=".6"/></linearGradient></defs><path d="M79.616 26.827c-1.684-4.052-5.1-8.427-7.775-9.81a40.266 40.266 0 013.925 11.764l.007.065C71.391 17.92 63.96 13.516 57.891 3.924a47.099 47.099 0 01-.913-1.484 12.24 12.24 0 01-.427-.8 7.053 7.053 0 01-.578-1.535.1.1 0 00-.088-.1.138.138 0 00-.073 0c-.005 0-.013.009-.019.01l-.028.016.015-.026c-9.735 5.7-13.038 16.252-13.342 21.53a19.387 19.387 0 00-10.666 4.11 11.587 11.587 0 00-1-.757 17.968 17.968 0 01-.109-9.473 28.705 28.705 0 00-9.329 7.21h-.018c-1.536-1.947-1.428-8.367-1.34-9.708a6.928 6.928 0 00-1.294.687 28.225 28.225 0 00-3.788 3.245 33.845 33.845 0 00-3.623 4.347v.006-.007a32.733 32.733 0 00-5.2 11.743l-.052.256a61.89 61.89 0 00-.381 2.42c0 .029-.006.056-.009.085A36.937 36.937 0 005 41.042v.2a38.759 38.759 0 0076.954 6.554c.065-.5.118-.995.176-1.5a39.857 39.857 0 00-2.514-19.47zm-44.67 30.338c.181.087.351.18.537.264l.027.017q-.282-.135-.564-.281zm8.878-23.376zm31.952-4.934v-.037l.007.04z" fill="url(#a)"/><path d="M79.616 26.827c-1.684-4.052-5.1-8.427-7.775-9.81a40.266 40.266 0 013.925 11.764v.037l.007.04a35.1 35.1 0 01-1.206 26.159c-4.442 9.53-15.194 19.3-32.024 18.825-18.185-.515-34.2-14.01-37.194-31.683-.545-2.787 0-4.2.274-6.465A28.876 28.876 0 005 41.042v.2a38.759 38.759 0 0076.954 6.554c.065-.5.118-.995.176-1.5a39.857 39.857 0 00-2.514-19.47z" fill="url(#b)"/><path d="M79.616 26.827c-1.684-4.052-5.1-8.427-7.775-9.81a40.266 40.266 0 013.925 11.764v.037l.007.04a35.1 35.1 0 01-1.206 26.159c-4.442 9.53-15.194 19.3-32.024 18.825-18.185-.515-34.2-14.01-37.194-31.683-.545-2.787 0-4.2.274-6.465A28.876 28.876 0 005 41.042v.2a38.759 38.759 0 0076.954 6.554c.065-.5.118-.995.176-1.5a39.857 39.857 0 00-2.514-19.47z" fill="url(#c)"/><path d="M60.782 31.383c.084.059.162.118.241.177a21.1 21.1 0 00-3.6-4.695C45.377 14.817 54.266.742 55.765.027l.015-.022c-9.735 5.7-13.038 16.252-13.342 21.53.452-.031.9-.07 1.362-.07a19.56 19.56 0 0116.982 9.918z" fill="url(#d)"/><path d="M43.825 33.789c-.064.964-3.47 4.289-4.661 4.289-11.021 0-12.81 6.667-12.81 6.667.488 5.614 4.4 10.238 9.129 12.684.216.112.435.213.654.312q.569.252 1.138.466a17.235 17.235 0 005.043.973c19.317.906 23.059-23.1 9.119-30.066a13.38 13.38 0 019.345 2.269A19.56 19.56 0 0043.8 21.466c-.46 0-.91.038-1.362.069a19.387 19.387 0 00-10.666 4.11c.591.5 1.258 1.169 2.663 2.554 2.63 2.59 9.375 5.275 9.39 5.59z" fill="url(#e)"/><path d="M43.825 33.789c-.064.964-3.47 4.289-4.661 4.289-11.021 0-12.81 6.667-12.81 6.667.488 5.614 4.4 10.238 9.129 12.684.216.112.435.213.654.312q.569.252 1.138.466a17.235 17.235 0 005.043.973c19.317.906 23.059-23.1 9.119-30.066a13.38 13.38 0 019.345 2.269A19.56 19.56 0 0043.8 21.466c-.46 0-.91.038-1.362.069a19.387 19.387 0 00-10.666 4.11c.591.5 1.258 1.169 2.663 2.554 2.63 2.59 9.375 5.275 9.39 5.59z" fill="url(#f)"/><path d="M29.965 24.357c.314.2.573.374.8.53a17.968 17.968 0 01-.109-9.472 28.705 28.705 0 00-9.329 7.21c.189-.005 5.811-.106 8.638 1.732z" fill="url(#g)"/><path d="M5.354 42.159c2.991 17.674 19.009 31.168 37.194 31.683 16.83.476 27.582-9.294 32.024-18.825a35.1 35.1 0 001.206-26.158v-.037c0-.03-.006-.046 0-.037l.007.065c1.375 8.977-3.191 17.674-10.329 23.555l-.022.05c-13.908 11.327-27.218 6.834-29.912 5q-.282-.135-.564-.281c-8.109-3.876-11.459-11.264-10.741-17.6a9.953 9.953 0 01-9.181-5.775 14.618 14.618 0 0114.249-.572 19.3 19.3 0 0014.552.572c-.015-.315-6.76-3-9.39-5.59-1.405-1.385-2.072-2.052-2.663-2.553a11.587 11.587 0 00-1-.758c-.23-.157-.489-.327-.8-.531-2.827-1.838-8.449-1.737-8.635-1.732h-.018c-1.536-1.947-1.428-8.367-1.34-9.708a6.928 6.928 0 00-1.294.687 28.225 28.225 0 00-3.788 3.245 33.845 33.845 0 00-3.638 4.337v.006-.007a32.733 32.733 0 00-5.2 11.743c-.019.079-1.396 6.099-.717 9.22z" fill="url(#h)"/><path d="M57.425 26.865a21.1 21.1 0 013.6 4.7c.213.16.412.32.581.476 8.787 8.1 4.183 19.55 3.84 20.365 7.138-5.881 11.7-14.578 10.329-23.555C71.391 17.92 63.96 13.516 57.891 3.924a47.099 47.099 0 01-.913-1.484 12.24 12.24 0 01-.427-.8 7.053 7.053 0 01-.578-1.535.1.1 0 00-.088-.1.138.138 0 00-.073 0c-.005 0-.013.009-.019.01l-.028.016c-1.499.71-10.388 14.786 1.66 26.834z" fill="url(#i)"/><path d="M61.6 32.036a8.083 8.083 0 00-.581-.476c-.079-.06-.157-.118-.241-.177a13.38 13.38 0 00-9.345-2.27c13.94 6.97 10.2 30.973-9.119 30.067a17.235 17.235 0 01-5.043-.973q-.569-.213-1.138-.466c-.219-.1-.438-.2-.654-.312l.027.017c2.694 1.839 16 6.332 29.912-5l.022-.05c.347-.81 4.951-12.263-3.84-20.36z" fill="url(#j)"/><path d="M26.354 44.745s1.789-6.667 12.81-6.667c1.191 0 4.6-3.325 4.661-4.29a19.3 19.3 0 01-14.552-.571 14.618 14.618 0 00-14.249.572 9.953 9.953 0 009.181 5.775c-.718 6.337 2.632 13.725 10.741 17.6.181.087.351.18.537.264-4.733-2.445-8.641-7.07-9.129-12.683z" fill="url(#k)"/><path d="M79.616 26.827c-1.684-4.052-5.1-8.427-7.775-9.81a40.266 40.266 0 013.925 11.764l.007.065C71.391 17.92 63.96 13.516 57.891 3.924a47.099 47.099 0 01-.913-1.484 12.24 12.24 0 01-.427-.8 7.053 7.053 0 01-.578-1.535.1.1 0 00-.088-.1.138.138 0 00-.073 0c-.005 0-.013.009-.019.01l-.028.016.015-.026c-9.735 5.7-13.038 16.252-13.342 21.53.452-.031.9-.07 1.362-.07a19.56 19.56 0 0116.982 9.918 13.38 13.38 0 00-9.345-2.27c13.94 6.97 10.2 30.973-9.119 30.067a17.235 17.235 0 01-5.043-.973q-.569-.213-1.138-.466c-.219-.1-.438-.2-.654-.312l.027.017q-.282-.135-.564-.281c.181.087.351.18.537.264-4.733-2.446-8.641-7.07-9.129-12.684 0 0 1.789-6.667 12.81-6.667 1.191 0 4.6-3.325 4.661-4.29-.015-.314-6.76-3-9.39-5.59-1.405-1.384-2.072-2.051-2.663-2.552a11.587 11.587 0 00-1-.758 17.968 17.968 0 01-.109-9.473 28.705 28.705 0 00-9.329 7.21h-.018c-1.536-1.947-1.428-8.367-1.34-9.708a6.928 6.928 0 00-1.294.687 28.225 28.225 0 00-3.788 3.245 33.845 33.845 0 00-3.623 4.347v.006-.007a32.733 32.733 0 00-5.2 11.743l-.052.256c-.073.34-.4 2.073-.447 2.445 0 .028 0-.03 0 0A45.094 45.094 0 005 41.042v.2a38.759 38.759 0 0076.954 6.554c.065-.5.118-.995.176-1.5a39.857 39.857 0 00-2.514-19.47zm-3.845 1.99l.007.042z" fill="url(#l)"/></svg>
 );
 
 function formatBytes(bytes) {
@@ -107,6 +133,42 @@ function readDroppedUrl(event) {
   const plainText = event.dataTransfer.getData("text/plain");
   if (plainText && /^https?:\/\//i.test(plainText.trim())) return plainText.trim();
   return "";
+}
+
+function isHtmlPageLikely(urlString) {
+  if (!urlString) return false;
+  const clean = urlString.trim();
+  if (!/^https?:\/\//i.test(clean)) return false;
+
+  try {
+    const parsed = new URL(clean);
+    const pathname = parsed.pathname;
+    
+    // Get the last segment
+    const segments = pathname.split('/').filter(Boolean);
+    const lastSegment = segments[segments.length - 1] || "";
+    
+    if (!lastSegment) return true; // root of a site, definitely HTML
+
+    // Check if there is any dot in the last segment
+    if (!lastSegment.includes('.')) return true;
+
+    // Check if it ends with known file extensions
+    const knownExtensions = [
+      'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'exe', 'msi', 'dmg', 'pkg', 'apk',
+      'mp4', 'mkv', 'avi', 'mov', 'wmv', 'mp3', 'wav', 'flac', 'ogg', 'm4a',
+      'pdf', 'epub', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+      'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico', 'bmp', 'tiff',
+      'iso', 'img', 'bin', 'torrent', 'deb', 'rpm'
+    ];
+    
+    const parts = lastSegment.split('.');
+    const ext = parts[parts.length - 1].toLowerCase();
+    
+    return !knownExtensions.includes(ext);
+  } catch {
+    return false;
+  }
 }
 
 function PromptModal({ isOpen, title, message, hint, defaultValue, onConfirm, onCancel, type }) {
@@ -344,6 +406,18 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [bannerDismissed, setBannerDismissed] = useState(() => localStorage.getItem("burst_banner_dismissed") === "true");
 
+  // Clipboard monitor toast
+  const [clipboardToast, setClipboardToast] = useState(null); // { url, ts }
+  const clipboardToastRef = useRef([]); // recent URLs to dedupe
+
+  // Webpage Scan Results view (in-place Option B)
+  const [showBatchResultsView, setShowBatchResultsView] = useState(false);
+  const [urlTypeHint, setUrlTypeHint] = useState(null); // null | "checking" | {type, title} | "error"
+  const [batchResults, setBatchResults] = useState([]);
+  const [batchScanning, setBatchScanning] = useState(false);
+  const [batchError, setBatchError] = useState(null);
+  const [batchSearchQuery, setBatchSearchQuery] = useState("");
+
   const jobSocketsRef = useRef({});
   const dragCounter = useRef(0);
 
@@ -434,6 +508,18 @@ export default function App() {
           if (prev.includes(jobId)) return prev;
           return [...prev, jobId];
         });
+      } else if (msg.type === "clipboard_url") {
+        const detectedUrl = msg.data.url;
+        // Deduplicate within 60 seconds
+        const now = Date.now();
+        if (clipboardToastRef.current.includes(detectedUrl)) return;
+        clipboardToastRef.current.push(detectedUrl);
+        setTimeout(() => {
+          clipboardToastRef.current = clipboardToastRef.current.filter(u => u !== detectedUrl);
+        }, 60000);
+        setClipboardToast({ url: detectedUrl, ts: now });
+        // Auto-dismiss after 10s
+        setTimeout(() => setClipboardToast(prev => (prev && prev.url === detectedUrl) ? null : prev), 10000);
       }
     };
 
@@ -620,7 +706,23 @@ export default function App() {
     if (!targetUrl) return;
 
     const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
+
     if (!isTorrent) {
+      // First check if this is a webpage or direct download
+      setUrlTypeHint("checking");
+      try {
+        const typeResp = await fetch(`${API_BASE}/url-type?url=${encodeURIComponent(targetUrl)}`);
+        const typeData = await typeResp.json();
+        if (typeData.type === "html_page") {
+          setUrlTypeHint({ type: "html_page", title: typeData.title || "Webpage" });
+          return; // wait for user choice
+        }
+        setUrlTypeHint(null);
+      } catch {
+        setUrlTypeHint(null);
+      }
+
+      // Normal file download — analyze first
       setDownloadBtnState("checking");
       try {
         const resp = await fetch(`${API_BASE}/analyze`, {
@@ -638,6 +740,67 @@ export default function App() {
       }
     }
     startDownload();
+    setUrlTypeHint(null);
+  };
+
+  const handleBatchScan = async () => {
+    const cleanUrl = url.trim();
+    if (!cleanUrl) return;
+
+    setShowBatchResultsView(true);
+    setBatchScanning(true);
+    setBatchError(null);
+    setBatchResults([]);
+    setUrlTypeHint(null);
+
+    try {
+      const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+      const resp = await fetch(`${API_BASE}/batch-scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: cleanUrl, output_path: bd })
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setBatchError(data.error);
+      } else if (data.urls && data.urls.length > 0) {
+        setBatchResults(data.urls.map(u => ({ ...u, checked: true })));
+      } else {
+        setBatchError("No downloadable files found on this page.");
+      }
+    } catch (err) {
+      setBatchError("Scan failed. Check the URL and try again.");
+    } finally {
+      setBatchScanning(false);
+    }
+  };
+
+  const handleBatchDownload = async () => {
+    const selected = batchResults.filter(f => f.checked);
+    if (selected.length === 0) return;
+
+    try {
+      const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+      const safeDir = bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
+      
+      const resp = await fetch(`${API_BASE}/batch-download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: selected.map(f => f.url), output_path: safeDir })
+      });
+
+      if (!resp.ok) {
+        throw new Error("Failed to queue downloads");
+      }
+
+      setToast(`Successfully queued ${selected.length} downloads`);
+      setBatchResults([]);
+      setBatchSearchQuery("");
+      setShowBatchResultsView(false);
+      setUrl("");
+    } catch (err) {
+      setToast(err.message || "Failed to queue downloads");
+    }
   };
 
   useEffect(() => {
@@ -791,13 +954,19 @@ export default function App() {
                     className="extension-btn chrome"
                     onClick={() => window.open('https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd', '_blank')}
                   >
-                    {CHROME_SVG} Add to Chrome
+                    <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
+                      {CHROME_SVG}
+                    </span>
+                    Add to Chrome
                   </button>
                   <button
                     className="extension-btn firefox"
                     onClick={() => window.open('https://addons.mozilla.org/firefox/addon/burst-download-manager', '_blank')}
                   >
-                    {FIREFOX_SVG} Add to Firefox
+                    <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
+                      {FIREFOX_SVG}
+                    </span>
+                    Add to Firefox
                   </button>
                 </div>
                 <button
@@ -866,131 +1035,384 @@ export default function App() {
         <main className="content-area">
           {activeTab === 'active' && (
             <>
-              <div className="top-controls">
-                <div className="input-group">
-                  <input
-                    type="text"
-                    className="url-input"
-                    placeholder="Paste a URL, magnet link, or .torrent..."
-                    value={url}
-                    onChange={(e) => handleUrlChange(e.target.value)}
-                  />
-                  <button
-                    className="btn-primary"
-                    onClick={handleDownloadClick}
-                    disabled={downloadBtnState === "checking"}
+              {interfaces.length <= 1 && appSettings?.ONBOARDING_COMPLETE && !bannerDismissed && (
+                <div className="interface-hint-bar" style={{
+                  background: 'var(--surface)',
+                  borderBottom: '1px solid var(--border)',
+                  padding: '10px 16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  fontSize: '13px',
+                  color: 'var(--text-muted)',
+                  animation: 'slideIn 0.2s ease',
+                  width: '100%',
+                  boxSizing: 'border-box'
+                }}>
+                  <Zap size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                  <span>Connect a second interface (Ethernet, hotspot) to start bonding speeds</span>
+                  <a
+                    className="hint-link"
+                    onClick={() => setActiveTab('connections')}
+                    style={{ color: 'var(--accent)', cursor: 'pointer', textDecoration: 'none', marginLeft: '4px', fontWeight: 500 }}
                   >
-                    {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
-                    {downloadBtnState === "checking" ? "Checking..." : "Download"}
-                  </button>
-                </div>
-
-                <div className="path-row">
-                  <button className="browse-btn-icon" onClick={async () => {
-                    try {
-                      const resp = await fetch(`${API_BASE}/select-path`);
-                      const data = await resp.json();
-                      if (data.path) setOutputPath(data.path + (url ? "" : "\\burst-download.bin"));
-                    } catch { }
-                  }} title="Browse directory">
-                    <FolderOpen size={16} />
-                  </button>
-                  <div className="path-input-container" onClick={() => setEditingOutputPath(true)}>
-                    <div className="path-text">
-                      {editingOutputPath ? (
-                        <input
-                          autoFocus
-                          value={outputPath}
-                          onChange={(e) => setOutputPath(e.target.value)}
-                          onBlur={() => setEditingOutputPath(false)}
-                          onKeyDown={(e) => e.key === 'Enter' && setEditingOutputPath(false)}
-                        />
-                      ) : outputPath}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="content-body">
-                {interfaces.length <= 1 && appSettings?.ONBOARDING_COMPLETE && !bannerDismissed && (
-                  <div className="interface-hint-bar" style={{ marginBottom: '16px', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                    <Zap size={13} className="hint-icon" />
-                    <span>Connect a second interface (Ethernet, hotspot) to start bonding speeds</span>
-                    <a className="hint-link" onClick={() => setActiveTab('connections')}>View Connections →</a>
-                    <button className="close-btn" onClick={() => {
+                    View Connections →
+                  </a>
+                  <button
+                    className="close-btn"
+                    onClick={() => {
                       setBannerDismissed(true);
                       localStorage.setItem("burst_banner_dismissed", "true");
-                    }}>
-                      <X size={14} />
-                    </button>
-                  </div>
-                )}
-                <div className="section-label">Active Downloads</div>
-                {activeJobs.length === 0 && (
-                    <div className="empty-state slide-in">
-                      <div className="empty-icon-wrapper">
-                        <Inbox size={32} strokeWidth={1.5} />
-                      </div>
-                      <h3>No active {activeTab}</h3>
-                      <p>Paste a link above to start your first speed-bonded download.</p>
-                    </div>
-                  )}
-                {activeJobs.map(jid => (
-                  <DownloadCard
-                    key={jid}
-                    jid={jid}
-                    status={jobStatuses[jid]}
-                    availableInterfaces={renderedInterfaces}
-                    allUsedIps={allUsedIps}
-                    onToggle={async (ip, selected) => {
-                      const endpoint = selected ? 'remove_interface' : 'add_interface';
-                      return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ interface_ip: ip })
-                      }).then(async r => {
-                        if (!r.ok) setToast(await r.text());
-                      });
                     }}
-                    onCancel={() => {
-                      fetch(`${API_BASE}/download/${jid}/cancel`, { method: "POST" });
-                      setActiveJobs(prev => prev.filter(x => x !== jid));
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      padding: '4px',
+                      marginLeft: 'auto',
+                      display: 'grid',
+                      placeItems: 'center',
+                      borderRadius: '4px',
+                      opacity: 0.6
                     }}
-                    onPause={() => fetch(`${API_BASE}/download/${jid}/pause`, { method: "POST" })}
-                    onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
-                  />
-                ))}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
 
-                {/* Recently Completed Section */}
-                {history.length > 0 && (
-                  <div className="recent-completed-section">
-                    <div className="section-label">Recently Completed</div>
-                    {history
-                      .slice(0, 3)
-                      .map(item => (
-                        <div className="completed-row mini" key={item.id}>
-                          {item.status === 'failed' ? <AlertCircle size={14} color="var(--danger)" /> : <CheckCircle2 size={14} color="var(--success)" />}
-                          <div className="completed-filename">{item.filename}</div>
-                          <div className="completed-meta">
-                            <span style={{
-                              display: 'inline-block',
-                              background: 'var(--surface-raised, var(--surface))',
-                              border: '1px solid var(--border)',
-                              borderRadius: '4px',
-                              padding: '1px 6px',
-                              fontSize: '11px',
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--text-muted)'
-                            }}>{formatBytes(item.size)}</span>
+              {showBatchResultsView ? (
+                /* OPTION B - FULL SCREEN SCAN RESULTS */
+                <div className="content-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%', boxSizing: 'border-box', animation: 'slideIn 0.2s ease' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <button
+                      onClick={() => { setShowBatchResultsView(false); setBatchResults([]); setBatchError(null); }}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--text)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '4px',
+                        borderRadius: '4px',
+                        transition: 'background 0.2s'
+                      }}
+                      title="Go Back"
+                      className="action-btn"
+                    >
+                      <ArrowLeft size={18} />
+                    </button>
+                    <span className="section-label" style={{ margin: 0 }}>Webpage Scan Results</span>
+                  </div>
+
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>
+                    Scanned: {url}
+                  </div>
+
+                  <div style={{
+                    flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '6px',
+                    padding: '16px',
+                    boxSizing: 'border-box',
+                    minHeight: 0
+                  }}>
+                    {batchScanning && (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text-muted)', gap: '12px' }}>
+                        <div className="spinner-small" style={{ width: '24px', height: '24px', borderWidth: '3px' }} />
+                        <div style={{ fontSize: '13px' }}>Scanning page for downloadable files...</div>
+                      </div>
+                    )}
+
+                    {batchError && !batchScanning && (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: '12px' }}>
+                        <div style={{ color: 'var(--danger)', fontSize: '13px', textAlign: 'center' }}>{batchError}</div>
+                        <button className="btn-secondary" onClick={() => { setShowBatchResultsView(false); setBatchResults([]); setBatchError(null); }}>
+                          Go Back
+                        </button>
+                      </div>
+                    )}
+
+                    {!batchScanning && !batchError && batchResults.length > 0 && (() => {
+                      const filteredFiles = batchResults.filter(file => {
+                        const query = batchSearchQuery.toLowerCase();
+                        return file.filename.toLowerCase().includes(query) || file.url.toLowerCase().includes(query);
+                      });
+
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, width: '100%' }}>
+                          {/* Filter and Select Links */}
+                          <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginBottom: '12px', flexShrink: 0 }}>
+                            <input
+                              type="text"
+                              placeholder="Filter scan results..."
+                              value={batchSearchQuery}
+                              onChange={(e) => setBatchSearchQuery(e.target.value)}
+                              style={{
+                                flex: 1,
+                                background: 'var(--surface)',
+                                border: '1px solid var(--border)',
+                                borderRadius: '4px',
+                                padding: '8px 12px',
+                                fontSize: '13px',
+                                outline: 'none',
+                                color: 'var(--text)'
+                              }}
+                            />
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                              <button
+                                onClick={() => setBatchResults(prev => prev.map(f => ({ ...f, checked: true })))}
+                                style={{ background: 'transparent', border: 'none', color: 'var(--accent)', fontSize: '13px', cursor: 'pointer', padding: 0 }}
+                              >
+                                All
+                              </button>
+                              <span>·</span>
+                              <button
+                                onClick={() => setBatchResults(prev => prev.map(f => ({ ...f, checked: false })))}
+                                style={{ background: 'transparent', border: 'none', color: 'var(--accent)', fontSize: '13px', cursor: 'pointer', padding: 0 }}
+                              >
+                                None
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* List/Scroll area */}
+                          <div style={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            border: '1px solid var(--border)',
+                            borderRadius: '4px',
+                            background: 'var(--surface)',
+                            marginBottom: '16px',
+                            minHeight: 0
+                          }}>
+                            {filteredFiles.length === 0 ? (
+                              <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)', fontSize: '13px' }}>
+                                No files matching filter.
+                              </div>
+                            ) : (
+                              filteredFiles.map((file, idx) => {
+                                const originalIdx = batchResults.findIndex(f => f.url === file.url);
+                                return (
+                                  <label
+                                    key={idx}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '12px',
+                                      padding: '10px 14px',
+                                      borderBottom: '1px solid var(--border)',
+                                      cursor: 'pointer',
+                                      fontSize: '13px',
+                                      transition: 'background 0.15s ease',
+                                    }}
+                                    className="batch-item-row"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={file.checked}
+                                      onChange={() => {
+                                        setBatchResults(prev => prev.map((f, i) => i === originalIdx ? { ...f, checked: !f.checked } : f));
+                                      }}
+                                      style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: '15px', height: '15px', flexShrink: 0 }}
+                                    />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }}>
+                                        {file.filename}
+                                      </div>
+                                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: '2px' }}>
+                                        {file.url}
+                                      </div>
+                                    </div>
+                                  </label>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          {/* Footer Action Bar */}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+                            <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                              {batchResults.filter(f => f.checked).length} of {batchResults.length} selected
+                            </span>
+                            <div style={{ display: 'flex', gap: '10px' }}>
+                              <button
+                                onClick={() => { setShowBatchResultsView(false); setBatchResults([]); setBatchError(null); }}
+                                className="btn-secondary"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={handleBatchDownload}
+                                disabled={batchResults.filter(f => f.checked).length === 0}
+                                className="btn-primary"
+                              >
+                                Queue Downloads
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      ))
-                    }
+                      );
+                    })()}
                   </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                /* NORMAL ACTIVE VIEW */
+                <>
+                  <div className="top-controls">
+                    <div className="input-group">
+                      <input
+                        type="text"
+                        className="url-input"
+                        placeholder="Paste a URL, magnet link, or .torrent..."
+                        value={url}
+                        onChange={(e) => handleUrlChange(e.target.value)}
+                      />
+                      <button
+                        className="btn-primary"
+                        onClick={handleDownloadClick}
+                        disabled={downloadBtnState === "checking"}
+                      >
+                        {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
+                        {downloadBtnState === "checking" ? "Checking..." : "Download"}
+                      </button>
+                    </div>
+
+                    <div className="path-row">
+                      <button className="browse-btn-icon" onClick={async () => {
+                        try {
+                          const resp = await fetch(`${API_BASE}/select-path`);
+                          const data = await resp.json();
+                          if (data.path) setOutputPath(data.path + (url ? "" : "\\burst-download.bin"));
+                        } catch { }
+                      }} title="Browse directory">
+                        <FolderOpen size={16} />
+                      </button>
+                      <div className="path-input-container" onClick={() => setEditingOutputPath(true)}>
+                        <div className="path-text">
+                          {editingOutputPath ? (
+                            <input
+                              autoFocus
+                              value={outputPath}
+                              onChange={(e) => setOutputPath(e.target.value)}
+                              onBlur={() => setEditingOutputPath(false)}
+                              onKeyDown={(e) => e.key === 'Enter' && setEditingOutputPath(false)}
+                            />
+                          ) : outputPath}
+                        </div>
+                      </div>
+                    </div>
+
+                    {urlTypeHint && urlTypeHint.type === "html_page" && (
+                      <div style={{
+                        marginTop: '10px',
+                        padding: '10px 12px',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        animation: 'slideIn 0.2s ease',
+                        width: '100%',
+                        boxSizing: 'border-box'
+                      }}>
+                        <div style={{ marginBottom: '8px', color: 'var(--text)', fontSize: '13px', fontWeight: 500 }}>
+                          This looks like a webpage. Scan for downloadable files?
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button className="btn-primary-small" style={{ flex: 1 }} onClick={handleBatchScan}>
+                            Scan for files
+                          </button>
+                          <button className="btn-secondary" style={{ flex: 1 }} onClick={() => {
+                            setUrlTypeHint(null);
+                            startDownload();
+                          }}>
+                            Download page directly
+                          </button>
+                          <button className="btn-secondary" style={{ flex: 0, padding: '0 8px' }} onClick={() => setUrlTypeHint(null)} title="Dismiss">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="content-body">
+                    {activeJobs.length > 0 && <div className="section-label">Active Downloads</div>}
+                    {activeJobs.length === 0 && (
+                      <div className="empty-state slide-in" style={{ padding: '40px 20px' }}>
+                        <div className="empty-icon-wrapper">
+                          <Inbox size={32} strokeWidth={1.5} />
+                        </div>
+                        <h3>No active downloads</h3>
+                        <p>Paste a link above to start your first speed-bonded download.</p>
+                      </div>
+                    )}
+                    {activeJobs.map(jid => (
+                      <DownloadCard
+                        key={jid}
+                        jid={jid}
+                        status={jobStatuses[jid]}
+                        availableInterfaces={renderedInterfaces}
+                        allUsedIps={allUsedIps}
+                        onToggle={async (ip, selected) => {
+                          const endpoint = selected ? 'remove_interface' : 'add_interface';
+                          return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ interface_ip: ip })
+                          }).then(async r => {
+                            if (!r.ok) setToast(await r.text());
+                          });
+                        }}
+                        onCancel={() => {
+                          fetch(`${API_BASE}/download/${jid}/cancel`, { method: "POST" });
+                          setActiveJobs(prev => prev.filter(x => x !== jid));
+                        }}
+                        onPause={() => fetch(`${API_BASE}/download/${jid}/pause`, { method: "POST" })}
+                        onResume={() => fetch(`${API_BASE}/download/${jid}/resume`, { method: "POST" })}
+                      />
+                    ))}
+
+                    {/* Recently Completed Section */}
+                    {history.length > 0 && (
+                      <div className="recent-completed-section">
+                        <div className="section-label">Recently Completed</div>
+                        {history
+                          .slice(0, 3)
+                          .map(item => (
+                            <div className="completed-row mini" key={item.id}>
+                              {item.status === 'failed' ? <AlertCircle size={14} color="var(--danger)" /> : <CheckCircle2 size={14} color="var(--success)" />}
+                              <div className="completed-filename">{item.filename}</div>
+                              <div className="completed-meta">
+                                <span style={{
+                                  display: 'inline-block',
+                                  background: 'var(--surface-raised, var(--surface))',
+                                  border: '1px solid var(--border)',
+                                  borderRadius: '4px',
+                                  padding: '1px 6px',
+                                  fontSize: '11px',
+                                  fontVariantNumeric: 'tabular-nums',
+                                  color: 'var(--text-muted)'
+                                }}>{formatBytes(item.size)}</span>
+                              </div>
+                            </div>
+                          ))
+                        }
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </>
           )}
+
+
 
           {activeTab === 'history' && (
             <div className="content-body">
@@ -1163,6 +1585,63 @@ export default function App() {
                     </div>
                   </label>
 
+                  {/* CLIPBOARD MONITOR TOGGLE */}
+                  <label className="setting-row" style={{ alignItems: 'flex-start' }}>
+                    <div>
+                      <span>Clipboard Monitor</span>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Auto-detect URLs copied to clipboard</div>
+                    </div>
+                    <div className="setting-input-wrap" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                      <div
+                        onClick={async () => {
+                          const newVal = !appSettings?.CLIPBOARD_MONITOR_ENABLED;
+                          setAppSettings(prev => ({ ...prev, CLIPBOARD_MONITOR_ENABLED: newVal }));
+                          const resp = await fetch(`${API_BASE}/settings/clipboard-monitor?enabled=${newVal}`, {
+                            method: 'POST'
+                          });
+                          const data = await resp.json();
+                          if (!data.supported && data.reason !== "pywin32_not_installed") {
+                            setToast("Clipboard monitor is Windows-only");
+                            setAppSettings(prev => ({ ...prev, CLIPBOARD_MONITOR_ENABLED: false }));
+                          } else if (data.reason === "pywin32_not_installed") {
+                            setAppSettings(prev => ({
+                              ...prev,
+                              CLIPBOARD_MONITOR_ENABLED: newVal,
+                              CLIPBOARD_MONITOR_REASON: "pywin32_not_installed"
+                            }));
+                          } else {
+                            setAppSettings(prev => ({
+                              ...prev,
+                              CLIPBOARD_MONITOR_ENABLED: newVal,
+                              CLIPBOARD_MONITOR_REASON: null
+                            }));
+                          }
+                        }}
+                        style={{
+                          width: '40px', height: '22px', borderRadius: '11px', cursor: 'pointer',
+                          background: appSettings?.CLIPBOARD_MONITOR_ENABLED ? 'var(--accent)' : 'var(--border)',
+                          position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                        }}
+                      >
+                        <div style={{
+                          position: 'absolute', top: '3px',
+                          left: appSettings?.CLIPBOARD_MONITOR_ENABLED ? '21px' : '3px',
+                          width: '16px', height: '16px', borderRadius: '50%',
+                          background: '#fff', transition: 'left 0.2s',
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                        }} />
+                      </div>
+                      {appSettings?.CLIPBOARD_MONITOR_REASON === "pywin32_not_installed" && (
+                        <span style={{ fontSize: '10px', color: 'var(--warning, #eab308)', display: 'block', marginTop: '4px', textAlign: 'right' }}>
+                          Run pip install pywin32 then restart Burst
+                        </span>
+                      )}
+                      {!appSettings?.CLIPBOARD_MONITOR_ENABLED && appSettings?.CLIPBOARD_MONITOR_REASON !== "pywin32_not_installed" && (
+                        <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Windows only</span>
+                      )}
+                    </div>
+                  </label>
+
                   <div className="settings-section-title">Chunking</div>
                   {[
                     { key: "BASE_CHUNK_SIZE", label: "Chunk size", unit: "MB", divisor: 1048576, step: 1, info: "Default size of each download chunk per interface. Larger = fewer requests, better for fast stable links. Smaller = more adaptive on unstable connections." },
@@ -1224,6 +1703,85 @@ export default function App() {
       {toast && (
         <div style={{ position: 'fixed', bottom: '24px', right: '32px', background: 'var(--text)', color: 'var(--bg)', padding: '8px 16px', borderRadius: '4px', fontSize: '13px', zIndex: 9999, animation: 'slideIn 0.2s ease' }}>
           {toast}
+        </div>
+      )}
+
+      {/* Clipboard URL toast */}
+      {clipboardToast && (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          background: 'var(--surface)',
+          color: 'var(--text)',
+          border: '1px solid var(--border)',
+          padding: '16px',
+          borderRadius: '12px',
+          fontSize: '13px',
+          zIndex: 9999,
+          maxWidth: '360px',
+          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.15)',
+          animation: 'slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+          boxSizing: 'border-box'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '28px',
+              height: '28px',
+              borderRadius: '6px',
+              background: 'var(--accent-dim)',
+              color: 'var(--accent)',
+              flexShrink: 0
+            }}>
+              {clipboardToast.url.startsWith("magnet:") ? (
+                <Magnet size={16} />
+              ) : (
+                <Zap size={16} />
+              )}
+            </div>
+            <span style={{ fontWeight: 600, fontSize: '13.5px', color: 'var(--text)', letterSpacing: '-0.01em' }}>
+              {clipboardToast.url.startsWith("magnet:") ? "Magnet Link Detected" : "Link Detected in Clipboard"}
+            </span>
+          </div>
+          <div style={{
+            marginBottom: '16px',
+            wordBreak: 'break-all',
+            color: 'var(--text-muted)',
+            fontSize: '11.5px',
+            lineHeight: '1.5',
+            background: 'var(--surface-2)',
+            padding: '10px 12px',
+            borderRadius: '6px',
+            border: '1px solid var(--border)',
+            fontFamily: '"JetBrains Mono", monospace',
+            maxHeight: '65px',
+            overflowY: 'auto'
+          }}>
+            {clipboardToast.url.length > 120 ? clipboardToast.url.slice(0, 120) + '...' : clipboardToast.url}
+          </div>
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+            <button
+              className="btn-secondary"
+              style={{ height: '32px', padding: '0 14px', fontSize: '12px', borderRadius: '6px' }}
+              onClick={() => setClipboardToast(null)}
+            >
+              Dismiss
+            </button>
+            <button
+              className="btn-primary"
+              style={{ height: '32px', padding: '0 16px', fontSize: '12px', borderRadius: '6px' }}
+              onClick={() => {
+                setUrl(clipboardToast.url);
+                setActiveTab("active");
+                setClipboardToast(null);
+              }}
+            >
+              Download
+            </button>
+          </div>
         </div>
       )}
 
