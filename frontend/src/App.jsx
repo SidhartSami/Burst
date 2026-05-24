@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ResponsiveContainer, AreaChart, Area } from "recharts";
 import { friendlyError } from "./utils/errors";
+import SchedulePicker from "./components/SchedulePicker";
 import {
   AlertTriangle,
   AlertCircle,
@@ -570,7 +571,7 @@ export default function App() {
   const [scheduleUrl, setScheduleUrl] = useState("");
   const [schedulePath, setSchedulePath] = useState("C:/Burst-Downloads/");
   const [scheduleDate, setScheduleDate] = useState("");
-  const [scheduleTime, setScheduleTime] = useState("");
+  const [scheduleTime, setScheduleTime] = useState("09:00");
   const [scheduleRepeat, setScheduleRepeat] = useState("once");
   const [scheduleError, setScheduleError] = useState(null);
   const [scheduleLoading, setScheduleLoading] = useState(false);
@@ -1246,7 +1247,7 @@ export default function App() {
           url: cleanUrl,
           output_path: cleanPath,
           scheduled_time: isoString,
-          repeat: scheduleRepeat,
+          repeat: "once",
         }),
       });
       const data = await resp.json();
@@ -1256,7 +1257,7 @@ export default function App() {
         setSchedules(prev => [...prev, data].sort((a, b) => a.scheduled_time.localeCompare(b.scheduled_time)));
         setScheduleUrl("");
         setScheduleDate("");
-        setScheduleTime("");
+        setScheduleTime("09:00");
         setScheduleRepeat("once");
         setToast("Download scheduled!");
       }
@@ -2107,8 +2108,8 @@ export default function App() {
                       style={{ flex: 1 }}
                     />
                     <button
-                      className="btn-secondary"
-                      style={{ height: '38px', padding: '0 12px', flexShrink: 0, fontSize: '12px' }}
+                      className="btn-primary"
+                      style={{ height: '38px', padding: '0 12px', flexShrink: 0, fontSize: '12px', borderRadius: '6px' }}
                       onClick={async () => {
                         try {
                           const r = await fetch(`${API_BASE}/select-path`);
@@ -2122,48 +2123,28 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="schedule-datetime-row">
-                    <input
-                      id="schedule-date-input"
-                      type="date"
-                      className="schedule-input"
-                      value={scheduleDate}
-                      min={new Date().toISOString().split("T")[0]}
-                      onChange={e => { setScheduleDate(e.target.value); setScheduleError(null); }}
-                    />
-                    <input
-                      id="schedule-time-input"
-                      type="time"
-                      className="schedule-input"
-                      value={scheduleTime}
-                      onChange={e => { setScheduleTime(e.target.value); setScheduleError(null); }}
-                    />
-                  </div>
+                  <SchedulePicker
+                    date={scheduleDate}
+                    time={scheduleTime}
+                    onDateChange={(d) => { setScheduleDate(d); setScheduleError(null); }}
+                    onTimeChange={(t) => { setScheduleTime(t); setScheduleError(null); }}
+                    error={scheduleError}
+                    onErrorClear={() => setScheduleError(null)}
+                  />
 
-                  <div className="schedule-bottom-row">
-                    <select
-                      id="schedule-repeat-select"
-                      className="schedule-select"
-                      value={scheduleRepeat}
-                      onChange={e => setScheduleRepeat(e.target.value)}
-                    >
-                      <option value="once">Once</option>
-                      <option value="daily">Daily</option>
-                      <option value="weekly">Weekly</option>
-                    </select>
-                    <button
-                      id="schedule-submit-btn"
-                      className="schedule-btn"
-                      onClick={handleScheduleSubmit}
-                      disabled={scheduleLoading}
-                    >
-                      {scheduleLoading
-                        ? <div className="spinner-small" style={{ width: '13px', height: '13px', borderWidth: '2px' }} />
-                        : <Clock size={14} />
-                      }
-                      Schedule
-                    </button>
-                  </div>
+                  <button
+                    id="schedule-submit-btn"
+                    className="schedule-btn"
+                    onClick={handleScheduleSubmit}
+                    disabled={scheduleLoading}
+                    style={{ width: '100%', justifyContent: 'center' }}
+                  >
+                    {scheduleLoading
+                      ? <div className="spinner-small" style={{ width: '13px', height: '13px', borderWidth: '2px' }} />
+                      : <Clock size={14} />
+                    }
+                    Schedule Download
+                  </button>
 
                   {scheduleError && (
                     <div className="schedule-error">
