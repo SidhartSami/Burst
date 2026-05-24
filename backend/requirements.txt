@@ -10,3 +10,6 @@ pystray
 pillow
 typer
 rich
+pywin32
+beautifulsoup4
+lxml

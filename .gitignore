@@ -62,3 +62,7 @@ extension-firefox/key.pem
 task.md
 walkthrough.md
 implementation_plan.md
+
+# Editor & Local Session Files
+.claude/
+burst_history.json
