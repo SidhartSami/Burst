@@ -813,7 +813,12 @@ export default function App() {
       setOutputPath(baseDir + magnetName);
       return;
     }
-    const filename = newUrl.split("/").pop()?.split("?")[0] || "burst-download.bin";
+    // Extract filename from URL — but skip meaningless route segments like /watch, /shorts, /live
+    const knownPageRoutes = new Set(['watch', 'shorts', 'live', 'embed', 'playlist', 'v', 'e', 'channel', 'c', 'user', 'feed']);
+    const rawSegment = newUrl.split("/").pop()?.split("?")[0] || "";
+    const filename = (rawSegment && !knownPageRoutes.has(rawSegment.toLowerCase()) && rawSegment.includes("."))
+      ? rawSegment
+      : "burst-download.bin";
     const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
     const safeDir = bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
     setOutputPath(safeDir + filename);
@@ -842,6 +847,7 @@ export default function App() {
         const data = await resp.json();
         if (data.supported) {
           setYtInfo(data);
+          setUrlTypeHint(null); // dismiss any stale "webpage" banner
           // Default: prefer 1080p, then second item, then first
           const fmts = data.formats || [];
           const prefer1080 = fmts.find(f => f.label === '1080p');
@@ -1029,6 +1035,12 @@ export default function App() {
     if (downloadBtnState === "checking") return;
     const targetUrl = url.trim();
     if (!targetUrl) return;
+
+    // If the yt-dlp quality picker is active, route straight to it — no url-type check needed
+    if (ytInfo && ytInfo.supported) {
+      handleYtDlpDownload();
+      return;
+    }
 
     const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
 
@@ -1946,7 +1958,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    {urlTypeHint && urlTypeHint.type === "html_page" && (
+                    {urlTypeHint && urlTypeHint.type === "html_page" && !ytInfo && (
                       <div style={{
                         marginTop: '10px',
                         padding: '10px 12px',
