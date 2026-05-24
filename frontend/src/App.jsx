@@ -29,7 +29,10 @@ import {
   Layers,
   ArrowLeft,
   Shield,
-  Clock
+  Clock,
+  Video,
+  Music,
+  Loader
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -615,6 +618,13 @@ export default function App() {
   const [batchError, setBatchError] = useState(null);
   const [batchSearchQuery, setBatchSearchQuery] = useState("");
 
+  // yt-dlp state
+  const [ytInfo, setYtInfo] = useState(null);       // null | false | { supported, title, thumbnail, ... }
+  const [ytLoading, setYtLoading] = useState(false); // spinner while fetching info
+  const [ytFormat, setYtFormat] = useState("");      // currently selected format_id
+  const ytDebounceRef = useRef(null);
+  const ytCheckedUrlRef = useRef("");               // avoid duplicate fetches
+
   const jobSocketsRef = useRef({});
   const dragCounter = useRef(0);
 
@@ -763,8 +773,15 @@ export default function App() {
 
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
+
+    // Reset yt-dlp picker if URL is cleared or changed
+    if (!newUrl.trim()) {
+      setYtInfo(null);
+      setYtLoading(false);
+      ytCheckedUrlRef.current = "";
+    }
+
     const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent");
-    // Helper to get directory only
     const getBaseDir = () => {
       if (outputPath) {
         const parts = outputPath.split(/[\\\/]/);
@@ -786,6 +803,78 @@ export default function App() {
     const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
     const safeDir = bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
     setOutputPath(safeDir + filename);
+  };
+
+  // yt-dlp: debounced URL detection (600ms)
+  useEffect(() => {
+    if (ytDebounceRef.current) clearTimeout(ytDebounceRef.current);
+
+    const trimmed = url.trim();
+    if (!trimmed || trimmed.startsWith("magnet:") || trimmed.endsWith(".torrent")) {
+      setYtInfo(null);
+      setYtLoading(false);
+      return;
+    }
+
+    // Skip if already checked this URL
+    if (ytCheckedUrlRef.current === trimmed) return;
+
+    ytDebounceRef.current = setTimeout(async () => {
+      ytCheckedUrlRef.current = trimmed;
+      setYtLoading(true);
+      setYtInfo(null);
+      try {
+        const resp = await fetch(`${API_BASE}/yt-dlp/info?url=${encodeURIComponent(trimmed)}`);
+        const data = await resp.json();
+        if (data.supported) {
+          setYtInfo(data);
+          setYtFormat(data.formats?.[0]?.id || "");
+        } else {
+          setYtInfo(false); // explicitly not supported
+        }
+      } catch {
+        setYtInfo(false);
+      } finally {
+        setYtLoading(false);
+      }
+    }, 600);
+
+    return () => { if (ytDebounceRef.current) clearTimeout(ytDebounceRef.current); };
+  }, [url]);
+
+  const handleYtDlpDownload = async () => {
+    if (!ytInfo || !ytFormat) return;
+    const cleanUrl = url.trim();
+    const selectedFmt = ytInfo.formats?.find(f => f.id === ytFormat);
+    const label = selectedFmt?.label || ytFormat;
+    // Use the directory part of outputPath as the save folder
+    const baseDir = (() => {
+      if (outputPath) {
+        const parts = outputPath.split(/[\\\/]/);
+        parts.pop();
+        return parts.join("/") + "/";
+      }
+      return "C:/Burst-Downloads/";
+    })();
+
+    try {
+      const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: baseDir, label })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || "Failed to start");
+      if (data.job_id) {
+        setActiveJobs(prev => prev.includes(data.job_id) ? prev : [...prev, data.job_id]);
+        setUrl("");
+        setYtInfo(null);
+        ytCheckedUrlRef.current = "";
+        setActiveTab("active");
+      }
+    } catch (err) {
+      setToast(friendlyError(err.message));
+    }
   };
 
   const handleBrowsePath = async (callback) => {
@@ -1714,23 +1803,97 @@ export default function App() {
                 /* NORMAL ACTIVE VIEW */
                 <>
                   <div className="top-controls">
-                    <div className="input-group">
+                    <div className="input-group" style={{ position: 'relative' }}>
                       <input
                         type="text"
                         className="url-input"
                         placeholder="Paste a URL, magnet link, or .torrent..."
                         value={url}
                         onChange={(e) => handleUrlChange(e.target.value)}
+                        style={{ paddingRight: ytLoading ? '42px' : undefined }}
                       />
+                      {/* yt-dlp loading spinner inside input */}
+                      {ytLoading && (
+                        <span style={{
+                          position: 'absolute', right: '120px', top: '50%', transform: 'translateY(-50%)',
+                          color: 'var(--text-muted)', display: 'flex', alignItems: 'center'
+                        }}>
+                          <Loader size={14} className="spin-anim" />
+                        </span>
+                      )}
                       <button
                         className="btn-primary"
-                        onClick={handleDownloadClick}
-                        disabled={downloadBtnState === "checking"}
+                        onClick={ytInfo ? handleYtDlpDownload : handleDownloadClick}
+                        disabled={downloadBtnState === "checking" || ytLoading}
                       >
                         {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
                         {downloadBtnState === "checking" ? "Checking..." : "Download"}
                       </button>
                     </div>
+
+                    {/* yt-dlp quality picker — shown when a video URL is detected */}
+                    {ytInfo && ytInfo.supported && (
+                      <div className="yt-picker" style={{
+                        display: 'flex', alignItems: 'center', gap: '12px',
+                        background: 'var(--surface)', border: '1px solid var(--border)',
+                        borderRadius: '8px', padding: '10px 12px', marginTop: '8px',
+                        animation: 'slideIn 0.18s ease'
+                      }}>
+                        {/* Thumbnail */}
+                        {ytInfo.thumbnail && (
+                          <img
+                            src={ytInfo.thumbnail}
+                            alt="thumbnail"
+                            style={{ width: '80px', height: '45px', objectFit: 'cover', borderRadius: '5px', flexShrink: 0 }}
+                            onError={e => e.target.style.display = 'none'}
+                          />
+                        )}
+                        {/* Meta */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: '13px', fontWeight: 600, color: 'var(--text)',
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                          }}>
+                            {ytInfo.title}
+                          </div>
+                          {ytInfo.duration_str && (
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              {ytInfo.duration_str}
+                            </div>
+                          )}
+                        </div>
+                        {/* Format dropdown */}
+                        <select
+                          value={ytFormat}
+                          onChange={e => setYtFormat(e.target.value)}
+                          style={{
+                            background: 'var(--surface-2)', border: '1px solid var(--border)',
+                            borderRadius: '6px', color: 'var(--text)', fontSize: '12px',
+                            padding: '5px 8px', cursor: 'pointer', flexShrink: 0
+                          }}
+                        >
+                          {ytInfo.formats.map(f => (
+                            <option key={f.id} value={f.id}>
+                              {f.label === 'Audio only'
+                                ? '♪ Audio only'
+                                : `⬛ ${f.label}`}
+                            </option>
+                          ))}
+                        </select>
+                        {/* Download button */}
+                        <button className="btn-primary" onClick={handleYtDlpDownload} style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}>
+                          <Download size={14} /> Download
+                        </button>
+                        {/* Dismiss */}
+                        <button
+                          onClick={() => { setYtInfo(null); ytCheckedUrlRef.current = ""; }}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', flexShrink: 0 }}
+                          title="Dismiss"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    )}
 
                     <div className="path-row">
                       <button className="browse-btn-icon" onClick={async () => {

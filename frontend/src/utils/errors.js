@@ -23,5 +23,16 @@ export function friendlyError(raw) {
     return "Not enough disk space to save the file";
   if (r.includes("permission"))
     return "Permission denied — try changing the download folder";
+  // yt-dlp specific
+  if (r.includes("age") && r.includes("verif"))
+    return "This video requires age verification — yt-dlp cannot download it";
+  if (r.includes("video unavailable") || r.includes("has been removed"))
+    return "This video is unavailable or has been removed";
+  if (r.includes("private video"))
+    return "This video is private";
+  if (r.includes("geo") && (r.includes("block") || r.includes("restrict")))
+    return "This video is not available in your region";
+  if (r.includes("yt-dlp not installed"))
+    return "yt-dlp is not installed — video downloading is unavailable";
   return "Download failed — please check the link and try again";
 }

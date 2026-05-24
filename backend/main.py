@@ -361,6 +361,56 @@ async def batch_download(payload: BatchDownloadRequest) -> Dict[str, Any]:
             errors.append({"url": url, "error": str(e)})
 
     return {"job_ids": job_ids, "errors": errors if errors else None}
+
+
+# ---------------------------------------------------------------------------
+# yt-dlp info + download endpoints
+# ---------------------------------------------------------------------------
+
+class YtDlpDownloadRequest(BaseModel):
+    url: str = Field(min_length=5)
+    format_id: str = Field(min_length=1)
+    output_path: str = Field(min_length=1)
+    label: str = ""
+
+
+@app.get("/yt-dlp/info")
+async def ytdlp_info(url: str) -> Dict[str, Any]:
+    """Fetch video metadata from yt-dlp. Returns formats list if supported."""
+    from ytdlp_handler import fetch_info
+    return await fetch_info(url)
+
+
+@app.post("/yt-dlp/download")
+async def ytdlp_download(payload: YtDlpDownloadRequest) -> Dict[str, Any]:
+    """Start a yt-dlp download. Returns job_id; progress is broadcast via WS."""
+    from ytdlp_handler import start_ytdlp_download, YTDLP_AVAILABLE
+    if not YTDLP_AVAILABLE:
+        raise HTTPException(status_code=503, detail="yt-dlp is not installed on this server")
+    job = await start_ytdlp_download(
+        url=payload.url,
+        format_id=payload.format_id,
+        output_path=payload.output_path,
+        label=payload.label,
+        broadcast_fn=broadcast_event,
+    )
+    await broadcast_event("new_job", {"job_id": job.job_id})
+    return {"job_id": job.job_id, "status": job.status, "type": "ytdlp"}
+
+
+@app.post("/yt-dlp/cancel/{job_id}")
+async def ytdlp_cancel(job_id: str) -> Dict[str, Any]:
+    from ytdlp_handler import get_ytdlp_job
+    job = get_ytdlp_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="yt-dlp job not found")
+    job.is_cancelled = True
+    job.status = "failed"
+    job.error = "Cancelled by user"
+    await broadcast_event("job_error", {"job_id": job_id, "error": "Cancelled by user"})
+    return {"cancelled": True}
+
+
 @app.post("/analyze")
 async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
     try:
@@ -457,13 +507,15 @@ async def add_interfaces_to_job(job_id: str, payload: AddInterfacesRequest) -> D
 @app.get("/active-jobs")
 async def get_active_jobs() -> Dict[str, Any]:
     """Returns a list of all active (not completed/failed) job IDs, excluding system pings."""
+    from ytdlp_handler import get_all_ytdlp_jobs
     regular_ids = [
         jid for jid, job in manager.jobs.items() 
         if job.status not in ("completed", "failed")
         and "BURST_INTERNAL_CHECK" not in job.url
     ]
     torrent_ids = [jid for jid, job in active_torrents.items() if job.status not in ("completed", "failed")]
-    return {"job_ids": regular_ids + torrent_ids}
+    ytdlp_ids = [jid for jid, job in get_all_ytdlp_jobs().items() if job.status not in ("completed", "failed")]
+    return {"job_ids": regular_ids + torrent_ids + ytdlp_ids}
 
 
 @app.get("/history")
@@ -757,12 +809,18 @@ async def websocket_progress(websocket: WebSocket, job_id: str) -> None:
     active_sockets.setdefault(job_id, set()).add(websocket)
     try:
         while True:
+            from ytdlp_handler import get_ytdlp_job
             job = manager.get_job(job_id)
             if not job:
                 tjob = active_torrents.get(job_id)
+                ytjob = get_ytdlp_job(job_id)
                 if tjob:
                     await websocket.send_json(tjob.to_dict())
                     if tjob.status in {"completed", "failed"}:
+                        break
+                elif ytjob:
+                    await websocket.send_json(ytjob.to_dict())
+                    if ytjob.status in {"completed", "failed"}:
                         break
                 else:
                     await websocket.send_json({"error": "Job not found"})

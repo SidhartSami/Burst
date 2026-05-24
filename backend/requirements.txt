@@ -14,3 +14,5 @@ pywin32
 beautifulsoup4
 lxml
 apscheduler
+tzlocal
+yt-dlp
