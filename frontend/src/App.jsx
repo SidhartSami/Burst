@@ -2108,7 +2108,7 @@ export default function App() {
                       style={{ flex: 1 }}
                     />
                     <button
-                      className="sched-folder-btn"
+                      className="browse-btn-icon"
                       onClick={async () => {
                         try {
                           const r = await fetch(`${API_BASE}/select-path`);
