@@ -1775,3 +1775,330 @@ input[type=number] {
   transform: translateY(-1px);
 }
 
+/* ============================================================
+   Schedule Tab Styles
+   ============================================================ */
+
+.schedule-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.schedule-section {
+  padding: 18px 20px 14px;
+}
+
+.schedule-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+/* Form */
+.schedule-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.schedule-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.schedule-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.13);
+  background: var(--bg);
+}
+
+.schedule-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Date + time row */
+.schedule-datetime-row {
+  display: flex;
+  gap: 10px;
+}
+
+.schedule-datetime-row .schedule-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Make native date/time inputs match dark theme */
+input[type="date"].schedule-input,
+input[type="time"].schedule-input {
+  color-scheme: dark;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.dark input[type="date"].schedule-input,
+.dark input[type="time"].schedule-input {
+  color-scheme: dark;
+}
+
+/* Repeat + Schedule button row */
+.schedule-bottom-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.schedule-select {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858585' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+.schedule-select:focus {
+  border-color: var(--accent);
+}
+
+.schedule-btn {
+  height: 40px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: 'DM Sans', sans-serif;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.schedule-btn:hover {
+  background: var(--accent-hover);
+}
+
+.schedule-btn:active {
+  transform: scale(0.98);
+}
+
+.schedule-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Inline error */
+.schedule-error {
+  font-size: 12px;
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: -2px;
+}
+
+/* Divider */
+.schedule-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0 0 0 0;
+}
+
+/* Upcoming list */
+.schedule-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 20px 20px;
+}
+
+.schedule-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: background 0.12s ease;
+}
+
+.schedule-row:hover {
+  background: var(--surface-hover);
+}
+
+.schedule-row-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.schedule-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-row-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.schedule-row-time {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.schedule-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.schedule-badge.daily {
+  background: rgba(249, 115, 22, 0.08);
+  border-color: rgba(249, 115, 22, 0.25);
+  color: var(--accent);
+}
+
+.schedule-badge.weekly {
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.25);
+  color: var(--success);
+}
+
+.schedule-cancel-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s ease, background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.schedule-cancel-btn:hover {
+  color: var(--danger);
+  background: var(--danger-dim);
+}
+
+/* Missed schedules banner */
+.schedule-missed-banner {
+  margin: 14px 20px 0;
+  padding: 12px 14px;
+  background: rgba(202, 138, 4, 0.08);
+  border: 1px solid rgba(202, 138, 4, 0.3);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--warning);
+}
+
+.schedule-missed-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.schedule-missed-item {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 3px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-missed-dismiss {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(202, 138, 4, 0.3);
+  transition: background 0.15s;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.schedule-missed-dismiss:hover {
+  background: rgba(202, 138, 4, 0.12);
+}
+
+/* Reschedule button inside missed items */
+.schedule-missed-reschedule {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--accent);
+  padding: 0;
+  font-family: 'DM Sans', sans-serif;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.schedule-missed-reschedule:hover {
+  text-decoration-style: solid;
+}

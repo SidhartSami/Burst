@@ -92,6 +92,13 @@ class FileDeleteRequest(BaseModel):
     file_path: str = Field(min_length=1)
 
 
+class ScheduleRequest(BaseModel):
+    url: str = Field(min_length=5)
+    output_path: str = Field(min_length=1)
+    scheduled_time: str = Field(min_length=1)  # ISO 8601 local datetime string
+    repeat: str = "once"  # "once" | "daily" | "weekly"
+
+
 async def history_saver_loop():
     saved_ids = set()
     try:
@@ -134,6 +141,15 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     _start_clipboard_monitor_if_enabled(app, clipboard_stop, loop)
 
+    # Start scheduler
+    import scheduler as sched_module
+    sched_module.init_scheduler(
+        broadcast_fn=broadcast_event,
+        manager=manager,
+        active_torrents_dict=active_torrents,
+        interfaces_fn=_interfaces_by_ip,
+    )
+
     # Start polling loops
     task = asyncio.create_task(interface_polling_loop())
     state_task = asyncio.create_task(save_state_loop())
@@ -142,6 +158,8 @@ async def lifespan(app: FastAPI):
     # Shutdown: Clean up if needed
     if not clipboard_stop.is_set():
         clipboard_stop.set()
+    import scheduler as sched_module
+    sched_module.shutdown_scheduler()
     task.cancel()
     state_task.cancel()
     history_task.cancel()
@@ -624,6 +642,73 @@ async def delete_file(req: FileDeleteRequest):
             return {"success": False, "error": "File not found"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+
+# ---------------------------------------------------------------------------
+# Schedule endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/schedule")
+async def create_schedule(req: ScheduleRequest) -> Dict[str, Any]:
+    """Create a new scheduled download."""
+    import scheduler as sched_module
+    from datetime import datetime, timezone
+
+    # Parse and validate the time is in the future
+    try:
+        fire_dt = datetime.fromisoformat(req.scheduled_time)
+        if fire_dt.tzinfo is None:
+            fire_dt = fire_dt.astimezone()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid scheduled_time format. Use ISO 8601.")
+
+    now = datetime.now(timezone.utc).astimezone()
+    if fire_dt <= now:
+        raise HTTPException(status_code=400, detail="Scheduled time must be in the future.")
+
+    if req.repeat not in ("once", "daily", "weekly"):
+        raise HTTPException(status_code=400, detail="repeat must be 'once', 'daily', or 'weekly'.")
+
+    entry = sched_module.add_schedule(
+        url=req.url,
+        output_path=req.output_path,
+        scheduled_time=req.scheduled_time,
+        repeat=req.repeat,
+    )
+    return entry
+
+
+@app.get("/schedules")
+async def list_schedules() -> Dict[str, Any]:
+    """Return all pending scheduled downloads."""
+    import scheduler as sched_module
+    return {"schedules": sched_module.get_all_schedules()}
+
+
+@app.get("/schedules/missed")
+async def list_missed_schedules() -> Dict[str, Any]:
+    """Return schedules that were missed while the app was closed."""
+    import scheduler as sched_module
+    return {"missed": sched_module.get_missed_schedules()}
+
+
+@app.delete("/schedules/missed")
+async def clear_missed_schedules() -> Dict[str, Any]:
+    """Dismiss the missed schedules list."""
+    import scheduler as sched_module
+    sched_module.dismiss_missed()
+    return {"status": "cleared"}
+
+
+@app.delete("/schedules/{schedule_id}")
+async def cancel_schedule(schedule_id: str) -> Dict[str, Any]:
+    """Cancel a scheduled download."""
+    import scheduler as sched_module
+    ok = sched_module.remove_schedule(schedule_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {"status": "cancelled", "schedule_id": schedule_id}
 
 
 @app.get("/select-path")
