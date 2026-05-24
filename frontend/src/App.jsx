@@ -673,7 +673,8 @@ export default function App() {
                 timestamp: item.finished_at
                   ? new Date(item.finished_at * 1000).toLocaleString()
                   : (item.timestamp || new Date().toLocaleString()),
-                type: item.type || "download"
+                type: item.type || "download",
+                url: item.url || item.magnet_uri || ""
               };
             }).slice(0, 50);
           });
@@ -1017,7 +1018,8 @@ export default function App() {
               time_saved: payload.time_saved || 0,
               status: payload.status,
               timestamp: new Date().toLocaleString(),
-              type: payload.type || (activeTab === 'torrents' ? 'torrent' : 'download')
+              type: payload.type || (activeTab === 'torrents' ? 'torrent' : 'download'),
+              url: payload.url || payload.magnet_uri || ""
             };
             setHistory(prev => [historyItem, ...prev].slice(0, 50));
           }
@@ -1110,7 +1112,7 @@ export default function App() {
 
   const handleReDownload = async (item) => {
     try {
-      const isTorrent = item.url.startsWith("magnet:?") || item.url.endsWith(".torrent");
+      const isTorrent = item.type === "torrent" || (item.url && (item.url.startsWith("magnet:?") || item.url.endsWith(".torrent")));
       const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
       const effectiveIps = selectedIps.length > 0 ? selectedIps : renderedInterfaces.map(i => i.ip_address);
       const body = isTorrent
