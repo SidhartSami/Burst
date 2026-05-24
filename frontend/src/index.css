@@ -2302,30 +2302,6 @@ gap: 6px;
    Premium SchedulePicker (custom calendar + time spinner)
    ============================================================ */
 
-/* Date button */
-.sched-date-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 13px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-  color: var(--text);
-  box-sizing: border-box;
-}
-
-.sched-date-btn:hover {
-  border-color: var(--accent);
-}
-
-.sched-date-btn.has-error {
-  border-color: var(--danger);
-}
 
 /* Calendar popover */
 .sched-cal-pop {
@@ -2456,17 +2432,66 @@ gap: 6px;
   display: none;
 }
 
-/* ── Time picker ── */
-.sched-time-wrap {
+
+/* ── Outer row: date + time side-by-side, same height ── */
+.sched-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;   /* key: stretches both children to same height */
+}
+
+/* Date button — fills its container height */
+.sched-date-btn {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 9px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 13px;
+  padding: 10px 13px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  color: var(--text);
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+.sched-date-label {
+  flex: 1;
+  text-align: left;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sched-date-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.10);
+}
+
+.sched-date-btn.has-error {
+  border-color: var(--danger);
+}
+
+/* ── Time picker — same height as date button via stretch ── */
+.sched-time-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 12px;
   flex-shrink: 0;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-sizing: border-box;
+  min-width: 128px;
 }
 
 .sched-time-wrap:focus-within {
@@ -2478,64 +2503,93 @@ gap: 6px;
   border-color: var(--danger);
 }
 
-.sched-time-col {
+/* Each unit: up-arrow / number / down-arrow stacked */
+.sched-tunit {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  gap: 0;
 }
 
-.sched-time-arrow {
+.sched-tarrow {
   background: none;
   border: none;
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+  border-radius: 3px;
   line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
   transition: color 0.1s ease, background 0.1s ease;
   user-select: none;
+  flex-shrink: 0;
 }
 
-.sched-time-arrow:hover {
+.sched-tarrow:hover {
   color: var(--accent);
   background: var(--accent-dim);
 }
 
-.sched-time-num {
-  width: 32px;
+.sched-tnum {
+  width: 28px;
   background: none;
   border: none;
   color: var(--text);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
-  font-family: 'JetBrains Mono', 'DM Sans', monospace;
+  font-family: 'JetBrains Mono', monospace;
   text-align: center;
   outline: none;
-  padding: 1px 0;
+  padding: 0;
+  line-height: 1;
   -moz-appearance: textfield;
 }
 
-.sched-time-num::-webkit-inner-spin-button,
-.sched-time-num::-webkit-outer-spin-button {
+.sched-tnum::-webkit-inner-spin-button,
+.sched-tnum::-webkit-outer-spin-button {
   -webkit-appearance: none;
 }
 
-.sched-time-colon {
-  font-size: 18px;
+.sched-tcolon {
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-muted);
   line-height: 1;
   margin: 0 1px;
-  padding-bottom: 2px;
+  padding-bottom: 1px;
+  align-self: center;
 }
 
-.sched-time-label {
-  font-size: 10px;
+.sched-tampm {
+  font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--accent);
-  margin-left: 4px;
+  margin-left: 3px;
   align-self: center;
+}
+
+/* ── Folder picker button: dark bg + orange icon ── */
+.sched-folder-btn {
+  flex-shrink: 0;
+  height: 100%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--accent);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  box-sizing: border-box;
+}
+
+.sched-folder-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+  background: rgba(249, 115, 22, 0.06);
 }
