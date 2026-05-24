@@ -26,7 +26,8 @@ import {
   ChevronDown,
   ChevronUp,
   Layers,
-  ArrowLeft
+  ArrowLeft,
+  Shield
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -558,6 +559,11 @@ export default function App() {
   const [activeJobs, setActiveJobs] = useState([]);
   const [expandedGraphs, setExpandedGraphs] = useState({});
   const hasShownGraphHintRef = useRef(false);
+  const [activeVerifyJobId, setActiveVerifyJobId] = useState(null);
+  const [checksumValue, setChecksumValue] = useState("");
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const [verificationResult, setVerificationResult] = useState(null);
+  const [verificationError, setVerificationError] = useState(null);
   const [jobStatuses, setJobStatuses] = useState({});
   const [history, setHistory] = useState(() => {
     const saved = localStorage.getItem(HISTORY_KEY);
@@ -1054,6 +1060,104 @@ export default function App() {
         setPromptData(null);
       }
     });
+  };
+
+  const isValidHash = (str) => {
+    const clean = str.trim();
+    if (!/^[0-9a-fA-F]+$/.test(clean)) return false;
+    return [32, 40, 64].includes(clean.length);
+  };
+
+  const handleVerify = async (item) => {
+    const hash = checksumValue.trim();
+    if (!hash) return;
+
+    if (!isValidHash(hash)) {
+      setVerificationError("That doesn't look like a valid hash");
+      setVerificationResult(null);
+      return;
+    }
+
+    setVerificationError(null);
+    setVerificationResult(null);
+    setVerificationLoading(true);
+
+    try {
+      const resp = await fetch(`${API_BASE}/verify-checksum`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_path: item.path,
+          expected: hash
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        if (data.error === "File not found") {
+          setVerificationError("File no longer exists at original path");
+        } else {
+          setVerificationError(data.error || "Verification failed");
+        }
+      } else {
+        setVerificationResult(data);
+      }
+    } catch (err) {
+      setVerificationError("Connection error — could not verify hash");
+    } finally {
+      setVerificationLoading(false);
+    }
+  };
+
+  const handleReDownload = async (item) => {
+    try {
+      const isTorrent = item.url.startsWith("magnet:?") || item.url.endsWith(".torrent");
+      const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
+      const effectiveIps = selectedIps.length > 0 ? selectedIps : renderedInterfaces.map(i => i.ip_address);
+      const body = isTorrent
+        ? { magnet_uri: item.url, output_path: item.path, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits }
+        : { url: item.url, output_path: item.path, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
+
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || "Failed to start");
+      
+      if (data.job_id) {
+        setActiveJobs(prev => {
+          if (prev.includes(data.job_id)) return prev;
+          return [...prev, data.job_id];
+        });
+        setToast(`Queued re-download for ${item.filename}`);
+        setActiveVerifyJobId(null); // Close the drawer
+        setActiveTab("active");
+      }
+    } catch (err) {
+      console.error("[Re-download Exception Debug]:", err);
+      setToast(friendlyError(err.message || "Failed to restart download"));
+    }
+  };
+
+  const handleDeleteFile = async (item) => {
+    try {
+      const resp = await fetch(`${API_BASE}/file`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: item.path })
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        setToast(data.error || "Failed to delete file");
+      } else {
+        setToast(`Deleted file ${item.filename} successfully`);
+        setActiveVerifyJobId(null); // Close the drawer
+      }
+    } catch (err) {
+      console.error("[Delete File Exception Debug]:", err);
+      setToast("Failed to connect to delete endpoint");
+    }
   };
 
   const activeConnectionCount = interfaces.length;
@@ -1622,20 +1726,174 @@ export default function App() {
                 <div className="history-date-group" key={date}>
                   <div className="history-date-label">{date}</div>
                   {groupedHistory[date].map((item) => (
-                    <div className="completed-row" key={item.id ?? Math.random()}>
-                      <div className="completed-icon">
-                        {item.status === 'failed' ? <AlertCircle size={18} color="var(--danger)" /> : <CheckCircle2 size={18} color="var(--success)" />}
-                      </div>
-                      <div className="completed-info">
-                        <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
-                        <div className="completed-path">{item.path}</div>
-                        <div className="completed-meta-row">
-                          <span className="meta-tag">{item.timestamp.split(',')[1]}</span>
-                          <span className="meta-tag">{formatBytes(item.size)}</span>
-                          {item.status !== 'failed' && <span className="meta-tag">{formatSpeed(item.avgSpeed)} avg</span>}
+                    <div key={item.id ?? Math.random()} style={{ display: 'flex', flexDirection: 'column' }}>
+                      <div className="completed-row" style={{ position: 'relative' }}>
+                        <div className="completed-icon">
+                          {item.status === 'failed' ? <AlertCircle size={18} color="var(--danger)" /> : <CheckCircle2 size={18} color="var(--success)" />}
                         </div>
+                        <div className="completed-info">
+                          <div className="completed-filename" style={{ color: item.status === 'failed' ? "var(--danger)" : "var(--text)" }}>{item.filename || 'Unknown'}</div>
+                          <div className="completed-path">{item.path}</div>
+                          <div className="completed-meta-row">
+                            <span className="meta-tag">{item.timestamp.split(',')[1]}</span>
+                            <span className="meta-tag">{formatBytes(item.size)}</span>
+                            {item.status !== 'failed' && <span className="meta-tag">{formatSpeed(item.avgSpeed)} avg</span>}
+                          </div>
+                        </div>
+                        {item.time_saved > 0 && <div className="completed-saved">Saved {formatETA(item.time_saved)}</div>}
+                        
+                        {item.status !== 'failed' && (
+                          <button
+                            onClick={() => {
+                              setChecksumValue("");
+                              setVerificationResult(null);
+                              setVerificationError(null);
+                              setVerificationLoading(false);
+                              setActiveVerifyJobId(prev => prev === item.id ? null : item.id);
+                            }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              color: activeVerifyJobId === item.id ? 'var(--accent)' : 'var(--text-muted)',
+                              padding: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              alignSelf: 'center',
+                              transition: 'color 0.2s ease',
+                              marginLeft: '12px'
+                            }}
+                            title="Verify Checksum"
+                          >
+                            <Shield size={18} />
+                          </button>
+                        )}
                       </div>
-                      {item.time_saved > 0 && <div className="completed-saved">Saved {formatETA(item.time_saved)}</div>}
+
+                      {activeVerifyJobId === item.id && (
+                        <div className="slide-in" style={{
+                          background: 'var(--surface-2)',
+                          border: '1px solid var(--border)',
+                          borderTop: 'none',
+                          borderRadius: '0 0 10px 10px',
+                          padding: '16px',
+                          marginTop: '-13px',
+                          marginBottom: '12px',
+                          fontSize: '13px',
+                          boxSizing: 'border-box'
+                        }}>
+                          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <input
+                              type="text"
+                              placeholder="Paste MD5, SHA1, or SHA256 hash"
+                              value={checksumValue}
+                              onChange={(e) => {
+                                setChecksumValue(e.target.value);
+                                setVerificationError(null);
+                                setVerificationResult(null);
+                              }}
+                              disabled={verificationLoading}
+                              style={{
+                                flex: 1,
+                                background: 'var(--bg)',
+                                border: '1px solid var(--border)',
+                                borderRadius: '6px',
+                                color: 'var(--text)',
+                                padding: '8px 12px',
+                                fontSize: '13px',
+                                outline: 'none',
+                              }}
+                            />
+                            <button
+                              className="btn-secondary"
+                              onClick={() => handleVerify(item)}
+                              disabled={verificationLoading || !checksumValue.trim()}
+                              style={{
+                                height: '34px',
+                                padding: '0 16px',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                flexShrink: 0
+                              }}
+                            >
+                              {verificationLoading && (
+                                <div className="spinner-small" style={{ width: '12px', height: '12px', borderWidth: '2px' }} />
+                              )}
+                              Verify
+                            </button>
+                          </div>
+
+                          {verificationError && (
+                            <div style={{ color: 'var(--danger)', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
+                              <AlertCircle size={14} />
+                              {verificationError}
+                            </div>
+                          )}
+
+                          {verificationResult && (
+                            <div style={{ marginTop: '12px' }}>
+                              {verificationResult.match ? (
+                                <div style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
+                                  <CheckCircle2 size={14} />
+                                  Hash matches — file is intact ({verificationResult.algorithm.toUpperCase()})
+                                </div>
+                              ) : (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                  <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
+                                    <AlertTriangle size={14} />
+                                    Hash mismatch — file may be corrupted
+                                  </div>
+                                  <div style={{
+                                    fontSize: '11px',
+                                    color: 'var(--text-muted)',
+                                    background: 'var(--bg)',
+                                    padding: '8px 10px',
+                                    borderRadius: '4px',
+                                    border: '1px solid var(--border)',
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                    wordBreak: 'break-all',
+                                    marginTop: '4px'
+                                  }}>
+                                    <span style={{ fontWeight: 600 }}>Actual hash:</span> {verificationResult.actual}
+                                  </div>
+                                  <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
+                                    <button
+                                      className="btn-secondary"
+                                      onClick={() => handleReDownload(item)}
+                                      style={{
+                                        height: '32px',
+                                        padding: '0 12px',
+                                        fontSize: '12px',
+                                        borderRadius: '6px'
+                                      }}
+                                    >
+                                      Re-download
+                                    </button>
+                                    <button
+                                      className="btn-secondary"
+                                      onClick={() => handleDeleteFile(item)}
+                                      style={{
+                                        height: '32px',
+                                        padding: '0 12px',
+                                        fontSize: '12px',
+                                        borderRadius: '6px',
+                                        color: 'var(--danger)',
+                                        borderColor: 'rgba(220, 38, 38, 0.2)'
+                                      }}
+                                    >
+                                      Delete file
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
