@@ -2097,7 +2097,7 @@ export default function App() {
                     onChange={e => { setScheduleUrl(e.target.value); setScheduleError(null); }}
                   />
 
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <div className="sched-row" style={{ alignItems: 'stretch' }}>
                     <input
                       id="schedule-path-input"
                       type="text"
@@ -2108,8 +2108,7 @@ export default function App() {
                       style={{ flex: 1 }}
                     />
                     <button
-                      className="btn-primary"
-                      style={{ height: '38px', padding: '0 12px', flexShrink: 0, fontSize: '12px', borderRadius: '6px' }}
+                      className="sched-folder-btn"
                       onClick={async () => {
                         try {
                           const r = await fetch(`${API_BASE}/select-path`);
@@ -2119,7 +2118,7 @@ export default function App() {
                       }}
                       title="Pick folder"
                     >
-                      <FolderOpen size={15} />
+                      <FolderOpen size={16} />
                     </button>
                   </div>
 
