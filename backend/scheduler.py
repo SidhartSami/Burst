@@ -217,7 +217,12 @@ def init_scheduler(broadcast_fn, manager, active_torrents_dict, interfaces_fn):
     _active_torrents = active_torrents_dict
     _interfaces_fn = interfaces_fn
 
-    _scheduler = AsyncIOScheduler(timezone="local")
+    _scheduler = AsyncIOScheduler()
+    try:
+        from tzlocal import get_localzone
+        _scheduler = AsyncIOScheduler(timezone=get_localzone())
+    except Exception:
+        _scheduler = AsyncIOScheduler()  # fallback: UTC
     _scheduler.start()
     print("[SCHEDULER] APScheduler started.")
 

@@ -141,14 +141,17 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     _start_clipboard_monitor_if_enabled(app, clipboard_stop, loop)
 
-    # Start scheduler
-    import scheduler as sched_module
-    sched_module.init_scheduler(
-        broadcast_fn=broadcast_event,
-        manager=manager,
-        active_torrents_dict=active_torrents,
-        interfaces_fn=_interfaces_by_ip,
-    )
+    # Start scheduler (non-fatal — app boots even if scheduler fails)
+    try:
+        import scheduler as sched_module
+        sched_module.init_scheduler(
+            broadcast_fn=broadcast_event,
+            manager=manager,
+            active_torrents_dict=active_torrents,
+            interfaces_fn=_interfaces_by_ip,
+        )
+    except Exception as e:
+        print(f"[SCHEDULER] Failed to start scheduler: {e}")
 
     # Start polling loops
     task = asyncio.create_task(interface_polling_loop())
@@ -158,8 +161,11 @@ async def lifespan(app: FastAPI):
     # Shutdown: Clean up if needed
     if not clipboard_stop.is_set():
         clipboard_stop.set()
-    import scheduler as sched_module
-    sched_module.shutdown_scheduler()
+    try:
+        import scheduler as sched_module
+        sched_module.shutdown_scheduler()
+    except Exception:
+        pass
     task.cancel()
     state_task.cancel()
     history_task.cancel()
