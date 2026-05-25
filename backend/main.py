@@ -1550,16 +1550,51 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Failed to process startup URL: {e}")
 
-    # 5. Create and Start directly with beautiful HTML loading page to prevent delays
-    loading_html = """<!DOCTYPE html>
+    # 5. Create and Start directly with beautiful HTML loading page matching the user's active theme
+    effective_theme = "dark"
+    try:
+        settings = config.load_settings()
+        theme_opt = settings.get("THEME_MODE", "system")
+        if theme_opt in ("light", "dark"):
+            effective_theme = theme_opt
+        elif os.name == "nt":
+            import winreg
+            try:
+                reg_key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                )
+                val, _ = winreg.QueryValueEx(reg_key, "AppsUseLightTheme")
+                winreg.CloseKey(reg_key)
+                effective_theme = "light" if val == 1 else "dark"
+            except:
+                pass
+    except:
+        pass
+
+    # Styling variables based on light vs dark theme
+    if effective_theme == "light":
+        bg_color = "#ffffff"
+        text_color = "#1f2937"
+        spinner_bg = "rgba(234, 88, 12, 0.1)"
+        spinner_fg = "#ea580c"
+        status_color = "#6b7280"
+    else:
+        bg_color = "#0f0f11"
+        text_color = "#f3f4f6"
+        spinner_bg = "rgba(249, 115, 22, 0.1)"
+        spinner_fg = "#f97316"
+        status_color = "#9ca3af"
+
+    loading_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <style>
-        body {
+        body {{
             margin: 0;
             padding: 0;
-            background: #0f0f11;
-            color: #f3f4f6;
+            background: {bg_color};
+            color: {text_color};
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             display: flex;
             align-items: center;
@@ -1568,11 +1603,11 @@ if __name__ == "__main__":
             overflow: hidden;
             -webkit-user-select: none;
             user-select: none;
-        }
-        .container {
+        }}
+        .container {{
             text-align: center;
-        }
-        .logo {
+        }}
+        .logo {{
             font-size: 2.5rem;
             font-weight: 800;
             background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
@@ -1580,25 +1615,25 @@ if __name__ == "__main__":
             -webkit-text-fill-color: transparent;
             margin-bottom: 1rem;
             letter-spacing: -0.05em;
-        }
-        .spinner {
+        }}
+        .spinner {{
             width: 40px;
             height: 40px;
-            border: 3px solid rgba(249, 115, 22, 0.1);
+            border: 3px solid {spinner_bg};
             border-radius: 50%;
-            border-top-color: #f97316;
+            border-top-color: {spinner_fg};
             animation: spin 1s ease-in-out infinite;
             margin: 0 auto 1.5rem auto;
-        }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        .status {
+        }}
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        .status {{
             font-size: 0.875rem;
-            color: #9ca3af;
+            color: {status_color};
             letter-spacing: 0.05em;
             text-transform: uppercase;
-        }
+        }}
     </style>
 </head>
 <body>
@@ -1619,7 +1654,8 @@ if __name__ == "__main__":
         easy_drag=True,
         resizable=False,
         hidden=headless,
-        js_api=api
+        js_api=api,
+        background_color=bg_color
     )
     api.set_window(window)
     
