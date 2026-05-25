@@ -642,6 +642,7 @@ async def start_ytdlp_download(
     label: str,
     broadcast_fn: Callable,
     interface_ips: List[str] = [],
+    streamable: bool = False,
 ) -> YtDlpJob:
     """
     Ensure ffmpeg is available, then kick off a yt-dlp download.
@@ -714,6 +715,9 @@ async def start_ytdlp_download(
                     use_custom_bonding = True
             else:
                 use_custom_bonding = True
+
+    if streamable:
+        use_custom_bonding = False
 
     if use_custom_bonding:
         print(f"[yt-dlp bonded] Starting bonded download for '{title}' (format {format_id})")

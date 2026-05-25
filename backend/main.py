@@ -373,6 +373,7 @@ class YtDlpDownloadRequest(BaseModel):
     output_path: str = Field(min_length=1)
     label: str = ""
     interface_ips: List[str] = []
+    streamable: bool = False
 
 
 @app.get("/yt-dlp/info")
@@ -395,6 +396,7 @@ async def ytdlp_download(payload: YtDlpDownloadRequest) -> Dict[str, Any]:
         label=payload.label,
         broadcast_fn=broadcast_event,
         interface_ips=payload.interface_ips,
+        streamable=payload.streamable,
     )
     await broadcast_event("new_job", {"job_id": job.job_id})
     return {"job_id": job.job_id, "status": job.status, "type": "ytdlp"}
