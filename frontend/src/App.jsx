@@ -622,6 +622,7 @@ export default function App() {
   const [ytInfo, setYtInfo] = useState(null);       // null | false | { supported, title, thumbnail, ... }
   const [ytLoading, setYtLoading] = useState(false); // spinner while fetching info
   const [ytFormat, setYtFormat] = useState("");      // currently selected format_id
+  const [ytStreamable, setYtStreamable] = useState(false); // Play-while-downloading sequential mode
   const ytDebounceRef = useRef(null);
   const ytCheckedUrlRef = useRef("");               // avoid duplicate fetches
 
@@ -891,13 +892,14 @@ export default function App() {
       const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label, interface_ips: effectiveIps })
+        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label, interface_ips: effectiveIps, streamable: ytStreamable })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Failed to start");
       if (data.job_id) {
         setActiveJobs(prev => prev.includes(data.job_id) ? prev : [...prev, data.job_id]);
       }
+      setYtStreamable(false);
     } catch (err) {
       setToast(friendlyError(err.message));
     }
@@ -1871,67 +1873,111 @@ export default function App() {
                     {/* yt-dlp quality picker — shown when a video URL is detected */}
                     {ytInfo && ytInfo.supported && (
                       <div style={{
-                        display: 'flex', alignItems: 'center', gap: '12px',
+                        display: 'flex', flexDirection: 'column', gap: '8px',
                         background: 'var(--surface)', border: '1px solid var(--border)',
-                        borderRadius: '8px', padding: '10px 12px', marginTop: '8px',
+                        borderRadius: '8px', padding: '12px', marginTop: '8px',
                         animation: 'slideIn 0.18s ease'
                       }}>
-                        {/* Thumbnail */}
-                        {ytInfo.thumbnail && (
-                          <img
-                            src={ytInfo.thumbnail}
-                            alt="thumbnail"
-                            style={{ width: '80px', height: '45px', objectFit: 'cover', borderRadius: '5px', flexShrink: 0 }}
-                            onError={e => e.target.style.display = 'none'}
-                          />
-                        )}
-                        {/* Title + duration */}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{
-                            fontSize: '13px', fontWeight: 600, color: 'var(--text)',
-                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                          }}>
-                            {ytInfo.title}
-                          </div>
-                          {ytInfo.duration_str && (
-                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                              {ytInfo.duration_str}
-                            </div>
+                        {/* Row 1: Details and Controls */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          {/* Thumbnail */}
+                          {ytInfo.thumbnail && (
+                            <img
+                              src={ytInfo.thumbnail}
+                              alt="thumbnail"
+                              style={{ width: '80px', height: '45px', objectFit: 'cover', borderRadius: '5px', flexShrink: 0 }}
+                              onError={e => e.target.style.display = 'none'}
+                            />
                           )}
+                          {/* Title + duration */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: '13px', fontWeight: 600, color: 'var(--text)',
+                              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                            }}>
+                              {ytInfo.title}
+                            </div>
+                            {ytInfo.duration_str && (
+                              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                {ytInfo.duration_str}
+                              </div>
+                            )}
+                          </div>
+                          {/* Format dropdown */}
+                          <select
+                            value={ytFormat}
+                            onChange={e => {
+                              const selectedFmt = ytInfo.formats.find(f => f.id === e.target.value);
+                              if (selectedFmt && !selectedFmt.has_audio) {
+                                setYtStreamable(false); // disable streamable if user selects a DASH format
+                              }
+                              setYtFormat(e.target.value);
+                            }}
+                            style={{
+                              background: 'var(--surface-2)', border: '1px solid var(--border)',
+                              borderRadius: '6px', color: 'var(--text)', fontSize: '12px',
+                              padding: '5px 8px', cursor: 'pointer', flexShrink: 0,
+                              outline: 'none',
+                            }}
+                          >
+                            {ytInfo.formats.map(f => (
+                              <option key={f.id} value={f.id}>
+                                {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
+                              </option>
+                            ))}
+                          </select>
+                          {/* Download */}
+                          <button
+                            className="btn-primary"
+                            onClick={handleYtDlpDownload}
+                            style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}
+                          >
+                            <Download size={14} /> Download
+                          </button>
+                          {/* Dismiss */}
+                          <button
+                            onClick={() => { setYtInfo(null); ytCheckedUrlRef.current = ""; }}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', flexShrink: 0 }}
+                            title="Dismiss"
+                          >
+                            <X size={14} />
+                          </button>
                         </div>
-                        {/* Format dropdown */}
-                        <select
-                          value={ytFormat}
-                          onChange={e => setYtFormat(e.target.value)}
-                          style={{
-                            background: 'var(--surface-2)', border: '1px solid var(--border)',
-                            borderRadius: '6px', color: 'var(--text)', fontSize: '12px',
-                            padding: '5px 8px', cursor: 'pointer', flexShrink: 0,
-                            outline: 'none',
-                          }}
-                        >
-                          {ytInfo.formats.map(f => (
-                            <option key={f.id} value={f.id}>
-                              {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
-                            </option>
-                          ))}
-                        </select>
-                        {/* Download */}
-                        <button
-                          className="btn-primary"
-                          onClick={handleYtDlpDownload}
-                          style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}
-                        >
-                          <Download size={14} /> Download
-                        </button>
-                        {/* Dismiss */}
-                        <button
-                          onClick={() => { setYtInfo(null); ytCheckedUrlRef.current = ""; }}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', flexShrink: 0 }}
-                          title="Dismiss"
-                        >
-                          <X size={14} />
-                        </button>
+                        
+                        {/* Row 2: Streamable Options */}
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: '8px', 
+                          borderTop: '1px solid var(--border)', paddingTop: '8px',
+                          marginTop: '4px'
+                        }}>
+                          <label style={{
+                            display: 'flex', alignItems: 'center', gap: '6px',
+                            cursor: 'pointer', fontSize: '11px', color: 'var(--text-muted)',
+                            userSelect: 'none'
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={ytStreamable}
+                              onChange={e => {
+                                const checked = e.target.checked;
+                                setYtStreamable(checked);
+                                if (checked) {
+                                  // Switch to a progressive/combined format that has audio (like 720p or 360p)
+                                  const progFormat = ytInfo.formats.find(f => f.has_audio && f.label !== 'Audio only');
+                                  if (progFormat) {
+                                    setYtFormat(progFormat.id);
+                                  } else {
+                                    // if no 720p, default to first audio-enabled format
+                                    const anyAudio = ytInfo.formats.find(f => f.has_audio);
+                                    if (anyAudio) setYtFormat(anyAudio.id);
+                                  }
+                                }
+                              }}
+                              style={{ accentColor: 'var(--accent)' }}
+                            />
+                            <span>Watch while downloading (Play instantly during download — 720p max)</span>
+                          </label>
+                        </div>
                       </div>
                     )}
 
