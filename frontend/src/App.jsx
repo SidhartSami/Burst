@@ -644,6 +644,23 @@ export default function App() {
   }, [history]);
 
   useEffect(() => {
+    if (activeTab === 'settings') {
+      // Re-fetch configurations from backend to revert any unsaved modifications
+      fetch(`${API_BASE}/settings`)
+        .then(r => r.json())
+        .then(settingsData => {
+          if (settingsData && settingsData.settings) {
+            setAppSettings(settingsData.settings);
+            if (settingsData.settings.THEME_MODE) {
+              setThemeMode(settingsData.settings.THEME_MODE);
+            }
+          }
+        })
+        .catch(() => null);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
     // 1. Restore local defaults immediately
     const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
     setBandwidthLimits(savedLimits);
