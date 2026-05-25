@@ -7,6 +7,13 @@ import sys
 import os
 import ctypes
 
+# Set explicit AppUserModelID so Windows groups notifications under "Burst" and displays the correct name
+if os.name == "nt":
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Burst.DownloadManager")
+    except Exception as e:
+        pass
+
 # ---------------------------------------------------------------------------
 # Console Management for Windowed Mode
 # ---------------------------------------------------------------------------
@@ -205,10 +212,8 @@ def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEv
                 global _tray_icon
                 if _tray_icon:
                     is_magnet = url.startswith("magnet:")
-                    title = "Magnet Link Detected" if is_magnet else "Link Detected in Clipboard"
-                    body = f"Use Burst to download this link:\n{url}"
-                    if len(body) > 120:
-                        body = body[:117] + "..."
+                    title = "Magnet Link Captured" if is_magnet else "Clipboard Link Captured"
+                    body = "A torrent magnet link was captured. Open Burst to start downloading!" if is_magnet else "A downloadable link was captured. Open Burst to start downloading!"
                     _tray_icon.notify(body, title)
             except Exception as notify_err:
                 print(f"[clipboard notification] tray notify error: {notify_err}", flush=True)
@@ -233,8 +238,69 @@ uvicorn_server = None
 _tray_icon = None
 _played_sound_ids = set()
 
+def generate_custom_chime_wav(filepath: str):
+    """Generate a premium, custom, sci-fi ascending completion chime WAV file."""
+    import wave
+    import math
+    import struct
+    sample_rate = 44100
+    duration = 0.6  # 0.6 seconds total
+    num_samples = int(sample_rate * duration)
+    
+    # Dual-tone ascending synth chime with exponential fade-out
+    data = bytearray()
+    
+    for i in range(num_samples):
+        t = i / sample_rate
+        
+        # Determine frequency at time t (ascending chime)
+        if t < 0.15:
+            # First note: C5 (523.25 Hz) ascending to G5 (783.99 Hz)
+            pct = t / 0.15
+            freq = 523.25 + (783.99 - 523.25) * pct
+        elif t < 0.3:
+            # Second note: G5 (783.99 Hz) ascending to C6 (1046.50 Hz)
+            pct = (t - 0.15) / 0.15
+            freq = 783.99 + (1046.50 - 783.99) * pct
+        else:
+            # Sustained note: C6 (1046.50 Hz)
+            freq = 1046.50
+            
+        # Generate sine wave sample
+        value = math.sin(2 * math.pi * freq * t)
+        
+        # Add a secondary soft harmony tone (E6 - 1318.51 Hz) to make it richer
+        if t > 0.15:
+            harmony = math.sin(2 * math.pi * 1318.51 * t) * 0.3
+            value = (value + harmony) / 1.3
+            
+        # Apply a premium ADSR envelope
+        # Quick attack: first 0.04s
+        if t < 0.04:
+            envelope = t / 0.04
+        # Gradual release: after 0.3s to the end
+        elif t > 0.3:
+            envelope = 1.0 - ((t - 0.3) / (duration - 0.3))
+            envelope = math.pow(envelope, 2)  # Exponential decay
+        else:
+            envelope = 1.0
+            
+        # Combine sine wave and envelope, scale to 16-bit integer range
+        sample = int(value * envelope * 32767 * 0.45)  # 0.45 volume scaling
+        
+        # Pack as 16-bit signed short (little endian)
+        data.extend(struct.pack("<h", sample))
+        
+    # Write to WAV file
+    with wave.open(str(filepath), "wb") as wav_file:
+        wav_file.setnchannels(1)  # Mono
+        wav_file.setsampwidth(2)   # 16-bit
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(data)
+
+
 def play_completion_sound(job_id: Optional[str] = None):
-    """Play a premium, native Windows system sound asynchronously on completion."""
+    """Play a premium, custom, highly distinguishable Burst chime asynchronously on completion."""
     global _played_sound_ids
     if job_id:
         if job_id in _played_sound_ids:
@@ -243,12 +309,21 @@ def play_completion_sound(job_id: Optional[str] = None):
         
     try:
         import winsound
-        # Try modern Windows 10/11 notification sound first
-        try:
+        import os
+        wav_path = "complete.wav"
+        
+        # Dynamically generate on demand if not present
+        if not os.path.exists(wav_path):
+            try:
+                generate_custom_chime_wav(wav_path)
+            except Exception as gen_err:
+                print(f"[sound] Failed to generate custom chime: {gen_err}", flush=True)
+                
+        if os.path.exists(wav_path):
+            winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        else:
+            # Fallback
             winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-        except:
-            # Fall back to Asterisk notification chime
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
     except Exception as e:
         print(f"[sound] PlaySound error: {e}", flush=True)
 
