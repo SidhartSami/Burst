@@ -372,6 +372,7 @@ class YtDlpDownloadRequest(BaseModel):
     format_id: str = Field(min_length=1)
     output_path: str = Field(min_length=1)
     label: str = ""
+    interface_ips: List[str] = []
 
 
 @app.get("/yt-dlp/info")
@@ -393,6 +394,7 @@ async def ytdlp_download(payload: YtDlpDownloadRequest) -> Dict[str, Any]:
         output_path=payload.output_path,
         label=payload.label,
         broadcast_fn=broadcast_event,
+        interface_ips=payload.interface_ips,
     )
     await broadcast_event("new_job", {"job_id": job.job_id})
     return {"job_id": job.job_id, "status": job.status, "type": "ytdlp"}
@@ -477,6 +479,19 @@ async def cancel_download(job_id: str) -> Dict[str, Any]:
     if not job:
         tjob = active_torrents.get(job_id)
         if not tjob:
+            from ytdlp_handler import get_ytdlp_job
+            ytjob = get_ytdlp_job(job_id)
+            if ytjob:
+                ytjob.is_cancelled = True
+                ytjob.status = "failed"
+                ytjob.error = "Cancelled by user"
+                for sub_id in ytjob.sub_jobs:
+                    try:
+                        await manager.cancel_job(sub_id)
+                    except:
+                        pass
+                save_state()
+                return {"status": "cancelled"}
             raise HTTPException(status_code=404, detail="Job not found")
         tjob.is_cancelled = True
         save_state()
@@ -969,6 +984,21 @@ async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest)
         # Check if it's a torrent job
         tjob = active_torrents.get(job_id)
         if not tjob:
+            from ytdlp_handler import get_ytdlp_job
+            ytjob = get_ytdlp_job(job_id)
+            if ytjob:
+                all_ifaces = _interfaces_by_ip()
+                iface = all_ifaces.get(payload.interface_ip)
+                if not iface:
+                    raise HTTPException(status_code=404, detail="Interface not found")
+                results = []
+                for sub_id in ytjob.sub_jobs:
+                    try:
+                        res = await manager.add_interface(sub_id, iface)
+                        results.append(res)
+                    except Exception as e:
+                        print(f"[main] Failed to add interface to yt sub-job {sub_id}: {e}")
+                return {"status": "success", "added": payload.interface_ip, "detail": results}
             raise HTTPException(status_code=404, detail="Job not found")
         all_ifaces = get_active_interfaces_dict()
         iface = next((i for i in all_ifaces if i["ip_address"] == payload.interface_ip), None)
@@ -993,6 +1023,17 @@ async def remove_interface_from_job(job_id: str, payload: RemoveInterfaceRequest
         # Check if it's a torrent job
         tjob = active_torrents.get(job_id)
         if not tjob:
+            from ytdlp_handler import get_ytdlp_job
+            ytjob = get_ytdlp_job(job_id)
+            if ytjob:
+                results = []
+                for sub_id in ytjob.sub_jobs:
+                    try:
+                        res = await manager.remove_interface(sub_id, payload.interface_ip)
+                        results.append(res)
+                    except Exception as e:
+                        print(f"[main] Failed to remove interface from yt sub-job {sub_id}: {e}")
+                return {"status": "success", "removed": payload.interface_ip, "detail": results}
             raise HTTPException(status_code=404, detail="Job not found")
         return await tjob.remove_interface(payload.interface_ip)
         

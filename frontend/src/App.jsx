@@ -346,8 +346,8 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
   const showSparkline = status.status === 'downloading' && !isPaused && activeIfacesList.length > 0 && chartData.length > 0;
 
-  const statusLabel = isPaused ? 'PAUSED' : status.status;
-  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (isPaused ? 'paused' : 'downloading'));
+  const statusLabel = isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : status.status);
+  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (isPaused ? 'paused' : 'downloading')));
 
   const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
   const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
@@ -885,11 +885,13 @@ export default function App() {
     ytCheckedUrlRef.current = "";
     setActiveTab("active");
 
+    const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
+
     try {
       const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label })
+        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label, interface_ips: effectiveIps })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Failed to start");
