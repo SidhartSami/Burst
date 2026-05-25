@@ -740,9 +740,33 @@ export default function App() {
         setTimeout(() => {
           clipboardToastRef.current = clipboardToastRef.current.filter(u => u !== detectedUrl);
         }, 60000);
-        setClipboardToast({ url: detectedUrl, ts: now });
-        // Auto-dismiss after 10s
-        setTimeout(() => setClipboardToast(prev => (prev && prev.url === detectedUrl) ? null : prev), 10000);
+        
+        // Native System Notification instead of saturating the in-app UI
+        if (typeof Notification !== "undefined") {
+          if (Notification.permission !== "granted") {
+            Notification.requestPermission();
+          }
+          if (Notification.permission === "granted") {
+            const isMagnet = detectedUrl.startsWith("magnet:");
+            const nTitle = isMagnet ? "Magnet Link Detected" : "Link Detected in Clipboard";
+            const nBody = detectedUrl.length > 80 ? detectedUrl.slice(0, 80) + "..." : detectedUrl;
+            try {
+              const notification = new Notification(nTitle, {
+                body: nBody,
+                tag: "burst-clipboard",
+                renotify: true
+              });
+              notification.onclick = () => {
+                window.focus();
+                setUrl(detectedUrl);
+                setActiveTab("active");
+                notification.close();
+              };
+            } catch (err) {
+              console.error("[Notification API Error]:", err);
+            }
+          }
+        }
       } else if (msg.type === "scheduled_start") {
         const { filename, job_id: jobId } = msg.data;
         setToast(`\u23F0 Scheduled download started: ${filename || "download"}`);
@@ -888,11 +912,16 @@ export default function App() {
 
     const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
 
+    const selectedFormatObj = ytInfo?.formats?.find(f => f.id === ytFormat);
+    const targetFormatId = (ytStreamable && selectedFormatObj?.progressive_id) 
+      ? selectedFormatObj.progressive_id 
+      : ytFormat;
+
     try {
       const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl, format_id: ytFormat, output_path: dlDir, label, interface_ips: effectiveIps, streamable: ytStreamable })
+        body: JSON.stringify({ url: cleanUrl, format_id: targetFormatId, output_path: dlDir, label, interface_ips: effectiveIps, streamable: ytStreamable })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Failed to start");
@@ -996,6 +1025,9 @@ export default function App() {
 
   useEffect(() => {
     fetchInterfaces();
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
     const t1 = setInterval(fetchInterfaces, 15000);
     const t2 = setInterval(runSpeedtestSilent, 20000);
     return () => { clearInterval(t1); clearInterval(t2); };
@@ -1845,28 +1877,13 @@ export default function App() {
                         value={url}
                         onChange={(e) => handleUrlChange(e.target.value)}
                       />
-                      {/* yt-dlp detecting spinner — floated left of the Download button */}
-                      {ytLoading && (
-                        <span style={{
-                          position: 'absolute',
-                          right: '108px',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          color: 'var(--text-muted)',
-                          pointerEvents: 'none',
-                        }}>
-                          <Loader size={13} className="spin-anim" />
-                        </span>
-                      )}
                       <button
                         className="btn-primary"
                         onClick={ytInfo ? handleYtDlpDownload : handleDownloadClick}
                         disabled={downloadBtnState === "checking" || ytLoading}
                       >
-                        {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
-                        {downloadBtnState === "checking" ? "Checking..." : "Download"}
+                        {(downloadBtnState === "checking" || ytLoading) ? <div className="spinner-small" /> : <Download size={18} />}
+                        {(downloadBtnState === "checking" || ytLoading) ? "Checking..." : "Download"}
                       </button>
                     </div>
 
@@ -1908,7 +1925,7 @@ export default function App() {
                             value={ytFormat}
                             onChange={e => {
                               const selectedFmt = ytInfo.formats.find(f => f.id === e.target.value);
-                              if (selectedFmt && !selectedFmt.has_audio) {
+                              if (selectedFmt && !selectedFmt.has_audio && !selectedFmt.progressive_url) {
                                 setYtStreamable(false); // disable streamable if user selects a DASH format
                               }
                               setYtFormat(e.target.value);
@@ -1920,11 +1937,15 @@ export default function App() {
                               outline: 'none',
                             }}
                           >
-                            {ytInfo.formats.map(f => (
-                              <option key={f.id} value={f.id}>
-                                {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
-                              </option>
-                            ))}
+                            {ytInfo.formats.map(f => {
+                              const isStreamable = f.has_audio || !!f.progressive_url;
+                              if (ytStreamable && !isStreamable) return null; // hide non-streamable formats
+                              return (
+                                <option key={f.id} value={f.id}>
+                                  {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
+                                </option>
+                              );
+                            })}
                           </select>
                           {/* Download */}
                           <button
@@ -1962,14 +1983,10 @@ export default function App() {
                                 const checked = e.target.checked;
                                 setYtStreamable(checked);
                                 if (checked) {
-                                  // Switch to a progressive/combined format that has audio (like 720p or 360p)
-                                  const progFormat = ytInfo.formats.find(f => f.has_audio && f.label !== 'Audio only');
+                                  // Switch to a progressive/combined format that has audio (720p or lower combined format)
+                                  const progFormat = ytInfo.formats.find(f => (f.has_audio || !!f.progressive_url) && f.label !== 'Audio only');
                                   if (progFormat) {
                                     setYtFormat(progFormat.id);
-                                  } else {
-                                    // if no 720p, default to first audio-enabled format
-                                    const anyAudio = ytInfo.formats.find(f => f.has_audio);
-                                    if (anyAudio) setYtFormat(anyAudio.id);
                                   }
                                 }
                               }}
@@ -2739,84 +2756,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Clipboard URL toast */}
-      {clipboardToast && (
-        <div style={{
-          position: 'fixed',
-          bottom: '24px',
-          right: '24px',
-          background: 'var(--surface)',
-          color: 'var(--text)',
-          border: '1px solid var(--border)',
-          padding: '16px',
-          borderRadius: '12px',
-          fontSize: '13px',
-          zIndex: 9999,
-          maxWidth: '360px',
-          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.15)',
-          animation: 'slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-          boxSizing: 'border-box'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '28px',
-              height: '28px',
-              borderRadius: '6px',
-              background: 'var(--accent-dim)',
-              color: 'var(--accent)',
-              flexShrink: 0
-            }}>
-              {clipboardToast.url.startsWith("magnet:") ? (
-                <Magnet size={16} />
-              ) : (
-                <Zap size={16} />
-              )}
-            </div>
-            <span style={{ fontWeight: 600, fontSize: '13.5px', color: 'var(--text)', letterSpacing: '-0.01em' }}>
-              {clipboardToast.url.startsWith("magnet:") ? "Magnet Link Detected" : "Link Detected in Clipboard"}
-            </span>
-          </div>
-          <div style={{
-            marginBottom: '16px',
-            wordBreak: 'break-all',
-            color: 'var(--text-muted)',
-            fontSize: '11.5px',
-            lineHeight: '1.5',
-            background: 'var(--surface-2)',
-            padding: '10px 12px',
-            borderRadius: '6px',
-            border: '1px solid var(--border)',
-            fontFamily: '"JetBrains Mono", monospace',
-            maxHeight: '65px',
-            overflowY: 'auto'
-          }}>
-            {clipboardToast.url.length > 120 ? clipboardToast.url.slice(0, 120) + '...' : clipboardToast.url}
-          </div>
-          <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-            <button
-              className="btn-secondary"
-              style={{ height: '32px', padding: '0 14px', fontSize: '12px', borderRadius: '6px' }}
-              onClick={() => setClipboardToast(null)}
-            >
-              Dismiss
-            </button>
-            <button
-              className="btn-primary"
-              style={{ height: '32px', padding: '0 16px', fontSize: '12px', borderRadius: '6px' }}
-              onClick={() => {
-                setUrl(clipboardToast.url);
-                setActiveTab("active");
-                setClipboardToast(null);
-              }}
-            >
-              Download
-            </button>
-          </div>
-        </div>
-      )}
+
 
       <PromptModal
         isOpen={!!promptData}
