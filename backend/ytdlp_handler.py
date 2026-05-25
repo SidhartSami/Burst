@@ -125,6 +125,8 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "stream_url": f.get("url"),
                 "audio_stream_url": audio_best.get("url") if (not has_audio and audio_best) else None,
                 "audio_ext": audio_best.get("ext", "m4a") if (not has_audio and audio_best) else None,
+                "progressive_id": height_safe[lbl].get("format_id") if lbl in height_safe else None,
+                "progressive_url": height_safe[lbl].get("url") if lbl in height_safe else None,
             })
 
     # Any non-standard heights
@@ -145,6 +147,8 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "stream_url": f.get("url"),
                 "audio_stream_url": audio_best.get("url") if (not has_audio and audio_best) else None,
                 "audio_ext": audio_best.get("ext", "m4a") if (not has_audio and audio_best) else None,
+                "progressive_id": height_safe[lbl].get("format_id") if lbl in height_safe else None,
+                "progressive_url": height_safe[lbl].get("url") if lbl in height_safe else None,
             })
 
     if audio_best:
