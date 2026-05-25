@@ -114,13 +114,17 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
         f = height_best.get(lbl)
         if f and lbl not in seen_labels:
             seen_labels.add(lbl)
+            has_audio = f.get("acodec", "none") != "none"
             result.append({
                 "id": f.get("format_id", lbl),
                 "label": lbl,
                 "ext": f.get("ext", "mp4"),
                 "filesize": f.get("filesize") or f.get("filesize_approx"),
                 "tbr": f.get("tbr"),
-                "has_audio": f.get("acodec", "none") != "none",
+                "has_audio": has_audio,
+                "stream_url": f.get("url"),
+                "audio_stream_url": audio_best.get("url") if (not has_audio and audio_best) else None,
+                "audio_ext": audio_best.get("ext", "m4a") if (not has_audio and audio_best) else None,
             })
 
     # Any non-standard heights
@@ -130,13 +134,17 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
     ):
         if lbl not in seen_labels:
             seen_labels.add(lbl)
+            has_audio = f.get("acodec", "none") != "none"
             result.append({
                 "id": f.get("format_id", lbl),
                 "label": lbl,
                 "ext": f.get("ext", "mp4"),
                 "filesize": f.get("filesize") or f.get("filesize_approx"),
                 "tbr": f.get("tbr"),
-                "has_audio": f.get("acodec", "none") != "none",
+                "has_audio": has_audio,
+                "stream_url": f.get("url"),
+                "audio_stream_url": audio_best.get("url") if (not has_audio and audio_best) else None,
+                "audio_ext": audio_best.get("ext", "m4a") if (not has_audio and audio_best) else None,
             })
 
     if audio_best:
@@ -147,6 +155,7 @@ def _build_format_list(info: Dict[str, Any]) -> List[Dict[str, Any]]:
             "filesize": audio_best.get("filesize") or audio_best.get("filesize_approx"),
             "tbr": audio_best.get("tbr"),
             "has_audio": True,
+            "stream_url": audio_best.get("url"),
         })
 
     return result
@@ -237,24 +246,49 @@ class YtDlpJob:
         self.filename: str = ""
         self.type = "ytdlp"
 
+        # Bonding fields
+        self.sub_jobs: List[str] = []
+        self.temp_files: List[str] = []
+
     def to_dict(self) -> Dict[str, Any]:
-        total_speed = self.speed_bytes / (1024 * 1024) if self.speed_bytes else 0.0
         iface_dict: Dict[str, Any] = {}
-        if self.status == "downloading" or total_speed > 0:
-            iface_dict["ytdlp"] = {
-                "name": "yt-dlp",
-                "ip_address": "ytdlp",
-                "speed_mb_s": total_speed,
-                "status": "downloading" if self.status == "downloading" else "pending",
-                "downloaded": self.total_downloaded,
-                "weight": 1.0,
-                "weight_percent": 100,
-                "chunk_start": 0,
-                "chunk_end": self.expected_size,
-                "latency_ms": 0,
-                "chunks_completed": 1 if self.status == "completed" else 0,
-                "consecutive_failures": 0,
-            }
+        
+        # Merge sub-jobs interface info if active
+        if self.sub_jobs:
+            try:
+                from main import manager
+                for sub_id in self.sub_jobs:
+                    sub_job = manager.get_job(sub_id)
+                    if sub_job:
+                        sub_dict = sub_job.to_dict()
+                        for ip, info in sub_dict.get("interfaces", {}).items():
+                            if ip not in iface_dict:
+                                iface_dict[ip] = dict(info)
+                            else:
+                                iface_dict[ip]["speed_mb_s"] = iface_dict[ip].get("speed_mb_s", 0.0) + info.get("speed_mb_s", 0.0)
+                                iface_dict[ip]["downloaded"] = iface_dict[ip].get("downloaded", 0) + info.get("downloaded", 0)
+            except Exception as e:
+                print(f"[yt-dlp job] Error merging sub-job interfaces: {e}")
+                
+        if not iface_dict:
+            # Fallback format for single connection
+            total_speed = self.speed_bytes / (1024 * 1024) if self.speed_bytes else 0.0
+            if self.status == "downloading" or total_speed > 0:
+                iface_dict["ytdlp"] = {
+                    "name": "yt-dlp",
+                    "ip_address": "ytdlp",
+                    "speed_mb_s": total_speed,
+                    "status": "downloading" if self.status == "downloading" else "pending",
+                    "downloaded": self.total_downloaded,
+                    "weight": 1.0,
+                    "weight_percent": 100,
+                    "chunk_start": 0,
+                    "chunk_end": self.expected_size,
+                    "latency_ms": 0,
+                    "chunks_completed": 1 if self.status == "completed" else 0,
+                    "consecutive_failures": 0,
+                }
+                
         return {
             "job_id": self.job_id,
             "url": self.url,
@@ -389,21 +423,235 @@ def _download_sync(
         on_error(_friendly_ytdlp_error(str(e)))
 
 
+def _sanitize_filename(name: str) -> str:
+    # Remove chars that are illegal in Windows filenames
+    for c in '<>:"/\\|?*':
+        name = name.replace(c, '')
+    return name.strip()
+
+
+async def monitor_bonded_download(
+    job: YtDlpJob,
+    video_job_id: str,
+    audio_job_id: Optional[str],
+    final_output_path: pathlib.Path,
+    video_temp_path: pathlib.Path,
+    audio_temp_path: Optional[pathlib.Path],
+    ffmpeg_path: str,
+    broadcast_fn: Callable,
+):
+    from main import manager
+    
+    # Store sub-job IDs on the parent job
+    job.sub_jobs = [video_job_id]
+    if audio_job_id:
+        job.sub_jobs.append(audio_job_id)
+        
+    job.temp_files = [str(video_temp_path)]
+    if audio_temp_path:
+        job.temp_files.append(str(audio_temp_path))
+        
+    job.status = "downloading"
+    job.started_at = time.time()
+    
+    # Send initial progress
+    await broadcast_fn("job_progress", job.to_dict())
+    
+    try:
+        while True:
+            # 1. Check parent job cancellation
+            if job.is_cancelled:
+                # Cancel all sub-jobs
+                for sub_id in job.sub_jobs:
+                    try:
+                        await manager.cancel_job(sub_id)
+                    except Exception as e:
+                        print(f"[yt-dlp bonded] Failed to cancel sub-job {sub_id}: {e}")
+                
+                # Cleanup temp files
+                for tf in job.temp_files:
+                    try:
+                        pathlib.Path(tf).unlink(missing_ok=True)
+                    except:
+                        pass
+                
+                job.status = "failed"
+                job.error = "Cancelled by user"
+                job.finished_at = time.time()
+                await broadcast_fn("job_error", {"job_id": job.job_id, "error": "Cancelled by user"})
+                return
+                
+            # Get sub-jobs
+            vjob = manager.get_job(video_job_id)
+            ajob = manager.get_job(audio_job_id) if audio_job_id else None
+            
+            # If any sub-job is None, we can't monitor properly
+            if not vjob or (audio_job_id and not ajob):
+                await asyncio.sleep(0.5)
+                continue
+                
+            # Check for failures
+            if vjob.status == "failed" or (ajob and ajob.status == "failed"):
+                err_msg = vjob.error or (ajob.error if ajob else "") or "Sub-job download failed"
+                
+                # Cancel the other sub-job if still running
+                for sub_id in job.sub_jobs:
+                    try:
+                        await manager.cancel_job(sub_id)
+                    except:
+                        pass
+                        
+                # Cleanup temp files
+                for tf in job.temp_files:
+                    try:
+                        pathlib.Path(tf).unlink(missing_ok=True)
+                    except:
+                        pass
+                    
+                job.status = "failed"
+                job.error = err_msg
+                job.finished_at = time.time()
+                await broadcast_fn("job_error", {"job_id": job.job_id, "error": err_msg})
+                return
+                
+            # Calculate percentages and speeds from sub-jobs
+            vjob_pct = (vjob.total_downloaded / vjob.expected_size * 100.0) if vjob.expected_size else 0.0
+            ajob_pct = (ajob.total_downloaded / ajob.expected_size * 100.0) if (ajob and ajob.expected_size) else 0.0
+
+            v_speed = sum(i.get("speed_mb_s", 0.0) for i in vjob.to_dict().get("interfaces", {}).values()) * 1024 * 1024
+            a_speed = sum(i.get("speed_mb_s", 0.0) for i in ajob.to_dict().get("interfaces", {}).values()) * 1024 * 1024 if ajob else 0
+
+            # Aggregate download statistics
+            if ajob:
+                # DASH format with separate video and audio streams
+                job.total_downloaded = vjob.total_downloaded + ajob.total_downloaded
+                job.expected_size = vjob.expected_size + ajob.expected_size
+                
+                # percent = average of stream percentages
+                job.percent = min(99.9, (vjob_pct + ajob_pct) / 2.0)
+                
+                # Sum the active speed across interfaces
+                job.speed_bytes = v_speed + a_speed
+                
+                # Combined ETA
+                eta_v = (vjob.expected_size - vjob.total_downloaded) / v_speed if v_speed else 0
+                eta_a = (ajob.expected_size - ajob.total_downloaded) / a_speed if a_speed else 0
+                job.eta = max(eta_v, eta_a) if (eta_v or eta_a) else None
+            else:
+                # Combined format - single stream
+                job.total_downloaded = vjob.total_downloaded
+                job.expected_size = vjob.expected_size
+                job.percent = vjob_pct
+                job.speed_bytes = v_speed
+                eta_val = (vjob.expected_size - vjob.total_downloaded) / v_speed if v_speed else 0
+                job.eta = eta_val if eta_val else None
+                
+            # Update filename
+            job.filename = final_output_path.name
+            
+            # Broadcast progress
+            await broadcast_fn("job_progress", job.to_dict())
+            
+            # Check for completion
+            v_done = vjob.status == "completed"
+            a_done = ajob.status == "completed" if ajob else True
+            
+            if v_done and a_done:
+                # Transition to merging!
+                job.status = "merging"
+                job.percent = 99.9
+                await broadcast_fn("job_progress", job.to_dict())
+                
+                # Perform the merge or copy in a background thread
+                try:
+                    if ajob:
+                        # DASH format - needs ffmpeg merge!
+                        import subprocess
+                        ffmpeg_cmd = [
+                            ffmpeg_path,
+                            "-i", str(video_temp_path),
+                            "-i", str(audio_temp_path),
+                            "-c", "copy",
+                            str(final_output_path),
+                            "-y"
+                        ]
+                        print(f"[yt-dlp bonded] Merging streams: {ffmpeg_cmd}")
+                        await asyncio.to_thread(subprocess.run, ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    else:
+                        # Single combined format - just rename/move!
+                        print(f"[yt-dlp bonded] Renaming combined stream: {video_temp_path} -> {final_output_path}")
+                        
+                        def do_rename():
+                            # Remove output if somehow exists (should be handled by path collision)
+                            if final_output_path.exists():
+                                final_output_path.unlink()
+                            video_temp_path.rename(final_output_path)
+                            
+                        await asyncio.to_thread(do_rename)
+                        
+                    # Clean up the completed sub-jobs from manager so they don't clutter regular history
+                    vjob.filename = "BURST_INTERNAL_CHECK"
+                    vjob.url = "BURST_INTERNAL_CHECK"
+                    if ajob:
+                        ajob.filename = "BURST_INTERNAL_CHECK"
+                        ajob.url = "BURST_INTERNAL_CHECK"
+                        
+                    # Cleanup temp files
+                    for tf in job.temp_files:
+                        try:
+                            pathlib.Path(tf).unlink(missing_ok=True)
+                        except:
+                            pass
+                            
+                    # Successful completion!
+                    job.status = "completed"
+                    job.percent = 100.0
+                    job.finished_at = time.time()
+                    await broadcast_fn("job_complete", job.to_dict())
+                    return
+                    
+                except Exception as merge_err:
+                    print(f"[yt-dlp bonded] Merge/Rename error: {merge_err}")
+                    # Cleanup temp files
+                    for tf in job.temp_files:
+                        try:
+                            pathlib.Path(tf).unlink(missing_ok=True)
+                        except:
+                            pass
+                        
+                    job.status = "failed"
+                    job.error = f"Merge failed: {merge_err}"
+                    job.finished_at = time.time()
+                    await broadcast_fn("job_error", {"job_id": job.job_id, "error": job.error})
+                    return
+            
+            await asyncio.sleep(0.5)
+            
+    except Exception as loop_err:
+        print(f"[yt-dlp bonded] coordinator loop error: {loop_err}")
+        job.status = "failed"
+        job.error = str(loop_err)
+        job.finished_at = time.time()
+        await broadcast_fn("job_error", {"job_id": job.job_id, "error": job.error})
+
+
 async def start_ytdlp_download(
     url: str,
     format_id: str,
     output_path: str,
     label: str,
     broadcast_fn: Callable,
+    interface_ips: List[str] = [],
 ) -> YtDlpJob:
     """
     Ensure ffmpeg is available, then kick off a yt-dlp download.
-    ffmpeg is downloaded automatically on first use.
+    It attempts to extract direct CDN stream URLs and run them via Burst's chunked multi-interface engine.
+    If it fails, it falls back to native single-connection yt-dlp.
     """
     if not YTDLP_AVAILABLE:
         raise RuntimeError("yt-dlp is not installed")
 
-    # --- Ensure ffmpeg (downloads ~70 MB once, then cached forever) ---
+    # Ensure ffmpeg
     from ffmpeg_manager import ensure_ffmpeg
     ffmpeg_path = await ensure_ffmpeg(broadcast_fn)
     if not ffmpeg_path:
@@ -416,6 +664,110 @@ async def start_ytdlp_download(
     job = YtDlpJob(job_id, url, output_path, label)
     _ytdlp_jobs[job_id] = job
 
+    # output_path is ALWAYS a directory for yt-dlp downloads
+    output_dir = pathlib.Path(output_path)
+    if output_dir.suffix and not output_dir.is_dir():
+        output_dir = output_dir.parent
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        job.status = "failed"
+        job.error = f"Cannot create output folder: {e}"
+        await broadcast_fn("job_error", {"job_id": job_id, "error": job.error})
+        return job
+
+    # 1. Fetch direct CDN URLs
+    info = None
+    try:
+        info = await fetch_info(url)
+    except Exception as e:
+        print(f"[yt-dlp bonded] Failed to fetch info: {e}")
+
+    use_custom_bonding = False
+    video_stream_url = None
+    audio_stream_url = None
+    video_ext = "mp4"
+    audio_ext = "m4a"
+    title = "video"
+
+    if info and info.get("supported"):
+        title = info.get("title", "video")
+        chosen_fmt = None
+        for f in info.get("formats", []):
+            if str(f.get("id")) == str(format_id):
+                chosen_fmt = f
+                break
+
+        if chosen_fmt and chosen_fmt.get("stream_url"):
+            video_stream_url = chosen_fmt["stream_url"]
+            video_ext = chosen_fmt.get("ext", "mp4")
+
+            if not chosen_fmt.get("has_audio"):
+                audio_fmt = None
+                for f in info.get("formats", []):
+                    if f.get("label") == "Audio only" and f.get("stream_url"):
+                        audio_fmt = f
+                        break
+                if audio_fmt:
+                    audio_stream_url = audio_fmt["stream_url"]
+                    audio_ext = audio_fmt.get("ext", "m4a")
+                    use_custom_bonding = True
+            else:
+                use_custom_bonding = True
+
+    if use_custom_bonding:
+        print(f"[yt-dlp bonded] Starting bonded download for '{title}' (format {format_id})")
+        
+        # Build interface list
+        from main import _interfaces_by_ip
+        all_ifaces = _interfaces_by_ip()
+        selected = [all_ifaces[ip] for ip in interface_ips if ip in all_ifaces]
+        if not selected:
+            from interfaces import get_active_interfaces_dict
+            selected = get_active_interfaces_dict()
+
+        sanitized_title = _sanitize_filename(title)
+        
+        is_audio_only = label == "Audio only"
+        final_ext = "mp3" if is_audio_only else video_ext
+        final_filename = f"{sanitized_title}.{final_ext}"
+        
+        final_file_path = output_dir / final_filename
+        counter = 1
+        while final_file_path.exists():
+            final_file_path = output_dir / f"{sanitized_title}({counter}).{final_ext}"
+            counter += 1
+
+        # Spawn sub-jobs
+        from main import manager
+        
+        video_temp_path = output_dir / f".tmp_{job_id}_video.{video_ext}"
+        video_sub_job = await manager.create_job(video_stream_url, str(video_temp_path), selected)
+        
+        audio_sub_job = None
+        audio_temp_path = None
+        if audio_stream_url:
+            audio_temp_path = output_dir / f".tmp_{job_id}_audio.{audio_ext}"
+            audio_sub_job = await manager.create_job(audio_stream_url, str(audio_temp_path), selected)
+
+        # Start background task to monitor sub-jobs
+        asyncio.create_task(
+            monitor_bonded_download(
+                job=job,
+                video_job_id=video_sub_job.job_id,
+                audio_job_id=audio_sub_job.job_id if audio_sub_job else None,
+                final_output_path=final_file_path,
+                video_temp_path=video_temp_path,
+                audio_temp_path=audio_temp_path,
+                ffmpeg_path=ffmpeg_path,
+                broadcast_fn=broadcast_fn
+            )
+        )
+        return job
+
+    # SILENT FALLBACK to classic yt-dlp native downloader
+    print(f"[yt-dlp bonded] WARNING: Cannot extract direct CDN URL. Falling back to native single-connection yt-dlp downloader.")
+    
     loop = asyncio.get_event_loop()
 
     def on_progress() -> None:
