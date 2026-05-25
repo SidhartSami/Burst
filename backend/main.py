@@ -108,7 +108,12 @@ async def history_saver_loop():
     
     while True:
         try:
-            current_jobs = list(manager.jobs.values()) + list(active_torrents.values())
+            from ytdlp_handler import get_all_ytdlp_jobs
+            current_jobs = (
+                list(manager.jobs.values()) + 
+                list(active_torrents.values()) + 
+                list(get_all_ytdlp_jobs().values())
+            )
             for job in current_jobs:
                 jid = job.job_id
                 if jid not in saved_ids and job.status in ("completed", "failed"):
@@ -116,6 +121,8 @@ async def history_saver_loop():
                         continue
                     save_to_history(job.to_dict())
                     saved_ids.add(jid)
+                    if job.status == "completed":
+                        play_completion_sound(jid)
         except Exception as e:
             print(f"[HISTORY_LOOP] error: {e}")
         await asyncio.sleep(1)
@@ -192,6 +199,20 @@ def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEv
         from clipboard_monitor import start_monitor
         def on_url_detected(url: str):
             print(f"[clipboard] URL detected: {url}", flush=True)
+            
+            # Send native Windows tray notification
+            try:
+                global _tray_icon
+                if _tray_icon:
+                    is_magnet = url.startswith("magnet:")
+                    title = "Magnet Link Detected" if is_magnet else "Link Detected in Clipboard"
+                    body = f"Use Burst to download this link:\n{url}"
+                    if len(body) > 120:
+                        body = body[:117] + "..."
+                    _tray_icon.notify(body, title)
+            except Exception as notify_err:
+                print(f"[clipboard notification] tray notify error: {notify_err}", flush=True)
+                
             asyncio.run_coroutine_threadsafe(
                 broadcast_event("clipboard_url", {"url": url}),
                 loop
@@ -209,9 +230,33 @@ event_bus: Set[WebSocket] = set()
 window_ref = None
 is_quitting = False
 uvicorn_server = None
+_tray_icon = None
+_played_sound_ids = set()
+
+def play_completion_sound(job_id: Optional[str] = None):
+    """Play a premium, native Windows system sound asynchronously on completion."""
+    global _played_sound_ids
+    if job_id:
+        if job_id in _played_sound_ids:
+            return
+        _played_sound_ids.add(job_id)
+        
+    try:
+        import winsound
+        # Try modern Windows 10/11 notification sound first
+        try:
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        except:
+            # Fall back to Asterisk notification chime
+            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+    except Exception as e:
+        print(f"[sound] PlaySound error: {e}", flush=True)
 
 async def broadcast_event(event_type: str, data: Any):
     """Notify all global event listeners."""
+    if event_type == "job_complete":
+        play_completion_sound(data.get("job_id"))
+        
     message = {"type": event_type, "data": data}
     disconnected = set()
     for ws in event_bus:
@@ -1226,13 +1271,14 @@ async def serve_frontend(full_path: str):
     return HTMLResponse(content="<h3>Burst UI Not Found</h3>", status_code=404)
 
 def setup_tray(window):
+    global _tray_icon
     try:
         import pystray
         from PIL import Image
         import threading
         import sys
         import os
-
+ 
         def load_tray_icon():
             try:
                 # Try standard assets/logo.png path (dev)
@@ -1247,10 +1293,10 @@ def setup_tray(window):
                 pass
             # Fallback block
             return Image.new('RGB', (64, 64), color=(0, 102, 204))
-
+ 
         def on_open(icon, item):
             window.show()
-
+ 
         def on_exit(icon, item):
             global is_quitting
             is_quitting = True
@@ -1265,19 +1311,22 @@ def setup_tray(window):
             except:
                 pass
             sys.exit(0)
-
+ 
         image = load_tray_icon()
         menu = pystray.Menu(
             pystray.MenuItem('Open Burst', on_open, default=True),
             pystray.MenuItem('Quit', on_exit)
         )
         icon = pystray.Icon("Burst", image, "Burst Download Manager", menu)
-        
+        _tray_icon = icon
+         
         t = threading.Thread(target=icon.run, daemon=True)
         t.start()
         print("System tray icon started successfully.")
     except Exception as e:
         print(f"Failed to initialize system tray: {e}")
+
+
 
 if __name__ == "__main__":
     # 1. Handle CLI commands (NO elevation needed)
