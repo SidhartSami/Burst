@@ -150,14 +150,15 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str,
             async with session.head(url, allow_redirects=True) as resp:
                 if resp.status < 400:
                     total_size = int(resp.headers.get("Content-Length", "0"))
-                    supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
-                    content_type = resp.headers.get("Content-Type", "application/octet-stream")
-                    return {
-                        "url": str(resp.url),
-                        "content_length": total_size,
-                        "supports_ranges": supports_ranges,
-                        "content_type": content_type,
-                    }
+                    if total_size > 0:
+                        supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
+                        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                        return {
+                            "url": str(resp.url),
+                            "content_length": total_size,
+                            "supports_ranges": supports_ranges,
+                            "content_type": content_type,
+                        }
         except:
             pass
 
@@ -173,14 +174,15 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str,
                     else:
                         total_size = int(resp.headers.get("Content-Length", "0"))
                     
-                    supports_ranges = resp.status == 206 or "bytes" in resp.headers.get("Accept-Ranges", "").lower()
-                    content_type = resp.headers.get("Content-Type", "application/octet-stream")
-                    return {
-                        "url": str(resp.url),
-                        "content_length": total_size,
-                        "supports_ranges": supports_ranges,
-                        "content_type": content_type,
-                    }
+                    if total_size > 0:
+                        supports_ranges = resp.status == 206 or "bytes" in resp.headers.get("Accept-Ranges", "").lower()
+                        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                        return {
+                            "url": str(resp.url),
+                            "content_length": total_size,
+                            "supports_ranges": supports_ranges,
+                            "content_type": content_type,
+                        }
         except:
             pass
 
@@ -347,8 +349,10 @@ class DownloadManager:
             analysis = await analyze_url(job.url, interfaces[0]["ip_address"])
             job.expected_size = int(analysis["content_length"])
             job.supports_ranges = bool(analysis["supports_ranges"])
+            
             if job.expected_size <= 0:
-                raise ValueError("Target server did not provide a valid Content-Length")
+                # Size is unknown (e.g. dynamic page / chunked encoding). Fall back to single connection.
+                job.supports_ranges = False
 
             if not job.supports_ranges:
                 job.status = "downloading"
@@ -383,10 +387,22 @@ class DownloadManager:
         )
         job.progress[interface["ip_address"]] = progress
         started = time.perf_counter()
-        await asyncio.to_thread(
-            self._download_with_requests, job, interface["ip_address"],
-            job.url, out_path, "wb", None, progress, started,
-        )
+        
+        worker_id = uuid.uuid4()
+        if not hasattr(job, "_active_threads"):
+            job._active_threads = set()
+        job._active_threads.add(worker_id)
+        
+        try:
+            await asyncio.to_thread(
+                self._download_with_requests, job, interface["ip_address"],
+                job.url, out_path, "wb", None, progress, started,
+                worker_id
+            )
+        finally:
+            if hasattr(job, "_active_threads"):
+                job._active_threads.discard(worker_id)
+                
         if job.is_cancelled:
             progress.status = "cancelled"
         else:
@@ -1033,18 +1049,11 @@ class DownloadManager:
     @staticmethod
     def _make_bound_session(source_ip: str) -> requests.Session:
         session = requests.Session()
-        insecure_ssl_context = ssl.create_default_context()
-        insecure_ssl_context.check_hostname = False
-        insecure_ssl_context.verify_mode = ssl.CERT_NONE
 
         class BoundAdapter(HTTPAdapter):
             def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-                pool_kwargs["ssl_context"] = insecure_ssl_context
                 pool_kwargs["source_address"] = (source_ip, 0)
-                self.poolmanager = PoolManager(
-                    num_pools=connections, maxsize=maxsize,
-                    block=block, **pool_kwargs,
-                )
+                super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
 
         session.mount("http://", BoundAdapter())
         session.mount("https://", BoundAdapter())

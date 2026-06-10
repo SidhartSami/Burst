@@ -15,4 +15,3 @@ beautifulsoup4
 lxml
 apscheduler
 tzlocal
-yt-dlp

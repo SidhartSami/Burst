@@ -358,13 +358,8 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
         meta_ses = lt.session(_make_settings(ip=None))
         _load_dht_state(meta_ses)  # warm DHT from previous session
-
-        meta_ses.add_dht_router("router.bittorrent.com", 6881)
-        meta_ses.add_dht_router("router.utorrent.com", 6881)
-        meta_ses.add_dht_router("dht.transmissionbt.com", 6881)
-        meta_ses.add_dht_router("dht.aelitis.com", 6881)
-        meta_ses.add_dht_router("router.bitcomet.com", 6881)
-        meta_ses.add_dht_router("dht.libtorrent.org", 25401)
+        # DHT bootstrap nodes are set via dht_bootstrap_nodes in _make_settings()
+        # add_dht_router() is deprecated in libtorrent 2.0 and has no effect.
 
         job._meta_session = meta_ses
 
