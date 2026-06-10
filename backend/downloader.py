@@ -147,7 +147,7 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str,
     async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=BROWSER_HEADERS) as session:
         # Try Stage 1: HEAD (Fastest)
         try:
-            async with session.head(url, allow_redirects=True) as resp:
+            async with session.head(url, allow_redirects=True, ssl=False) as resp:
                 if resp.status < 400:
                     total_size = int(resp.headers.get("Content-Length", "0"))
                     if total_size > 0:
@@ -161,12 +161,12 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str,
                         }
         except:
             pass
-
+ 
         # Try Stage 2: GET with Range (To check resume support)
         try:
             headers = dict(BROWSER_HEADERS)
             headers["Range"] = "bytes=0-0"
-            async with session.get(url, allow_redirects=True, headers=headers) as resp:
+            async with session.get(url, allow_redirects=True, headers=headers, ssl=False) as resp:
                 if resp.status < 400:
                     content_range = resp.headers.get("Content-Range", "")
                     if "/" in content_range:
@@ -185,9 +185,9 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str,
                         }
         except:
             pass
-
+ 
         # Try Stage 3: Super-Basic GET (Final Fallback)
-        async with session.get(url, allow_redirects=True) as resp:
+        async with session.get(url, allow_redirects=True, ssl=False) as resp:
             resp.raise_for_status()
             total_size = int(resp.headers.get("Content-Length", "0"))
             supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()

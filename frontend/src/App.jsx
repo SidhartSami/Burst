@@ -136,10 +136,25 @@ function toneFor(name) {
 }
 
 function readDroppedUrl(event) {
+  // Accept magnet links, http/https URLs, file:/// paths, or local files
   const uriList = event.dataTransfer.getData("text/uri-list");
-  if (uriList) return uriList.split("\n").find((line) => line.startsWith("http")) || "";
-  const plainText = event.dataTransfer.getData("text/plain");
-  if (plainText && /^https?:\/\//i.test(plainText.trim())) return plainText.trim();
+  if (uriList) {
+    const found = uriList.split("\n").find((line) => {
+      const trimmed = line.trim();
+      return trimmed.startsWith("http") || trimmed.startsWith("magnet:") || trimmed.startsWith("file://");
+    });
+    if (found) return found.trim();
+  }
+  const plainText = event.dataTransfer.getData("text/plain").trim();
+  if (plainText && (/^https?:\/\//i.test(plainText) || plainText.startsWith("magnet:") || plainText.startsWith("file://"))) return plainText;
+
+  // Check files array for dropped files ( WebView2 exposes file.path )
+  if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+    const file = event.dataTransfer.files[0];
+    if (file.name.endsWith(".torrent") || file.path?.endsWith(".torrent")) {
+      if (file.path) return file.path;
+    }
+  }
   return "";
 }
 
@@ -666,7 +681,8 @@ export default function App() {
     const savedLimits = JSON.parse(localStorage.getItem("burst_bandwidth_limits") || "{}");
     setBandwidthLimits(savedLimits);
     const savedPath = localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/";
-    if (!url) setOutputPath(savedPath + (url ? "" : "burst-download.bin"));
+    const safeDir0 = savedPath.endsWith("/") || savedPath.endsWith("\\") ? savedPath : savedPath + "/";
+    if (!url) setOutputPath(safeDir0);
 
     // 2. Fetch all configuration and active jobs concurrently to avoid waterfalls
     Promise.all([
@@ -684,7 +700,9 @@ export default function App() {
             setThemeMode(settingsData.settings.THEME_MODE);
           }
           if (settingsData.settings.DOWNLOAD_PATH && !url) {
-            setOutputPath(settingsData.settings.DOWNLOAD_PATH);
+            const dp = settingsData.settings.DOWNLOAD_PATH;
+            const safeDir = dp.endsWith("/") || dp.endsWith("\\") ? dp : dp + "/";
+            setOutputPath(safeDir);
           }
           // Check onboarding completion
           if (settingsData.settings.ONBOARDING_COMPLETE === false) {
@@ -820,33 +838,54 @@ export default function App() {
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
 
-    const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent");
+    // Reliable base-dir extractor: works whether outputPath ends with a
+    // filename or a trailing slash.
     const getBaseDir = () => {
-      if (outputPath) {
-        const parts = outputPath.split(/[\\\/]/);
-        parts.pop();
-        return parts.join("\\") + "\\";
-      }
-      return "C:/Burst-Downloads/";
+      const p = outputPath || "";
+      // If it already ends with a separator it IS a directory
+      if (p.endsWith("/") || p.endsWith("\\")) return p;
+      // Otherwise strip the last component
+      const parts = p.split(/[\\/]/);
+      parts.pop();
+      const dir = parts.join("\\");
+      return dir ? dir + "\\" : "C:\\Burst-Downloads\\";
     };
 
-    const baseDir = getBaseDir();
+    // Always fall back to the settings download path as authoritative base
+    const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+    const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
 
+    const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent") || newUrl.trim().startsWith("file://") || newUrl.trim().startsWith("base64:");
     if (isTorrent) {
+      let torrentName = "torrent-download";
       const magnetNameMatch = newUrl.match(/dn=([^&]+)/);
-      const magnetName = magnetNameMatch ? decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, ' ') : "torrent-download";
-      setOutputPath(baseDir + magnetName);
+      if (magnetNameMatch) {
+        torrentName = decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, " ").trim() || "torrent-download";
+      } else if (newUrl.toLowerCase().endsWith(".torrent")) {
+        const parts = newUrl.split(/[\\/]/);
+        const lastPart = parts.pop() || "";
+        if (lastPart.toLowerCase().endsWith(".torrent")) {
+          torrentName = lastPart.slice(0, -8) || "torrent-download";
+        }
+      } else if (newUrl.startsWith("base64:")) {
+        // base64:filename:data
+        const parts = newUrl.split(":");
+        const filename = parts[1] || "";
+        if (filename.toLowerCase().endsWith(".torrent")) {
+          torrentName = filename.slice(0, -8) || "torrent-download";
+        }
+      }
+      setOutputPath(safeSettingsBase + torrentName);
       return;
     }
-    // Extract filename from URL — but skip meaningless route segments like /watch, /shorts, /live
+
+    // Extract filename from a plain URL
     const knownPageRoutes = new Set(['watch', 'shorts', 'live', 'embed', 'playlist', 'v', 'e', 'channel', 'c', 'user', 'feed']);
     const rawSegment = newUrl.split("/").pop()?.split("?")[0] || "";
     const filename = (rawSegment && !knownPageRoutes.has(rawSegment.toLowerCase()) && rawSegment.includes("."))
       ? rawSegment
       : "burst-download.bin";
-    const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
-    const safeDir = bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
-    setOutputPath(safeDir + filename);
+    setOutputPath(safeSettingsBase + filename);
   };
 
 
@@ -911,7 +950,7 @@ export default function App() {
 
   const fetchInterfaces = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/interfaces`);
+      const resp = await fetch(`${API_BASE}/interfaces?benchmark=false`);
       if (!resp.ok) return;
       const data = await resp.json();
       const fresh = data.interfaces || [];
@@ -953,7 +992,7 @@ export default function App() {
     const cleanUrl = (forceUrl || url).trim();
     const cleanOutputPath = (forcePath || outputPath).trim();
     const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
-    const isTorrent = cleanUrl.startsWith("magnet:?") || cleanUrl.endsWith(".torrent");
+    const isTorrent = cleanUrl.startsWith("magnet:") || cleanUrl.endsWith(".torrent") || cleanUrl.startsWith("file://") || cleanUrl.startsWith("base64:");
 
     try {
       const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
@@ -988,7 +1027,7 @@ export default function App() {
     const targetUrl = url.trim();
     if (!targetUrl) return;
 
-    const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
+    const isTorrent = targetUrl.startsWith("magnet:") || targetUrl.endsWith(".torrent") || targetUrl.startsWith("file://") || targetUrl.startsWith("base64:");
 
     if (!isTorrent) {
       // First check if this is a webpage or direct download
@@ -1401,14 +1440,61 @@ export default function App() {
               setDragOverlay(false);
             }
           }}
-          onDrop={(e) => {
+          onDrop={async (e) => {
             e.preventDefault();
             dragCounter.current = 0;
             setDragOverlay(false);
+
+            // If a local .torrent file was dropped directly from the OS file system
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              const file = e.dataTransfer.files[0];
+              if (file.name.endsWith(".torrent")) {
+                const reader = new FileReader();
+                reader.onload = async () => {
+                  const base64Data = reader.result.split(",")[1];
+                  const torrentUri = `base64:${file.name}:${base64Data}`;
+                  
+                  const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+                  const safeBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+                  const torrentName = file.name.slice(0, -8) || "torrent-download";
+                  const computedPath = safeBase + torrentName;
+                  
+                  handleUrlChange(torrentUri);
+                  await startDownload(torrentUri, computedPath);
+                };
+                reader.readAsDataURL(file);
+                return;
+              }
+            }
+
             const droppedUrl = readDroppedUrl(e);
             if (droppedUrl) {
+              // Compute the path now (synchronously) before React re-renders,
+              // to avoid passing a stale outputPath closure into startDownload.
+              const isTorrent = droppedUrl.startsWith("magnet:") || droppedUrl.endsWith(".torrent") || droppedUrl.startsWith("file://");
+              const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+              const safeBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+              let computedPath;
+              if (isTorrent) {
+                let torrentName = "torrent-download";
+                const m = droppedUrl.match(/dn=([^&]+)/);
+                if (m) {
+                  torrentName = decodeURIComponent(m[1]).replace(/\+/g, " ").trim() || "torrent-download";
+                } else {
+                  const parts = droppedUrl.split(/[\\/]/);
+                  const lastPart = parts.pop() || "";
+                  if (lastPart.toLowerCase().endsWith(".torrent")) {
+                    torrentName = lastPart.slice(0, -8) || "torrent-download";
+                  }
+                }
+                computedPath = safeBase + torrentName;
+              } else {
+                const seg = droppedUrl.split("/").pop()?.split("?")[0] || "";
+                const fname = seg && seg.includes(".") ? seg : "burst-download.bin";
+                computedPath = safeBase + fname;
+              }
               handleUrlChange(droppedUrl);
-              setTimeout(() => startDownload(droppedUrl, outputPath), 0);
+              startDownload(droppedUrl, computedPath);
             }
           }}
         >
@@ -1802,7 +1888,23 @@ export default function App() {
                         try {
                           const resp = await fetch(`${API_BASE}/select-path`);
                           const data = await resp.json();
-                          if (data.path) setOutputPath(data.path + (url ? "" : "\\burst-download.bin"));
+                          if (data.path) {
+                            const dp = data.path;
+                            const safeDir = dp.endsWith("/") || dp.endsWith("\\") ? dp : dp + "/";
+                            const isMagnet = url.trim().startsWith("magnet:");
+                            const isHttp = /^https?:\/\//i.test(url.trim());
+                            if (url && (isMagnet || isHttp)) {
+                              // Re-derive filename from current url against new dir
+                              const m = url.match(/dn=([^&]+)/);
+                              const seg = url.split("/").pop()?.split("?")[0] || "";
+                              const name = isMagnet
+                                ? (m ? decodeURIComponent(m[1]).replace(/\+/g, " ").trim() : "torrent-download")
+                                : (seg && seg.includes(".") ? seg : "burst-download.bin");
+                              setOutputPath(safeDir + name);
+                            } else {
+                              setOutputPath(safeDir);
+                            }
+                          }
                         } catch { }
                       }} title="Browse directory">
                         <FolderOpen size={16} />
@@ -2368,11 +2470,11 @@ export default function App() {
                   </label>
 
                   {/* START ON BOOT TOGGLE — 3rd item */}
-                  <label className="setting-row" style={{ alignItems: 'flex-start' }}>
-                    <div>
-                      <span>Start Burst on Boot</span>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Burst runs silently in the background on startup</div>
-                    </div>
+                  <label className="setting-row">
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      Start Burst on Boot
+                      <InfoTooltip text="Burst runs silently in the background on startup" />
+                    </span>
                     <div className="setting-input-wrap">
                       <div
                         onClick={() => setAppSettings(prev => ({ ...prev, START_ON_BOOT: !prev.START_ON_BOOT }))}
@@ -2394,11 +2496,11 @@ export default function App() {
                   </label>
 
                   {/* CLIPBOARD MONITOR TOGGLE */}
-                  <label className="setting-row" style={{ alignItems: 'flex-start' }}>
-                    <div>
-                      <span>Clipboard Monitor</span>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Auto-detect URLs copied to clipboard</div>
-                    </div>
+                  <label className="setting-row">
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      Clipboard Monitor
+                      <InfoTooltip text="Auto-detect URLs copied to clipboard" />
+                    </span>
                     <div className="setting-input-wrap" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
                       <div
                         onClick={async () => {
@@ -2443,9 +2545,6 @@ export default function App() {
                         <span style={{ fontSize: '10px', color: 'var(--warning, #eab308)', display: 'block', marginTop: '4px', textAlign: 'right' }}>
                           Run pip install pywin32 then restart Burst
                         </span>
-                      )}
-                      {!appSettings?.CLIPBOARD_MONITOR_ENABLED && appSettings?.CLIPBOARD_MONITOR_REASON !== "pywin32_not_installed" && (
-                        <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Windows only</span>
                       )}
                     </div>
                   </label>

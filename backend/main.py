@@ -357,7 +357,7 @@ def _interfaces_by_ip() -> Dict[str, Dict[str, Any]]:
 # Interface & speed endpoints
 # ---------------------------------------------------------------------------
 @app.get("/interfaces")
-async def interfaces(benchmark: bool = True) -> Dict[str, Any]:
+async def interfaces(benchmark: bool = False) -> Dict[str, Any]:
     base = get_active_interfaces_dict()
     if benchmark:
         speed_data = await benchmark_interfaces(base)
@@ -397,7 +397,7 @@ async def get_url_type(url: str) -> Dict[str, Any]:
             ct = ""
             status = 0
             try:
-                async with session.head(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as resp:
+                async with session.head(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True, ssl=False) as resp:
                     ct = resp.headers.get("Content-Type", "")
                     status = resp.status
             except Exception:
@@ -406,7 +406,7 @@ async def get_url_type(url: str) -> Dict[str, Any]:
             # Fall back to GET if HEAD fails, returns non-2xx/non-3xx, or returns no content type
             if status < 200 or status >= 400 or not ct:
                 try:
-                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as resp:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True, ssl=False) as resp:
                         ct = resp.headers.get("Content-Type", "")
                         status = resp.status
                 except Exception as e:
@@ -416,7 +416,7 @@ async def get_url_type(url: str) -> Dict[str, Any]:
                 # Try to extract page title quickly
                 title = None
                 try:
-                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as get_resp:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True, ssl=False) as get_resp:
                         if get_resp.status == 200:
                             text = await get_resp.text()
                             import re
@@ -642,16 +642,11 @@ async def get_settings() -> Dict[str, Any]:
 
 @app.post("/settings")
 async def update_settings(payload: SettingsUpdate) -> Dict[str, Any]:
-    # Check if START_ON_BOOT state changes
-    old_settings = config.load_settings()
-    old_boot = old_settings.get("START_ON_BOOT", True)
     new_boot = payload.settings.get("START_ON_BOOT", True)
-    
     updated = config.save_settings(payload.settings)
     
-    if old_boot != new_boot:
-        from setup_utils import apply_autostart_rules
-        apply_autostart_rules(new_boot)
+    from setup_utils import apply_autostart_rules
+    apply_autostart_rules(new_boot)
         
     return {"settings": updated}
 
@@ -1398,7 +1393,10 @@ if __name__ == "__main__":
             },
         }
         # Passing 'app' object directly is safer for PyInstaller
-        config_obj = uvicorn.Config(app, host="127.0.0.1", port=59284, reload=False, log_config=full_silence_config, use_colors=False)
+        config_obj = uvicorn.Config(
+            app, host="127.0.0.1", port=59284, reload=False,
+            workers=1, access_log=False, log_config=full_silence_config, use_colors=False
+        )
         uvicorn_server = uvicorn.Server(config_obj)
         uvicorn_server.run()
 
@@ -1444,7 +1442,7 @@ if __name__ == "__main__":
             window.load_html("<h3>Burst could not start</h3><p>The local API did not become ready. Please restart Burst.</p>")
             return
             
-        time.sleep(0.3)  # Grace period to let background state loads complete smoothly
+        time.sleep(0.02)  # Grace period to let background state loads complete smoothly
         window.load_url("http://127.0.0.1:59284")
 
         if startup_url:
