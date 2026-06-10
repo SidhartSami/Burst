@@ -1,17 +1,18 @@
 [Setup]
 AppName=Burst
-AppVersion=1.2.1
+AppVersion=1.3.0
 AppVerName=Burst
 AppPublisher=SidhartSami
-DefaultDirName={pf}\Burst
+DefaultDirName={autopf}\Burst
 DefaultGroupName=Burst
 UninstallDisplayIcon={app}\Burst.exe
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=Burst_Setup_v1.2.1
+OutputBaseFilename=Burst_Setup_v1.3.0
 PrivilegesRequired=admin
 ChangesEnvironment=yes
+UsedUserAreasWarning=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -68,8 +69,8 @@ Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: expandsz; Value
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 
 [Icons]
-Name: "{group}\Burst"; Filename: "{app}\Burst.exe"
-Name: "{commondesktop}\Burst"; Filename: "{app}\Burst.exe"; Tasks: desktopicon
+Name: "{group}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.DownloadManager"
+Name: "{commondesktop}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.DownloadManager"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Burst.exe"; Description: "{cm:LaunchProgram,Burst}"; Flags: nowait postinstall skipifsilent runascurrentuser
@@ -78,7 +79,7 @@ Filename: "schtasks"; Parameters: "/create /tn ""Burst Autostart"" /tr ""\""{app
 
 [UninstallRun]
 ; Remove the Task Scheduler autostart task on uninstall
-Filename: "schtasks"; Parameters: "/delete /tn ""Burst Autostart"" /f"; Flags: runhidden
+Filename: "schtasks"; Parameters: "/delete /tn ""Burst Autostart"" /f"; Flags: runhidden; RunOnceId: "RemoveBurstAutostart"
 
 [Code]
 function EscapeJsonPath(Path: String): String;
@@ -101,7 +102,7 @@ begin
     FirefoxManifestPath := ExpandConstant('{app}\com.burst.download.manager.firefox.json');
     EscapedPath := EscapeJsonPath(ExpandConstant('{app}\native_host.exe'));
     
-    if IsTaskSelected('chromeext') then
+    if WizardIsTaskSelected('chromeext') then
     begin
       ManifestContent := 
         '{' + #13#10 +
@@ -119,7 +120,7 @@ begin
       SaveStringToFile(ManifestPath, ManifestContent, False);
     end;
 
-    if IsTaskSelected('firefoxext') then
+    if WizardIsTaskSelected('firefoxext') then
     begin
       FirefoxManifestContent :=
         '{' + #13#10 +

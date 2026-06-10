@@ -115,11 +115,9 @@ async def history_saver_loop():
     
     while True:
         try:
-            from ytdlp_handler import get_all_ytdlp_jobs
             current_jobs = (
                 list(manager.jobs.values()) + 
-                list(active_torrents.values()) + 
-                list(get_all_ytdlp_jobs().values())
+                list(active_torrents.values())
             )
             for job in current_jobs:
                 jid = job.job_id
@@ -226,7 +224,7 @@ def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEv
     t = threading.Thread(target=bridge, daemon=True)
     t.start()
 
-app = FastAPI(title="Burst API", version="1.2.1", lifespan=lifespan)
+app = FastAPI(title="Burst API", version="1.3.0", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 event_bus: Set[WebSocket] = set()
@@ -483,56 +481,6 @@ async def batch_download(payload: BatchDownloadRequest) -> Dict[str, Any]:
     return {"job_ids": job_ids, "errors": errors if errors else None}
 
 
-# ---------------------------------------------------------------------------
-# yt-dlp info + download endpoints
-# ---------------------------------------------------------------------------
-
-class YtDlpDownloadRequest(BaseModel):
-    url: str = Field(min_length=5)
-    format_id: str = Field(min_length=1)
-    output_path: str = Field(min_length=1)
-    label: str = ""
-    interface_ips: List[str] = []
-    streamable: bool = False
-
-
-@app.get("/yt-dlp/info")
-async def ytdlp_info(url: str) -> Dict[str, Any]:
-    """Fetch video metadata from yt-dlp. Returns formats list if supported."""
-    from ytdlp_handler import fetch_info
-    return await fetch_info(url)
-
-
-@app.post("/yt-dlp/download")
-async def ytdlp_download(payload: YtDlpDownloadRequest) -> Dict[str, Any]:
-    """Start a yt-dlp download. Returns job_id; progress is broadcast via WS."""
-    from ytdlp_handler import start_ytdlp_download, YTDLP_AVAILABLE
-    if not YTDLP_AVAILABLE:
-        raise HTTPException(status_code=503, detail="yt-dlp is not installed on this server")
-    job = await start_ytdlp_download(
-        url=payload.url,
-        format_id=payload.format_id,
-        output_path=payload.output_path,
-        label=payload.label,
-        broadcast_fn=broadcast_event,
-        interface_ips=payload.interface_ips,
-        streamable=payload.streamable,
-    )
-    await broadcast_event("new_job", {"job_id": job.job_id})
-    return {"job_id": job.job_id, "status": job.status, "type": "ytdlp"}
-
-
-@app.post("/yt-dlp/cancel/{job_id}")
-async def ytdlp_cancel(job_id: str) -> Dict[str, Any]:
-    from ytdlp_handler import get_ytdlp_job
-    job = get_ytdlp_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="yt-dlp job not found")
-    job.is_cancelled = True
-    job.status = "failed"
-    job.error = "Cancelled by user"
-    await broadcast_event("job_error", {"job_id": job_id, "error": "Cancelled by user"})
-    return {"cancelled": True}
 
 
 @app.post("/analyze")
@@ -601,19 +549,6 @@ async def cancel_download(job_id: str) -> Dict[str, Any]:
     if not job:
         tjob = active_torrents.get(job_id)
         if not tjob:
-            from ytdlp_handler import get_ytdlp_job
-            ytjob = get_ytdlp_job(job_id)
-            if ytjob:
-                ytjob.is_cancelled = True
-                ytjob.status = "failed"
-                ytjob.error = "Cancelled by user"
-                for sub_id in ytjob.sub_jobs:
-                    try:
-                        await manager.cancel_job(sub_id)
-                    except:
-                        pass
-                save_state()
-                return {"status": "cancelled"}
             raise HTTPException(status_code=404, detail="Job not found")
         tjob.is_cancelled = True
         save_state()
@@ -644,15 +579,13 @@ async def add_interfaces_to_job(job_id: str, payload: AddInterfacesRequest) -> D
 @app.get("/active-jobs")
 async def get_active_jobs() -> Dict[str, Any]:
     """Returns a list of all active (not completed/failed) job IDs, excluding system pings."""
-    from ytdlp_handler import get_all_ytdlp_jobs
     regular_ids = [
         jid for jid, job in manager.jobs.items() 
         if job.status not in ("completed", "failed")
         and "BURST_INTERNAL_CHECK" not in job.url
     ]
     torrent_ids = [jid for jid, job in active_torrents.items() if job.status not in ("completed", "failed")]
-    ytdlp_ids = [jid for jid, job in get_all_ytdlp_jobs().items() if job.status not in ("completed", "failed")]
-    return {"job_ids": regular_ids + torrent_ids + ytdlp_ids}
+    return {"job_ids": regular_ids + torrent_ids}
 
 
 @app.get("/history")
@@ -770,7 +703,7 @@ async def set_clipboard_monitor(enabled: bool) -> Dict[str, Any]:
 def _calculate_hash(file_path: str, expected: str, algorithm: Optional[str] = None) -> dict:
     import os
     import hashlib
-    if not os.path.exists(file_path):
+    if not file_path or not isinstance(file_path, str) or not os.path.exists(file_path):
         return {"match": False, "actual": "", "algorithm": "", "error": "File not found"}
 
     expected_clean = expected.strip().lower()
@@ -946,18 +879,12 @@ async def websocket_progress(websocket: WebSocket, job_id: str) -> None:
     active_sockets.setdefault(job_id, set()).add(websocket)
     try:
         while True:
-            from ytdlp_handler import get_ytdlp_job
             job = manager.get_job(job_id)
             if not job:
                 tjob = active_torrents.get(job_id)
-                ytjob = get_ytdlp_job(job_id)
                 if tjob:
                     await websocket.send_json(tjob.to_dict())
                     if tjob.status in {"completed", "failed"}:
-                        break
-                elif ytjob:
-                    await websocket.send_json(ytjob.to_dict())
-                    if ytjob.status in {"completed", "failed"}:
                         break
                 else:
                     await websocket.send_json({"error": "Job not found"})
@@ -1106,21 +1033,6 @@ async def add_single_interface_to_job(job_id: str, payload: AddInterfaceRequest)
         # Check if it's a torrent job
         tjob = active_torrents.get(job_id)
         if not tjob:
-            from ytdlp_handler import get_ytdlp_job
-            ytjob = get_ytdlp_job(job_id)
-            if ytjob:
-                all_ifaces = _interfaces_by_ip()
-                iface = all_ifaces.get(payload.interface_ip)
-                if not iface:
-                    raise HTTPException(status_code=404, detail="Interface not found")
-                results = []
-                for sub_id in ytjob.sub_jobs:
-                    try:
-                        res = await manager.add_interface(sub_id, iface)
-                        results.append(res)
-                    except Exception as e:
-                        print(f"[main] Failed to add interface to yt sub-job {sub_id}: {e}")
-                return {"status": "success", "added": payload.interface_ip, "detail": results}
             raise HTTPException(status_code=404, detail="Job not found")
         all_ifaces = get_active_interfaces_dict()
         iface = next((i for i in all_ifaces if i["ip_address"] == payload.interface_ip), None)
@@ -1145,17 +1057,6 @@ async def remove_interface_from_job(job_id: str, payload: RemoveInterfaceRequest
         # Check if it's a torrent job
         tjob = active_torrents.get(job_id)
         if not tjob:
-            from ytdlp_handler import get_ytdlp_job
-            ytjob = get_ytdlp_job(job_id)
-            if ytjob:
-                results = []
-                for sub_id in ytjob.sub_jobs:
-                    try:
-                        res = await manager.remove_interface(sub_id, payload.interface_ip)
-                        results.append(res)
-                    except Exception as e:
-                        print(f"[main] Failed to remove interface from yt sub-job {sub_id}: {e}")
-                return {"status": "success", "removed": payload.interface_ip, "detail": results}
             raise HTTPException(status_code=404, detail="Job not found")
         return await tjob.remove_interface(payload.interface_ip)
         

@@ -604,6 +604,18 @@ export default function App() {
   const [promptData, setPromptData] = useState(null); // { title, value, ip }
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(1);
+  const completeOnboarding = () => {
+    setAppSettings(prev => {
+      const updated = { ...prev, ONBOARDING_COMPLETE: true };
+      fetch(`${API_BASE}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: updated })
+      }).catch(err => console.error("Failed to save onboarding settings:", err));
+      return updated;
+    });
+    setShowOnboarding(false);
+  };
   const [bannerDismissed, setBannerDismissed] = useState(() => localStorage.getItem("burst_banner_dismissed") === "true");
 
   // Clipboard monitor toast
@@ -618,17 +630,6 @@ export default function App() {
   const [batchError, setBatchError] = useState(null);
   const [batchSearchQuery, setBatchSearchQuery] = useState("");
 
-  // yt-dlp state
-  const [ytInfo, setYtInfo] = useState(null);       // null | false | { supported, title, thumbnail, ... }
-  const [ytLoading, setYtLoading] = useState(false); // spinner while fetching info
-  const [ytFormat, setYtFormat] = useState("");      // currently selected format_id
-  const [ytStreamable, setYtStreamable] = useState(false); // Play-while-downloading sequential mode
-  const ytDebounceRef = useRef(null);
-  const ytCheckedUrlRef = useRef("");               // avoid duplicate fetches
-
-  // ffmpeg auto-download progress toast
-  // null | { status: 'downloading'|'done'|'error', percent: number, error: string }
-  const [ffmpegToast, setFfmpegToast] = useState(null);
 
   const jobSocketsRef = useRef({});
   const dragCounter = useRef(0);
@@ -792,17 +793,6 @@ export default function App() {
         }
         setActiveTab("active");
         fetch(`${API_BASE}/schedules`).then(r => r.json()).then(d => setSchedules(d.schedules || [])).catch(() => {});
-      } else if (msg.type === "ffmpeg_progress") {
-        const { status, percent, error } = msg.data;
-        if (status === "downloading") {
-          setFfmpegToast({ status: "downloading", percent: percent || 0 });
-        } else if (status === "done") {
-          setFfmpegToast({ status: "done", percent: 100 });
-          setTimeout(() => setFfmpegToast(null), 2500);
-        } else if (status === "error") {
-          setFfmpegToast({ status: "error", error: error || "Download failed" });
-          setTimeout(() => setFfmpegToast(null), 6000);
-        }
       }
     };
 
@@ -829,13 +819,6 @@ export default function App() {
 
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
-
-    // Reset yt-dlp picker if URL is cleared or changed
-    if (!newUrl.trim()) {
-      setYtInfo(null);
-      setYtLoading(false);
-      ytCheckedUrlRef.current = "";
-    }
 
     const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent");
     const getBaseDir = () => {
@@ -866,90 +849,6 @@ export default function App() {
     setOutputPath(safeDir + filename);
   };
 
-  // yt-dlp: debounced URL detection (600ms)
-  useEffect(() => {
-    if (ytDebounceRef.current) clearTimeout(ytDebounceRef.current);
-
-    const trimmed = url.trim();
-    if (!trimmed || trimmed.startsWith("magnet:") || trimmed.endsWith(".torrent")) {
-      setYtInfo(null);
-      setYtLoading(false);
-      return;
-    }
-
-    // Skip if already checked this URL
-    if (ytCheckedUrlRef.current === trimmed) return;
-
-    ytDebounceRef.current = setTimeout(async () => {
-      ytCheckedUrlRef.current = trimmed;
-      setYtLoading(true);
-      setYtInfo(null);
-      try {
-        const resp = await fetch(`${API_BASE}/yt-dlp/info?url=${encodeURIComponent(trimmed)}`);
-        const data = await resp.json();
-        if (data.supported) {
-          setYtInfo(data);
-          setUrlTypeHint(null); // dismiss any stale "webpage" banner
-          // Default: prefer 1080p, then second item, then first
-          const fmts = data.formats || [];
-          const prefer1080 = fmts.find(f => f.label === '1080p');
-          const defaultFmt = prefer1080 || fmts[1] || fmts[0];
-          setYtFormat(defaultFmt?.id || "");
-        } else {
-          setYtInfo(false); // explicitly not supported
-        }
-      } catch {
-        setYtInfo(false);
-      } finally {
-        setYtLoading(false);
-      }
-    }, 600);
-
-    return () => { if (ytDebounceRef.current) clearTimeout(ytDebounceRef.current); };
-  }, [url]);
-
-  const handleYtDlpDownload = async () => {
-    if (!ytInfo || !ytFormat) return;
-    const cleanUrl = url.trim();
-    const selectedFmt = ytInfo.formats?.find(f => f.id === ytFormat);
-    const label = selectedFmt?.label || ytFormat;
-
-    // Always send the download directory (never a file path) to the backend.
-    // The backend appends %(title)s.%(ext)s itself.
-    const dlDir = (() => {
-      const bd = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
-      return bd.endsWith("/") || bd.endsWith("\\") ? bd : bd + "/";
-    })();
-
-    // Switch to Active tab immediately so user sees the job appear
-    setUrl("");
-    setYtInfo(null);
-    ytCheckedUrlRef.current = "";
-    setActiveTab("active");
-
-    const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
-
-    const selectedFormatObj = ytInfo?.formats?.find(f => f.id === ytFormat);
-    const targetFormatId = (ytStreamable && selectedFormatObj?.progressive_id) 
-      ? selectedFormatObj.progressive_id 
-      : ytFormat;
-
-    try {
-      const resp = await fetch(`${API_BASE}/yt-dlp/download`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl, format_id: targetFormatId, output_path: dlDir, label, interface_ips: effectiveIps, streamable: ytStreamable })
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || "Failed to start");
-      if (data.job_id) {
-        setActiveJobs(prev => prev.includes(data.job_id) ? prev : [...prev, data.job_id]);
-      }
-      setYtStreamable(false);
-    } catch (err) {
-      setToast(friendlyError(err.message));
-    }
-  };
 
   const handleBrowsePath = async (callback) => {
     try {
@@ -1089,12 +988,6 @@ export default function App() {
     const targetUrl = url.trim();
     if (!targetUrl) return;
 
-    // If the yt-dlp quality picker is active, route straight to it — no url-type check needed
-    if (ytInfo && ytInfo.supported) {
-      handleYtDlpDownload();
-      return;
-    }
-
     const isTorrent = targetUrl.startsWith("magnet:?") || targetUrl.endsWith(".torrent");
 
     if (!isTorrent) {
@@ -1111,6 +1004,7 @@ export default function App() {
       } catch {
         setUrlTypeHint(null);
       }
+
 
       // Normal file download — analyze first
       setDownloadBtnState("checking");
@@ -1548,7 +1442,10 @@ export default function App() {
                 <div className="extension-grid">
                   <button
                     className="extension-btn chrome"
-                    onClick={() => window.open('https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd', '_blank')}
+                    onClick={() => {
+                      window.open('https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd', '_blank');
+                      completeOnboarding();
+                    }}
                   >
                     <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
                       {CHROME_SVG}
@@ -1557,7 +1454,10 @@ export default function App() {
                   </button>
                   <button
                     className="extension-btn firefox"
-                    onClick={() => window.open('https://addons.mozilla.org/firefox/addon/burst-download-manager', '_blank')}
+                    onClick={() => {
+                      window.open('https://addons.mozilla.org/firefox/addon/burst-download-manager', '_blank');
+                      completeOnboarding();
+                    }}
                   >
                     <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
                       {FIREFOX_SVG}
@@ -1567,14 +1467,7 @@ export default function App() {
                 </div>
                 <button
                   className="onboarding-skip"
-                  onClick={async () => {
-                    await fetch(`${API_BASE}/settings`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ settings: { ...appSettings, ONBOARDING_COMPLETE: true } })
-                    });
-                    setShowOnboarding(false);
-                  }}
+                  onClick={completeOnboarding}
                 >
                   Skip and start using Burst
                 </button>
@@ -1896,131 +1789,13 @@ export default function App() {
                       />
                       <button
                         className="btn-primary"
-                        onClick={ytInfo ? handleYtDlpDownload : handleDownloadClick}
-                        disabled={downloadBtnState === "checking" || ytLoading}
+                        onClick={handleDownloadClick}
+                        disabled={downloadBtnState === "checking"}
                       >
-                        {(downloadBtnState === "checking" || ytLoading) ? <div className="spinner-small" /> : <Download size={18} />}
-                        {(downloadBtnState === "checking" || ytLoading) ? "Checking..." : "Download"}
+                        {downloadBtnState === "checking" ? <div className="spinner-small" /> : <Download size={18} />}
+                        {downloadBtnState === "checking" ? "Checking..." : "Download"}
                       </button>
                     </div>
-
-                    {/* yt-dlp quality picker — shown when a video URL is detected */}
-                    {ytInfo && ytInfo.supported && (() => {
-                      const progResValues = ytInfo.formats
-                        .filter(f => (f.has_audio || !!f.progressive_url) && f.label !== 'Audio only')
-                        .map(f => parseInt(f.label) || 0);
-                      const maxProgressiveRes = progResValues.length ? Math.max(...progResValues) : 360;
-
-                      return (
-                        <div style={{
-                          display: 'flex', flexDirection: 'column', gap: '8px',
-                          background: 'var(--surface)', border: '1px solid var(--border)',
-                          borderRadius: '8px', padding: '12px', marginTop: '8px',
-                          animation: 'slideIn 0.18s ease'
-                        }}>
-                          {/* Row 1: Details and Controls */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                            {/* Thumbnail */}
-                            {ytInfo.thumbnail && (
-                              <img
-                                src={ytInfo.thumbnail}
-                                alt="thumbnail"
-                                style={{ width: '80px', height: '45px', objectFit: 'cover', borderRadius: '5px', flexShrink: 0 }}
-                                onError={e => e.target.style.display = 'none'}
-                              />
-                            )}
-                            {/* Title + duration */}
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{
-                                fontSize: '13px', fontWeight: 600, color: 'var(--text)',
-                                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                              }}>
-                                {ytInfo.title}
-                              </div>
-                              {ytInfo.duration_str && (
-                                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                  {ytInfo.duration_str}
-                                </div>
-                              )}
-                            </div>
-                            {/* Format dropdown */}
-                            <select
-                              value={ytFormat}
-                              onChange={e => {
-                                const selectedFmt = ytInfo.formats.find(f => f.id === e.target.value);
-                                if (selectedFmt && !selectedFmt.has_audio && !selectedFmt.progressive_url) {
-                                  setYtStreamable(false); // disable streamable if user selects a DASH format
-                                }
-                                setYtFormat(e.target.value);
-                              }}
-                              style={{
-                                background: 'var(--surface-2)', border: '1px solid var(--border)',
-                                borderRadius: '6px', color: 'var(--text)', fontSize: '12px',
-                                padding: '5px 8px', cursor: 'pointer', flexShrink: 0,
-                                outline: 'none',
-                              }}
-                            >
-                              {ytInfo.formats.map(f => {
-                                const isStreamable = f.has_audio || !!f.progressive_url;
-                                if (ytStreamable && !isStreamable) return null; // hide non-streamable formats
-                                return (
-                                  <option key={f.id} value={f.id}>
-                                    {f.label === 'Audio only' ? `♫ Audio only` : `▶ ${f.label}`}
-                                  </option>
-                                );
-                              })}
-                            </select>
-                            {/* Download */}
-                            <button
-                              className="btn-primary"
-                              onClick={handleYtDlpDownload}
-                              style={{ flexShrink: 0, padding: '7px 16px', fontSize: '13px' }}
-                            >
-                              <Download size={14} /> Download
-                            </button>
-                            {/* Dismiss */}
-                            <button
-                              onClick={() => { setYtInfo(null); ytCheckedUrlRef.current = ""; }}
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', flexShrink: 0 }}
-                              title="Dismiss"
-                            >
-                              <X size={14} />
-                            </button>
-                          </div>
-                          
-                          {/* Row 2: Streamable Options */}
-                          <div style={{
-                            display: 'flex', alignItems: 'center', gap: '8px', 
-                            borderTop: '1px solid var(--border)', paddingTop: '8px',
-                            marginTop: '4px'
-                          }}>
-                            <label style={{
-                              display: 'flex', alignItems: 'center', gap: '6px',
-                              cursor: 'pointer', fontSize: '11px', color: 'var(--text-muted)',
-                              userSelect: 'none'
-                            }}>
-                              <input
-                                type="checkbox"
-                                checked={ytStreamable}
-                                onChange={e => {
-                                  const checked = e.target.checked;
-                                  setYtStreamable(checked);
-                                  if (checked) {
-                                    // Switch to a progressive/combined format that has audio (720p or lower combined format)
-                                    const progFormat = ytInfo.formats.find(f => (f.has_audio || !!f.progressive_url) && f.label !== 'Audio only');
-                                    if (progFormat) {
-                                      setYtFormat(progFormat.id);
-                                    }
-                                  }
-                                }}
-                                style={{ accentColor: 'var(--accent)' }}
-                              />
-                              <span>Watch while downloading (Play instantly during download — {maxProgressiveRes}p max)</span>
-                            </label>
-                          </div>
-                        </div>
-                      );
-                    })()}
 
                     <div className="path-row">
                       <button className="browse-btn-icon" onClick={async () => {
@@ -2047,7 +1822,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    {urlTypeHint && urlTypeHint.type === "html_page" && !ytInfo && (
+                    {urlTypeHint && urlTypeHint.type === "html_page" && (
                       <div style={{
                         marginTop: '10px',
                         padding: '10px 12px',
@@ -2724,7 +2499,7 @@ export default function App() {
                   })}
 
                   <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
-                    Burst v1.2.1
+                    Burst v1.3.0
                   </div>
                 </div>
               )}
@@ -2739,46 +2514,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ffmpeg auto-download progress toast */}
-      {ffmpegToast && (
-        <div style={{
-          position: 'fixed',
-          bottom: toast ? '70px' : '24px',
-          right: '24px',
-          background: 'var(--surface)',
-          border: '1px solid var(--border)',
-          borderRadius: '10px',
-          padding: '12px 16px',
-          fontSize: '13px',
-          zIndex: 9998,
-          minWidth: '260px',
-          maxWidth: '320px',
-          boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
-          animation: 'slideIn 0.2s ease',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: ffmpegToast.status === 'downloading' ? '8px' : '0' }}>
-            {ffmpegToast.status === 'downloading' && <Loader size={13} className="spin-anim" style={{ color: 'var(--accent)', flexShrink: 0 }} />}
-            {ffmpegToast.status === 'done' && <CheckCircle2 size={13} style={{ color: '#22c55e', flexShrink: 0 }} />}
-            {ffmpegToast.status === 'error' && <AlertTriangle size={13} style={{ color: '#ef4444', flexShrink: 0 }} />}
-            <span style={{ color: 'var(--text)', fontWeight: 500 }}>
-              {ffmpegToast.status === 'downloading' && `Downloading ffmpeg… ${ffmpegToast.percent}%`}
-              {ffmpegToast.status === 'done' && 'ffmpeg ready ✓'}
-              {ffmpegToast.status === 'error' && `ffmpeg failed: ${ffmpegToast.error}`}
-            </span>
-          </div>
-          {ffmpegToast.status === 'downloading' && (
-            <div style={{ height: '3px', background: 'var(--border)', borderRadius: '2px', overflow: 'hidden' }}>
-              <div style={{
-                height: '100%',
-                width: `${ffmpegToast.percent}%`,
-                background: 'var(--accent)',
-                borderRadius: '2px',
-                transition: 'width 0.3s ease',
-              }} />
-            </div>
-          )}
-        </div>
-      )}
+
 
 
 
