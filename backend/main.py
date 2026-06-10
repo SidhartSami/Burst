@@ -1332,11 +1332,17 @@ if __name__ == "__main__":
     import sys
     import urllib.request
 
-    # Parse headless argument
+    # Parse headless / minimized argument
+    # Both flags suppress the initial webview window creation (hidden=True).
+    # Since Burst starts the system tray icon in either case, --minimized and
+    # --headless behave identically in practice to boot the app silently to tray.
     headless = False
     if "--headless" in sys.argv:
         headless = True
         sys.argv.remove("--headless")
+    if "--minimized" in sys.argv:
+        headless = True
+        sys.argv.remove("--minimized")
 
     # 0. Single instance check using socket (more reliable than HTTP timeout)
     import socket
