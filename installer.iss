@@ -77,9 +77,12 @@ Name: "{group}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.Downl
 Name: "{commondesktop}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.DownloadManager"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Burst"" dir=in action=allow program=""{app}\Burst.exe"" enable=yes"; Flags: runhidden
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Burst"" dir=out action=allow program=""{app}\Burst.exe"" enable=yes"; Flags: runhidden
 Filename: "{app}\Burst.exe"; Description: "{cm:LaunchProgram,Burst}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Burst"""; Flags: runhidden
 
 
 [Code]

@@ -1,14 +1,42 @@
+from __future__ import annotations
 import asyncio
-import libtorrent as lt
 import time
 import uuid
 import socket
+import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
+
+lt = None
+
+def _init_lt():
+    global lt
+    if lt is None:
+        import libtorrent as _lt
+        lt = _lt
 
 active_torrents: Dict[str, "TorrentJob"] = {}
 
 DHT_STATE_FILE = Path("dht_state.dat")
+
+# Characters illegal in Windows file/directory names
+_WINDOWS_ILLEGAL = re.compile(r'[<>:"/|?*]')
+
+def _sanitize_path(path: str) -> str:
+    """Sanitize a file-system path — replace Windows-illegal characters in each
+    name component (not the drive letter or path separators)."""
+    drive, rest = os.path.splitdrive(path)
+    # Split on both kinds of separator, sanitize each part, then rejoin
+    parts = re.split(r'[\\/]', rest)
+    clean = []
+    for part in parts:
+        if part:
+            part = _WINDOWS_ILLEGAL.sub('-', part)  # replace illegal chars
+            part = part.strip('. ')                  # strip leading/trailing dots/spaces
+            part = part or '_'                       # don't leave empty components
+        clean.append(part)
+    return drive + os.sep.join(clean)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -20,9 +48,9 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 def _make_settings(ip: Optional[str] = None) -> dict:
+    _init_lt()
     base = {
         "user_agent": "qBittorrent/4.6.3",
-        "peer_fingerprint": f"-qB4630-{str(uuid.uuid4())[:6]}", # Unique per session
         "enable_dht": True,
         "enable_lsd": True,
         "enable_natpmp": True,
@@ -43,6 +71,7 @@ def _make_settings(ip: Optional[str] = None) -> dict:
         "min_announce_interval": 3,
         "announce_to_all_tiers": True,
         "announce_to_all_trackers": True,
+        "disk_io_write_mode": int(lt.io_buffer_mode_t.disable_os_cache),
     }
     if ip:
         # IPv6 requires brackets in listen_interfaces
@@ -50,12 +79,31 @@ def _make_settings(ip: Optional[str] = None) -> dict:
         base["listen_interfaces"] = f"{listen_ip}:{_find_free_port()}"
         base["outgoing_interfaces"] = ip
     else:
-        base["listen_interfaces"] = f"0.0.0.0:{_find_free_port()}"
+        # Fixed single port for meta session — only one runs at a time,
+        # and a well-known port avoids firewall and DHT bootstrap issues.
+        base["listen_interfaces"] = "0.0.0.0:6881"
     return base
+
+
+def _bootstrap_dht(ses: lt.session):
+    _init_lt()
+    routers = [
+        ("router.bittorrent.com", 6881),
+        ("router.utorrent.com", 6881),
+        ("dht.transmissionbt.com", 6881),
+        ("router.bitcomet.com", 6881),
+        ("dht.libtorrent.org", 25401),
+    ]
+    for host, port in routers:
+        try:
+            ses.add_dht_router(host, port)
+        except Exception as e:
+            print(f"[TORRENT] Error adding DHT router {host}:{port} - {e}")
 
 
 def _save_dht_state(ses: lt.session):
     """Persist DHT routing table so next session bootstraps instantly."""
+    _init_lt()
     try:
         state = ses.save_state()
         DHT_STATE_FILE.write_bytes(lt.bencode(state))
@@ -65,6 +113,7 @@ def _save_dht_state(ses: lt.session):
 
 def _load_dht_state(ses: lt.session):
     """Load persisted DHT routing table if available."""
+    _init_lt()
     try:
         if DHT_STATE_FILE.exists():
             state = lt.bdecode(DHT_STATE_FILE.read_bytes())
@@ -77,6 +126,11 @@ def _load_dht_state(ses: lt.session):
 # HTTPS/HTTP trackers on port 443/80 — ISP cannot block these
 # UDP trackers included as fallback for users without ISP restrictions
 TRACKERS = [
+    # Official Linux Distro Trackers (for bare distro ISO magnets)
+    "http://torrent.ubuntu.com:6969/announce",
+    "http://ipv6.torrent.ubuntu.com:6969/announce",
+    "http://bttracker.debian.org:6969/announce",
+
     # Robust HTTPS trackers
     "https://tracker.bt-hash.com:443/announce",
     "https://tracker.tamersunion.org:443/announce",
@@ -104,6 +158,7 @@ TRACKERS = [
 
 
 def _add_trackers(handle):
+    _init_lt()
     for tier, url in enumerate(TRACKERS):
         handle.add_tracker({"url": url, "tier": tier})
 
@@ -206,6 +261,12 @@ class TorrentJob:
 
         print(f"[TORRENT] Dynamically adding interface {ip}")
         ses = lt.session(_make_settings(ip))
+        _bootstrap_dht(ses)
+        ses.set_alert_mask(
+            lt.alert.category_t.error_notification |
+            lt.alert.category_t.tracker_notification |
+            lt.alert.category_t.peer_notification
+        )
         atp = lt.add_torrent_params()
         atp.ti = lt.torrent_info(self._torrent_info)
         atp.save_path = self.output_path
@@ -317,6 +378,51 @@ async def start_torrent_download(
     job_id: Optional[str] = None,
     resume_data: Optional[dict] = None,
 ) -> TorrentJob:
+    # Normalize local torrent file path if it is a file URI or base64 data, or download remote torrent files
+    _init_lt()
+    normalized_uri = magnet_uri.strip()
+    if normalized_uri.startswith("file:///"):
+        normalized_uri = normalized_uri[8:]
+    elif normalized_uri.startswith("file://"):
+        normalized_uri = normalized_uri[7:]
+    elif normalized_uri.startswith("base64:"):
+        try:
+            import base64
+            import tempfile
+            parts = normalized_uri.split(":", 2)
+            filename = parts[1]
+            b64_data = parts[2]
+            temp_dir = tempfile.gettempdir()
+            temp_path = os.path.join(temp_dir, filename)
+            with open(temp_path, "wb") as temp_file:
+                temp_file.write(base64.b64decode(b64_data))
+            normalized_uri = temp_path
+        except Exception as e:
+            print(f"[TORRENT] Failed to decode base64 torrent: {e}")
+    elif normalized_uri.startswith(("http://", "https://")) and (normalized_uri.endswith(".torrent") or ".torrent" in normalized_uri.split("?")[0]):
+        try:
+            import requests
+            import tempfile
+            r = requests.get(normalized_uri, timeout=15, verify=False)
+            r.raise_for_status()
+            filename = normalized_uri.split("/")[-1].split("?")[0] or "download.torrent"
+            if not filename.endswith(".torrent"):
+                filename += ".torrent"
+            temp_dir = tempfile.gettempdir()
+            temp_path = os.path.join(temp_dir, filename)
+            with open(temp_path, "wb") as temp_file:
+                temp_file.write(r.content)
+            normalized_uri = temp_path
+        except Exception as e:
+            print(f"[TORRENT] Failed to download remote torrent file: {e}")
+    
+    import urllib.parse
+    normalized_uri = urllib.parse.unquote(normalized_uri)
+    if normalized_uri.endswith(".torrent") or os.path.exists(normalized_uri):
+        normalized_uri = os.path.normpath(normalized_uri)
+        
+    magnet_uri = normalized_uri
+
     # 1. Prevent duplicate jobs if the exact same torrent is already active/paused
     if not job_id:
         for existing_job in active_torrents.values():
@@ -326,7 +432,7 @@ async def start_torrent_download(
                 return existing_job
 
     # 2. Path collision handling — only for NEW downloads, not for loaded resumes
-    final_path = output_path
+    final_path = _sanitize_path(output_path)   # strip Windows-illegal chars (colons etc.)
     if not job_id:
         active_paths = [j.output_path for j in active_torrents.values() if j.status not in ("completed", "failed")]
         if final_path in active_paths:
@@ -357,9 +463,13 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
         print("[TORRENT] Phase 1: fetching metadata with unbound session…")
 
         meta_ses = lt.session(_make_settings(ip=None))
-        _load_dht_state(meta_ses)  # warm DHT from previous session
-        # DHT bootstrap nodes are set via dht_bootstrap_nodes in _make_settings()
-        # add_dht_router() is deprecated in libtorrent 2.0 and has no effect.
+        meta_ses.set_alert_mask(
+            lt.alert.category_t.error_notification |
+            lt.alert.category_t.tracker_notification |
+            lt.alert.category_t.peer_notification
+        )
+        _load_dht_state(meta_ses)  # warm DHT routing table before bootstrap calls
+        _bootstrap_dht(meta_ses)   # explicitly ping each router so routing table populates fast
 
         job._meta_session = meta_ses
 
@@ -370,6 +480,12 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
         meta_handle = meta_ses.add_torrent(params)
         job._meta_handle = meta_handle
         _add_trackers(meta_handle)
+        # Force immediate announce to all trackers — without this, libtorrent
+        # may wait up to 30 minutes for the first announce cycle.
+        try:
+            meta_handle.force_reannounce()
+        except Exception as e:
+            print(f"[TORRENT] force_reannounce error (harmless): {e}")
 
         METADATA_TIMEOUT = 180  # 3 min — longer timeout for cold DHT + ISP UDP blocks
         start = time.time()
@@ -377,6 +493,14 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
         while job._running:
             await asyncio.sleep(1)
             elapsed = time.time() - start
+
+            # Pop and log meta session alerts
+            try:
+                alerts = meta_ses.pop_alerts()
+                for alert in alerts:
+                    print(f"[TORRENT META ALERT] {alert.message()}")
+            except Exception as e:
+                print(f"[TORRENT] Error popping meta alerts: {e}")
 
             try:
                 s = meta_handle.status()
@@ -404,17 +528,23 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
             if int(elapsed) % 10 == 0 and elapsed >= 10:
                 dht_nodes = 0
+                dht_global_nodes = 0
                 try:
-                    dht_nodes = meta_ses.dht_status().nodes
+                    dht_st = meta_ses.dht_status()
+                    dht_nodes = dht_st.nodes
+                    dht_global_nodes = dht_st.dht_global_nodes
                 except:
                     pass
                 print(
                     f"[TORRENT] Waiting for metadata… {elapsed:.0f}s "
-                    f"state={s.state} peers={s.num_peers} dht_nodes={dht_nodes}"
+                    f"state={s.state} peers={s.num_peers} "
+                    f"dht_nodes={dht_nodes} dht_global={dht_global_nodes}"
                 )
-                for t in meta_handle.trackers()[:4]:
+                for t in meta_handle.trackers():
+                    last_err = getattr(t, 'last_error', None)
+                    err_str = str(last_err) if last_err else "none"
                     msg = t.get("message", "") or "no response yet"
-                    print(f"  {t['url']}: {msg}")
+                    print(f"  tracker: {t['url']}  msg={msg!r}  last_error={err_str}")
 
         if not job._running:
             return
@@ -440,6 +570,12 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     for ip in list(job.interface_ips):
         try:
             ses = lt.session(_make_settings(ip=ip))
+            _bootstrap_dht(ses)
+            ses.set_alert_mask(
+                lt.alert.category_t.error_notification |
+                lt.alert.category_t.tracker_notification |
+                lt.alert.category_t.peer_notification
+            )
             atp = lt.add_torrent_params()
             atp.ti = lt.torrent_info(ti)
             atp.save_path = job.output_path
@@ -452,7 +588,11 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
             h = ses.add_torrent(atp)
             _add_trackers(h)
-
+            try:
+                h.force_reannounce()
+            except Exception as e:
+                print(f"[TORRENT] force_reannounce error on Phase 2 (harmless): {e}")
+ 
             job.sessions.append((ip, ses))
             job.handles.append((ip, h))
             print(f"[TORRENT] Session started for {ip}")
@@ -471,6 +611,8 @@ async def _monitor_download(job: TorrentJob):
         int(lt.torrent_status.states.finished),
     }
 
+    from interfaces import get_active_interfaces
+
     while job._running:
         await asyncio.sleep(1)
 
@@ -480,9 +622,44 @@ async def _monitor_download(job: TorrentJob):
                 job.speeds[ip] = 0
             continue
 
+        # 1. Pop and log alerts from active sessions
+        for ip, ses in list(job.sessions):
+            try:
+                alerts = ses.pop_alerts()
+                for alert in alerts:
+                    print(f"[TORRENT ALERT] [{ip}] {alert.message()}")
+            except Exception as e:
+                print(f"[TORRENT] Error popping alerts for {ip}: {e}")
+
+        # 2. Check if bound interfaces are still active
+        active_ips = {iface.ip_address for iface in get_active_interfaces()}
+        for ip, h in list(job.handles):
+            if ip not in active_ips:
+                print(f"[TORRENT] WARNING: Bound interface {ip} is no longer active. Dropping session.")
+                # Find and clean up the session
+                ses_idx = next((i for i, (s_ip, _) in enumerate(job.sessions) if s_ip == ip), -1)
+                if ses_idx != -1:
+                    _, ses = job.sessions.pop(ses_idx)
+                    try:
+                        ses.remove_torrent(h)
+                    except Exception as e:
+                        print(f"[TORRENT] Error removing torrent from session {ip}: {e}")
+                # Remove handle
+                h_idx = next((i for i, (h_ip, _) in enumerate(job.handles) if h_ip == ip), -1)
+                if h_idx != -1:
+                    job.handles.pop(h_idx)
+                
+                # Remove from stats mapping
+                job.speeds.pop(ip, None)
+                job.peers_per_interface.pop(ip, None)
+                if ip in job.interface_ips:
+                    job.interface_ips.remove(ip)
+
         total_speed = 0
-        max_progress = 0.0
-        max_downloaded = 0
+        # Seed from last-known values so a transient error or empty poll cycle
+        # can never zero-out previously reported progress/downloaded bytes.
+        max_progress = job.progress
+        max_downloaded = job.downloaded
         total_seeders = 0
         total_peers = 0
         all_finished = True
