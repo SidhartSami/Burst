@@ -60,54 +60,49 @@ def apply_firewall_rules():
 
 def apply_autostart_rules(enabled: bool) -> bool:
     """
-    Creates or removes a Windows Task Scheduler task to launch Burst on logon.
-    Task Scheduler is used because it allows the UAC-elevated app to start
-    silently on boot without showing a UAC prompt.
+    Registry-based autostart on boot for Burst under HKCU Run.
     """
-    if not is_admin():
-        print("Skipping autostart task setup (not running as Administrator).")
+    import sys
+    import os
+    import winreg
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    key_name = "Burst"
+
+    try:
+        # Open key with write permissions
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
+    except OSError as e:
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+        except Exception as create_err:
+            print(f"[autostart] Failed to open/create registry key: {create_err}")
+            return False
+
+    try:
+        if enabled:
+            # Determine the correct path and arguments based on whether the app is compiled (frozen)
+            is_packaged = getattr(sys, 'frozen', False)
+            if is_packaged:
+                exec_command = f'"{sys.executable}" --minimized'
+            else:
+                main_script = os.path.abspath(sys.argv[0])
+                exec_command = f'"{sys.executable}" "{main_script}" --minimized'
+
+            winreg.SetValueEx(key, key_name, 0, winreg.REG_SZ, exec_command)
+            print(f"[autostart] Registry autostart key set: {exec_command}")
+        else:
+            try:
+                winreg.DeleteValue(key, key_name)
+                print("[autostart] Registry autostart key deleted successfully.")
+            except FileNotFoundError:
+                # Key already deleted or doesn't exist, ignore
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception as e:
+        print(f"[autostart] Failed to apply autostart rules: {e}")
         return False
-
-    task_name = "Burst Autostart"
-    CREATE_NO_WINDOW = 0x08000000
-
-    if enabled:
-        # Determine the correct path and arguments based on whether the app is compiled (frozen)
-        is_packaged = getattr(sys, 'frozen', False)
-        if is_packaged:
-            exec_command = f'"{sys.executable}" --headless'
-        else:
-            main_script = os.path.abspath(sys.argv[0])
-            exec_command = f'"{sys.executable}" "{main_script}" --headless'
-
-        print(f"Creating Task Scheduler autostart task for: {exec_command}")
-        # schtasks /create /tn <taskname> /tr <command> /sc onlogon /rl highest /f
-        cmd = [
-            "schtasks", "/create",
-            "/tn", task_name,
-            "/tr", exec_command,
-            "/sc", "onlogon",
-            "/rl", "highest",
-            "/f"
-        ]
-        res = subprocess.run(cmd, check=False, creationflags=CREATE_NO_WINDOW)
-        if res.returncode == 0:
-            print("Autostart task created/updated successfully.")
-            return True
-        else:
-            print(f"Failed to create autostart task. Exit code: {res.returncode}")
-            return False
-    else:
-        print("Removing Task Scheduler autostart task.")
-        # schtasks /delete /tn <taskname> /f
-        cmd = ["schtasks", "/delete", "/tn", task_name, "/f"]
-        res = subprocess.run(cmd, check=False, creationflags=CREATE_NO_WINDOW)
-        if res.returncode == 0:
-            print("Autostart task removed successfully.")
-            return True
-        else:
-            print(f"Failed to remove autostart task (it may not exist). Exit code: {res.returncode}")
-            return False
 
 def setup_native_host():
     """

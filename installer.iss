@@ -68,18 +68,19 @@ Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Burst.e
 Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: expandsz; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath(ExpandConstant('{app}'))
 
+; -- HKCU Autostart on Boot --
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Burst"; ValueData: """{app}\Burst.exe"" --minimized"; Flags: uninsdeletevalue
+
+
 [Icons]
 Name: "{group}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.DownloadManager"
 Name: "{commondesktop}\Burst"; Filename: "{app}\Burst.exe"; AppUserModelID: "Burst.DownloadManager"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Burst.exe"; Description: "{cm:LaunchProgram,Burst}"; Flags: nowait postinstall skipifsilent runascurrentuser
-; Register Burst as a Task Scheduler logon task (elevated, runs --headless silently on boot)
-Filename: "schtasks"; Parameters: "/create /tn ""Burst Autostart"" /tr ""\""{app}\Burst.exe\"" --headless"" /sc onlogon /rl highest /f"; Flags: runhidden
 
 [UninstallRun]
-; Remove the Task Scheduler autostart task on uninstall
-Filename: "schtasks"; Parameters: "/delete /tn ""Burst Autostart"" /f"; Flags: runhidden; RunOnceId: "RemoveBurstAutostart"
+
 
 [Code]
 function EscapeJsonPath(Path: String): String;
