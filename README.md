@@ -5,7 +5,7 @@
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
   [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-  [![Version](https://img.shields.io/badge/version-1.3.1-orange.svg)](https://github.com/SidhartSami/Burst/releases)
+  [![Version](https://img.shields.io/badge/version-1.1.2-orange.svg)](https://github.com/SidhartSami/Burst/releases)
 </div>
 
 ---
@@ -34,7 +34,7 @@
 
 ### Installation
 1. Go to the [Releases](https://github.com/SidhartSami/Burst/releases) page.
-2. Download and run `Burst_Setup_v1.3.1.exe`.
+2. Download and run `Burst_Setup_v1.1.2.exe`.
 3. Complete the onboarding screen to authorize extension integration.
 
 ### Browser Extension
