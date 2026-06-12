@@ -18,7 +18,14 @@ def _init_lt():
 
 active_torrents: Dict[str, "TorrentJob"] = {}
 
-DHT_STATE_FILE = Path("dht_state.dat")
+import sys
+if getattr(sys, 'frozen', False):
+    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+    DHT_DIR = Path(APPDATA) / "Burst"
+    DHT_DIR.mkdir(parents=True, exist_ok=True)
+    DHT_STATE_FILE = DHT_DIR / "dht_state.dat"
+else:
+    DHT_STATE_FILE = Path("dht_state.dat")
 
 # Characters illegal in Windows file/directory names
 _WINDOWS_ILLEGAL = re.compile(r'[<>:"/|?*]')

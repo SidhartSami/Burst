@@ -15,7 +15,15 @@ from typing import Any, Dict
 # ---------------------------------------------------------------------------
 # File paths
 # ---------------------------------------------------------------------------
-SETTINGS_FILE = Path(__file__).parent / "burst_settings.json"
+import sys
+if getattr(sys, 'frozen', False):
+    import os
+    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+    SETTINGS_DIR = Path(APPDATA) / "Burst"
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE = SETTINGS_DIR / "burst_settings.json"
+else:
+    SETTINGS_FILE = Path(__file__).parent / "burst_settings.json"
 
 # ---------------------------------------------------------------------------
 # Chunk sizing
@@ -66,7 +74,7 @@ HTTP_HANDLER_SIZE_THRESHOLD: int = 50 * 1024 * 1024   # 50 MB
 # ---------------------------------------------------------------------------
 # App version
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +103,7 @@ _DEFAULTS: Dict[str, Any] = {
     "THEME_MODE": "system",
     "START_ON_BOOT": True,
     "ONBOARDING_COMPLETE": False,
-    "CLIPBOARD_MONITOR_ENABLED": False,
+    "CLIPBOARD_MONITOR_ENABLED": True,
 }
 
 

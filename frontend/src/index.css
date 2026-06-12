@@ -832,6 +832,19 @@ input[type=number] {
   border-color: var(--accent);
 }
 
+.schedule-browse-btn {
+  background: var(--accent) !important;
+  color: white !important;
+  border: none !important;
+  height: auto !important;
+  width: 38px !important;
+  border-radius: 6px !important;
+}
+
+.schedule-browse-btn:hover {
+  background: var(--accent-hover) !important;
+}
+
 .recent-completed-section {
   margin-top: 32px;
   opacity: 0.8;

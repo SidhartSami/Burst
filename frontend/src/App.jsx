@@ -41,35 +41,27 @@ const API_BASE = (window.location.port === "5173" || window.location.port === "4
 const HISTORY_KEY = "burst_history";
 
 const CHROME_SVG = (
-  <svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px"
-    viewBox="0 0 512 512">
-  <path fill="#FFFFFF" d="M255.73,383.71c70.3,0,127.3-56.99,127.3-127.3s-56.99-127.3-127.3-127.3s-127.3,56.99-127.3,127.3
-    S185.42,383.71,255.73,383.71z"/>
-  <linearGradient id="SVGID_1_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8515.121" cx="-7907.187">
-    <stop  offset="0" style={{stopColor:"#ffbd4f"}}/>
-    <stop  offset="1" style={{stopColor:"#ff980e"}}/>
-  </linearGradient>
-  <path fill="url(#SVGID_1_)" d="M145.48,320.08L35.26,129.17c-22.35,38.7-34.12,82.6-34.12,127.29s11.76,88.59,34.11,127.29
-    c22.35,38.7,54.49,70.83,93.2,93.17c38.71,22.34,82.61,34.09,127.3,34.08l110.22-190.92v-0.03c-11.16,19.36-27.23,35.44-46.58,46.62
-    c-19.35,11.18-41.3,17.07-63.65,17.07s-44.3-5.88-63.66-17.05C172.72,355.52,156.65,339.44,145.48,320.08z"/>
-  <linearGradient id="SVGID_2_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="80.797" cy="-8482.089" cx="-7936.711">
-    <stop  offset="0" style={{stopColor:"#fcc934"}}/>
-    <stop  offset="1" style={{stopColor:"#fbbc04"}}/>
-  </linearGradient>
-  <path fill="url(#SVGID_2_)" d="M365.96,320.08L255.74,510.99c44.69,0.01,88.59-11.75,127.29-34.1
-    c38.7-22.34,70.84-54.48,93.18-93.18c22.34-38.7,34.1-82.61,34.09-127.3c-0.01-44.69-11.78-88.59-34.14-127.28H255.72l-0.03,0.02
-    c22.35-0.01,44.31,5.86,63.66,17.03c19.36,11.17,35.43,27.24,46.61,46.59c11.18,19.35,17.06,41.31,17.06,63.66
-    C383.03,278.77,377.14,300.72,365.96,320.08L365.96,320.08z"/>
-  <path fill="#1A73E8" d="M255.73,357.21c55.66,0,100.78-45.12,100.78-100.78s-45.12-100.78-100.78-100.78
-    s-100.78,45.12-100.78,100.78S200.07,357.21,255.73,357.21z"/>
-  <linearGradient id="SVGID_3_" gradientUnits="userSpaceOnUse" gradientTransform="translate(7978.7 8523.996)" r="118.081" cy="-8535.981" cx="-7915.977">
-    <stop  offset="0" style={{stopColor:"#d93025"}}/>
-    <stop  offset="1" style={{stopColor:"#ea4335"}}/>
-  </linearGradient>
-  <path fill="url(#SVGID_3_)" d="M255.73,129.14h220.45C453.84,90.43,421.7,58.29,383,35.95C344.3,13.6,300.4,1.84,255.71,1.84
-    c-44.69,0-88.59,11.77-127.29,34.12c-38.7,22.35-70.83,54.5-93.16,93.2l110.22,190.92l0.03,0.02
-    c-11.18-19.35-17.08-41.3-17.08-63.65s5.87-44.31,17.04-63.66c11.17-19.36,27.24-35.43,46.6-46.6
-    C211.42,135.01,233.38,129.13,255.73,129.14z"/>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="100%" height="100%">
+    <defs>
+      <linearGradient id="chrome_grad_a" x1="3.2173" y1="15" x2="44.7812" y2="15" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stopColor="#d93025" />
+        <stop offset="1" stopColor="#ea4335" />
+      </linearGradient>
+      <linearGradient id="chrome_grad_b" x1="20.7219" y1="47.6791" x2="41.5039" y2="11.6837" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stopColor="#fcc934" />
+        <stop offset="1" stopColor="#fbbc04" />
+      </linearGradient>
+      <linearGradient id="chrome_grad_c" x1="26.5981" y1="46.5015" x2="5.8161" y2="10.506" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stopColor="#1e8e3e" />
+        <stop offset="1" stopColor="#34a853" />
+      </linearGradient>
+    </defs>
+    <circle cx="24" cy="23.9947" r="12" fill="#fff" />
+    <path d="M3.2154,36A24,24,0,1,0,12,3.2154,24,24,0,0,0,3.2154,36ZM34.3923,18A12,12,0,1,1,18,13.6077,12,12,0,0,1,34.3923,18Z" fill="none" />
+    <path d="M24,12H44.7812a23.9939,23.9939,0,0,0-41.5639.0029L13.6079,30l.0093-.0024A11.9852,11.9852,0,0,1,24,12Z" fill="url(#chrome_grad_a)" />
+    <circle cx="24" cy="24" r="9.5" fill="#1a73e8" />
+    <path d="M34.3913,30.0029,24.0007,48A23.994,23.994,0,0,0,44.78,12.0031H23.9989l-.0025.0093A11.985,11.985,0,0,1,34.3913,30.0029Z" fill="url(#chrome_grad_b)" />
+    <path d="M13.6086,30.0031,3.218,12.006A23.994,23.994,0,0,0,24.0025,48L34.3931,30.0029l-.0067-.0068a11.9852,11.9852,0,0,1-10.7778,7.9961l-.0008-.0006L13.6086,30.0031Z" fill="url(#chrome_grad_c)" />
   </svg>
 );
 const FIREFOX_SVG = (
@@ -2275,7 +2267,7 @@ export default function App() {
                       style={{ flex: 1 }}
                     />
                     <button
-                      className="browse-btn-icon"
+                      className="browse-btn-icon schedule-browse-btn"
                       onClick={async () => {
                         try {
                           const r = await fetch(`${API_BASE}/select-path`);

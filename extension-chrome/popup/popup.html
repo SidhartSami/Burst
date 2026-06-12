@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Burst Settings</title>
+  <title>Burst</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
@@ -15,11 +15,11 @@
     <div class="status-dot" id="statusDot"></div>
   </div>
 
-  <div class="status-label" id="statusLabel">Checking...</div>
+  <div class="status-label" id="statusLabel">Checking status...</div>
 
-  <div class="divider"></div>
+  <div class="divider" id="divider1"></div>
 
-  <div class="toggle-row">
+  <div class="toggle-row" id="toggleRow">
     <span>Intercept all downloads</span>
     <label class="switch">
       <input type="checkbox" id="interceptToggle" />
@@ -27,15 +27,18 @@
     </label>
   </div>
 
-  <div class="divider"></div>
 
-  <div class="section-label">Active Adapters (Interfaces)</div>
-  <div id="interfacesList" class="interfaces-list">
-    <div class="interface-item loading">Connecting to Burst...</div>
+
+  <div class="adapters-section" id="adaptersSection">
+    <div class="divider"></div>
+    <div class="section-label">Active adapters (interfaces)</div>
+    <div id="interfacesList" class="interfaces-list">
+      <div class="interface-item loading">Connecting to Burst...</div>
+    </div>
   </div>
 
   <div class="footer">
-    <a href="#" id="openApp">Open Burst App</a>
+    <a href="#" id="openApp" class="open-app-link">Open Burst app</a>
   </div>
 
   <script src="popup.js"></script>
