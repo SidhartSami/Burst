@@ -365,7 +365,7 @@ def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEv
     t = threading.Thread(target=bridge, daemon=True)
     t.start()
 
-app = FastAPI(title="Burst API", version="1.3.1", lifespan=lifespan)
+app = FastAPI(title="Burst API", version="1.1.2", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 event_bus: Set[WebSocket] = set()
