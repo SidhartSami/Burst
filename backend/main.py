@@ -133,6 +133,144 @@ async def history_saver_loop():
         await asyncio.sleep(1)
 
 
+# ---------------------------------------------------------------------------
+# Windows Taskbar Progress Bar Overlay (ITaskbarList3)
+# ---------------------------------------------------------------------------
+import ctypes
+from ctypes import HRESULT, c_void_p, c_ulonglong, c_int, WINFUNCTYPE, POINTER
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8)
+    ]
+
+class TaskbarProgress:
+    TBPF_NOPROGRESS = 0
+    TBPF_INDETERMINATE = 1
+    TBPF_NORMAL = 2
+    TBPF_ERROR = 4
+    TBPF_PAUSED = 8
+
+    def __init__(self):
+        self.taskbar = None
+        self.hwnd = None
+        if os.name != "nt":
+            return
+        try:
+            ctypes.windll.ole32.CoInitialize(None)
+            CLSID_TaskbarList = GUID(0x56FDF344, 0xFD6D, 0x11D0, (ctypes.c_ubyte * 8)(0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+            IID_ITaskbarList3 = GUID(0xEA1AFB91, 0x9C28, 0x4B86, (ctypes.c_ubyte * 8)(0xA6, 0xE9, 0x9E, 0x99, 0x02, 0x5D, 0x98, 0x77))
+            
+            self.taskbar = c_void_p()
+            hr = ctypes.windll.ole32.CoCreateInstance(
+                ctypes.byref(CLSID_TaskbarList),
+                None,
+                1,  # CLSCTX_INPROC_SERVER
+                ctypes.byref(IID_ITaskbarList3),
+                ctypes.byref(self.taskbar)
+            )
+            if hr != 0:
+                self.taskbar = None
+        except Exception as e:
+            print(f"[TASKBAR] Init error: {e}", flush=True)
+
+    def _get_hwnd(self):
+        if not self.hwnd:
+            global window_ref
+            if window_ref and hasattr(window_ref, "native") and window_ref.native:
+                try:
+                    self.hwnd = int(window_ref.native.Handle)
+                except Exception:
+                    pass
+            # Fallback for dev mode/closed windows
+            if not self.hwnd:
+                try:
+                    self.hwnd = ctypes.windll.user32.FindWindowW(None, "Burst")
+                except Exception:
+                    pass
+        return self.hwnd
+
+    def set_progress(self, completed: int, total: int):
+        if not self.taskbar:
+            return
+        hwnd = self._get_hwnd()
+        if not hwnd:
+            return
+        try:
+            # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
+            vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
+            func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[9]
+            prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_ulonglong, c_ulonglong)
+            func = prototype(func_ptr)
+            func(self.taskbar, hwnd, completed, total)
+        except Exception as e:
+            print(f"[TASKBAR] SetProgressValue error: {e}", flush=True)
+
+    def set_state(self, state: int):
+        if not self.taskbar:
+            return
+        hwnd = self._get_hwnd()
+        if not hwnd:
+            return
+        try:
+            # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
+            vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
+            func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[10]
+            prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_int)
+            func = prototype(func_ptr)
+            func(self.taskbar, hwnd, state)
+        except Exception as e:
+            print(f"[TASKBAR] SetProgressState error: {e}", flush=True)
+
+async def taskbar_update_loop():
+    if os.name != "nt":
+        return
+    await asyncio.sleep(2)
+    tb = TaskbarProgress()
+    while True:
+        try:
+            current_jobs = list(manager.jobs.values()) + list(active_torrents.values())
+            active_jobs = [j for j in current_jobs if j.status in ("downloading", "checking", "paused", "seeding")]
+            if not active_jobs:
+                tb.set_state(TaskbarProgress.TBPF_NOPROGRESS)
+            else:
+                total_size = 0
+                total_completed = 0
+                is_indeterminate = False
+                is_paused = False
+                for j in active_jobs:
+                    if getattr(j, "url", None) and "BURST_INTERNAL_CHECK" in j.url:
+                        continue
+                    if j.status == "paused":
+                        is_paused = True
+                    size = getattr(j, "expected_size", 0) or 0
+                    completed = getattr(j, "total_downloaded", 0) or 0
+                    if size <= 0:
+                        is_indeterminate = True
+                    else:
+                        total_size += size
+                        total_completed += completed
+                
+                if is_indeterminate:
+                    tb.set_state(TaskbarProgress.TBPF_INDETERMINATE)
+                elif is_paused:
+                    tb.set_state(TaskbarProgress.TBPF_PAUSED)
+                    if total_size > 0:
+                        tb.set_progress(total_completed, total_size)
+                else:
+                    tb.set_state(TaskbarProgress.TBPF_NORMAL)
+                    if total_size > 0:
+                        tb.set_progress(total_completed, total_size)
+                    else:
+                        tb.set_state(TaskbarProgress.TBPF_NOPROGRESS)
+        except Exception as e:
+            print(f"[TASKBAR] Update error: {e}", flush=True)
+        await asyncio.sleep(0.5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run firewall and native messaging host setup in a separate thread so it doesn't block startup
@@ -169,6 +307,7 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(interface_polling_loop())
     state_task = asyncio.create_task(save_state_loop())
     history_task = asyncio.create_task(history_saver_loop())
+    taskbar_task = asyncio.create_task(taskbar_update_loop())
     yield
     # Shutdown: Clean up if needed
     if not clipboard_stop.is_set():
@@ -181,10 +320,12 @@ async def lifespan(app: FastAPI):
     task.cancel()
     state_task.cancel()
     history_task.cancel()
+    taskbar_task.cancel()
     try:
         await task
         await state_task
         await history_task
+        await taskbar_task
     except asyncio.CancelledError:
         pass
 
@@ -224,7 +365,7 @@ def _launch_clipboard_thread(stop_event: asyncio.Event, loop: asyncio.AbstractEv
     t = threading.Thread(target=bridge, daemon=True)
     t.start()
 
-app = FastAPI(title="Burst API", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="Burst API", version="1.3.1", lifespan=lifespan)
 manager = DownloadManager()
 active_sockets: Dict[str, Set[WebSocket]] = {}
 event_bus: Set[WebSocket] = set()
@@ -948,10 +1089,20 @@ async def interface_polling_loop():
 
 import json
 
+def _get_active_jobs_path() -> str:
+    if getattr(sys, 'frozen', False):
+        import os
+        APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+        d = os.path.join(APPDATA, "Burst")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "burst_active_jobs.json")
+    return "burst_active_jobs.json"
+
 async def load_state():
     try:
-        if os.path.exists("burst_active_jobs.json"):
-            with open("burst_active_jobs.json", "r") as f:
+        path = _get_active_jobs_path()
+        if os.path.exists(path):
+            with open(path, "r") as f:
                 state = json.load(f)
             
             # Use active interfaces to map them back
@@ -1009,7 +1160,8 @@ def save_state():
             and not getattr(j, "is_cancelled", False)
         ]
         
-        with open("burst_active_jobs.json", "w") as f:
+        path = _get_active_jobs_path()
+        with open(path, "w") as f:
             json.dump({"downloads": downloads, "torrents": torrents}, f)
     except Exception as e:
         print(f"State save error: {e}")
@@ -1310,37 +1462,10 @@ if __name__ == "__main__":
             # Absolute exit to prevent any fall-through to elevation code
             os._exit(0)
 
-    # If running with python directly, we might not want elevation immediately
-    # or we might be in an environment where we can't elevate easily.
-    # For dev purposes, let's allow bypassing elevation if requested or if in dev.
-    from setup_utils import is_admin, request_elevation
-    if not is_admin() and getattr(sys, 'frozen', False):
-        request_elevation()
-
-    # Hide the console window immediately for GUI mode (only when frozen)
-    if getattr(sys, 'frozen', False):
-        hide_console()
-
-    import uvicorn
-    import webview
-    from threading import Thread
-    import sys
-    import urllib.request
-
-    # Parse headless / minimized argument
-    # Both flags suppress the initial webview window creation (hidden=True).
-    # Since Burst starts the system tray icon in either case, --minimized and
-    # --headless behave identically in practice to boot the app silently to tray.
-    headless = False
-    if "--headless" in sys.argv:
-        headless = True
-        sys.argv.remove("--headless")
-    if "--minimized" in sys.argv:
-        headless = True
-        sys.argv.remove("--minimized")
-
     # 0. Single instance check using socket (more reliable than HTTP timeout)
+    # We check this FIRST so we don't ask for admin rights if the app is already running.
     import socket
+    import urllib.request
     is_running = False
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1363,7 +1488,6 @@ if __name__ == "__main__":
         else:
             # Wake up/show the existing UI
             try:
-                import urllib.request
                 req = urllib.request.Request("http://127.0.0.1:59284/show", method="POST")
                 with urllib.request.urlopen(req) as response:
                     pass
@@ -1373,6 +1497,46 @@ if __name__ == "__main__":
     else:
         if len(sys.argv) > 1:
             startup_url = sys.argv[1]
+
+    # Mutex check to prevent multiple concurrent launches / UAC prompt flooding
+    if os.name == "nt" and getattr(sys, 'frozen', False):
+        try:
+            import ctypes
+            # Create a session-local named mutex
+            MUTEX_NAME = "Local\\Burst_Startup_Mutex"
+            kernel32 = ctypes.windll.kernel32
+            # CreateMutexW: security_attributes=None, initial_owner=False, name
+            _startup_mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+            last_error = kernel32.GetLastError()
+            # ERROR_ALREADY_EXISTS = 183
+            if last_error == 183:
+                # Another instance is already starting up, exit silently
+                sys.exit(0)
+        except Exception:
+            pass
+
+
+
+    # Hide the console window immediately for GUI mode (only when frozen)
+    if getattr(sys, 'frozen', False):
+        hide_console()
+
+    import uvicorn
+    import webview
+    from threading import Thread
+    import sys
+
+    # Parse headless / minimized argument
+    # Both flags suppress the initial webview window creation (hidden=True).
+    # Since Burst starts the system tray icon in either case, --minimized and
+    # --headless behave identically in practice to boot the app silently to tray.
+    headless = False
+    if "--headless" in sys.argv:
+        headless = True
+        sys.argv.remove("--headless")
+    if "--minimized" in sys.argv:
+        headless = True
+        sys.argv.remove("--minimized")
 
     # 1. Define the server thread
     def start_server():

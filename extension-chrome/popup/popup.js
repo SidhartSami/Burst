@@ -1,10 +1,24 @@
 // Burst Extension — popup.js
 
-const statusDot      = document.getElementById("statusDot");
-const statusLabel    = document.getElementById("statusLabel");
-const toggle         = document.getElementById("interceptToggle");
-const interfacesList = document.getElementById("interfacesList");
-const openAppBtn     = document.getElementById("openApp");
+const statusDot       = document.getElementById("statusDot");
+const statusLabel     = document.getElementById("statusLabel");
+const toggle          = document.getElementById("interceptToggle");
+const toggleRow       = document.getElementById("toggleRow");
+const adaptersSection = document.getElementById("adaptersSection");
+const interfacesList  = document.getElementById("interfacesList");
+const openAppBtn      = document.getElementById("openApp");
+
+let pollIntervalId = null;
+
+// ── Toggle state initialization ──────────────────────────────────────────────
+
+chrome.storage.local.get({ burstEnabled: true }, ({ burstEnabled }) => {
+  toggle.checked = burstEnabled;
+});
+
+toggle.addEventListener("change", () => {
+  chrome.storage.local.set({ burstEnabled: toggle.checked });
+});
 
 // ── Status & Active Interfaces Check ──────────────────────────────────────────
 
@@ -13,11 +27,36 @@ function checkStatus() {
     if (res?.alive) {
       statusDot.className = "status-dot online";
       statusLabel.textContent = "Burst is running";
+      
+      toggle.disabled = false;
+      toggleRow.classList.remove("disabled");
+      
+      adaptersSection.style.display = "block";
+      
+      openAppBtn.className = "open-app-link";
+      
       fetchInterfaces();
+      
+      if (!pollIntervalId) {
+        pollIntervalId = setInterval(() => {
+          fetchInterfaces();
+        }, 3000);
+      }
     } else {
       statusDot.className = "status-dot offline";
-      statusLabel.textContent = "Burst is offline — launch the app to start";
-      interfacesList.innerHTML = `<div class="interface-item loading">No adapters active (offline)</div>`;
+      statusLabel.textContent = "Burst is not running";
+      
+      toggle.disabled = true;
+      toggleRow.classList.add("disabled");
+      
+      adaptersSection.style.display = "none";
+      
+      openAppBtn.className = "open-app-btn";
+      
+      if (pollIntervalId) {
+        clearInterval(pollIntervalId);
+        pollIntervalId = null;
+      }
     }
   });
 }
@@ -46,24 +85,14 @@ function fetchInterfaces() {
     });
 }
 
-// ── Toggle state ──────────────────────────────────────────────────────────────
-
-chrome.storage.local.get({ burstEnabled: true }, ({ burstEnabled }) => {
-  toggle.checked = burstEnabled;
-});
-
-toggle.addEventListener("change", () => {
-  chrome.storage.local.set({ burstEnabled: toggle.checked });
-});
-
 // ── Wake up App click ─────────────────────────────────────────────────────────
 
 openAppBtn.addEventListener("click", (e) => {
-  e.preventDefault();
   chrome.runtime.sendMessage({ type: "CHECK_STATUS" });
-  // Reload status shortly after
   setTimeout(checkStatus, 1500);
 });
 
-// Init
+// Initialize status check
 checkStatus();
+// Also check status on popup show
+document.addEventListener("DOMContentLoaded", checkStatus);

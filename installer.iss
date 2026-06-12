@@ -1,6 +1,6 @@
 [Setup]
 AppName=Burst
-AppVersion=1.3.0
+AppVersion=1.3.1
 AppVerName=Burst
 AppPublisher=SidhartSami
 DefaultDirName={autopf}\Burst
@@ -9,7 +9,7 @@ UninstallDisplayIcon={app}\Burst.exe
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=Burst_Setup_v1.3.0
+OutputBaseFilename=Burst_Setup_v1.3.1
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 UsedUserAreasWarning=no
@@ -21,11 +21,11 @@ Name: "firefoxext"; Description: "Enable Firefox/Zen Integration"; GroupDescript
 
 [Files]
 ; This grabs the EXE you just built with PyInstaller
-Source: "build_v1\Burst.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Burst\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; We also include the logo in the install folder just in case
 Source: "assets\logo.png"; DestDir: "{app}"; Flags: ignoreversion
 ; Native messaging host
-Source: "build_v1\native_host.exe";          DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\native_host.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\native_host.py";           DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\native_host.bat";          DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\com.burst.download.manager.json"; DestDir: "{app}"; Flags: ignoreversion

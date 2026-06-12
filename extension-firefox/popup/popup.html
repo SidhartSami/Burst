@@ -15,20 +15,11 @@
     <div class="status-dot" id="statusDot"></div>
   </div>
 
-  <div class="status-label" id="statusLabel">Checking...</div>
+  <div class="status-label" id="statusLabel">Checking status...</div>
 
-  <div class="divider"></div>
+  <div class="divider" id="divider1"></div>
 
-  <div class="section-label">PASTE A URL OR MAGNET LINK</div>
-  <div class="input-row">
-    <input type="text" id="urlInput" placeholder="https://... or magnet:?xt=..." />
-    <button id="sendBtn">Download</button>
-  </div>
-  <div class="feedback" id="feedback"></div>
-
-  <div class="divider"></div>
-
-  <div class="toggle-row">
+  <div class="toggle-row" id="toggleRow">
     <span>Intercept all downloads</span>
     <label class="switch">
       <input type="checkbox" id="interceptToggle" />
@@ -36,8 +27,18 @@
     </label>
   </div>
 
+
+
+  <div class="adapters-section" id="adaptersSection">
+    <div class="divider"></div>
+    <div class="section-label">Active adapters (interfaces)</div>
+    <div id="interfacesList" class="interfaces-list">
+      <div class="interface-item loading">Connecting to Burst...</div>
+    </div>
+  </div>
+
   <div class="footer">
-    <a href="#" id="openApp">Open Burst App</a>
+    <a href="#" id="openApp" class="open-app-link">Open Burst app</a>
   </div>
 
   <script src="popup.js"></script>
