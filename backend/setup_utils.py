@@ -87,7 +87,12 @@ def apply_autostart_rules(enabled: bool) -> bool:
                 exec_command = f'"{sys.executable}" --minimized'
             else:
                 main_script = os.path.abspath(sys.argv[0])
-                exec_command = f'"{sys.executable}" "{main_script}" --minimized'
+                python_exe = sys.executable
+                if python_exe.lower().endswith("python.exe"):
+                    pythonw_exe = python_exe[:-10] + "pythonw.exe"
+                    if os.path.exists(pythonw_exe):
+                        python_exe = pythonw_exe
+                exec_command = f'"{python_exe}" "{main_script}" --minimized'
 
             winreg.SetValueEx(key, key_name, 0, winreg.REG_SZ, exec_command)
             print(f"[autostart] Registry autostart key set: {exec_command}")

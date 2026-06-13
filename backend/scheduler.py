@@ -14,13 +14,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import os
 import sys
-if getattr(sys, 'frozen', False):
-    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
-    SETTINGS_DIR = Path(APPDATA) / "Burst"
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    SCHEDULES_FILE = SETTINGS_DIR / "schedules.json"
-else:
-    SCHEDULES_FILE = Path("schedules.json")
+APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+SETTINGS_DIR = Path(APPDATA) / "Burst"
+SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+SCHEDULES_FILE = SETTINGS_DIR / "schedules.json"
 
 # ---------------------------------------------------------------------------
 # In-memory store + persistence

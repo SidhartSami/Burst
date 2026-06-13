@@ -16,14 +16,11 @@ from typing import Any, Dict
 # File paths
 # ---------------------------------------------------------------------------
 import sys
-if getattr(sys, 'frozen', False):
-    import os
-    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
-    SETTINGS_DIR = Path(APPDATA) / "Burst"
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE = SETTINGS_DIR / "burst_settings.json"
-else:
-    SETTINGS_FILE = Path(__file__).parent / "burst_settings.json"
+import os
+APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+SETTINGS_DIR = Path(APPDATA) / "Burst"
+SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+SETTINGS_FILE = SETTINGS_DIR / "burst_settings.json"
 
 # ---------------------------------------------------------------------------
 # Chunk sizing

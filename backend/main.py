@@ -1090,13 +1090,11 @@ async def interface_polling_loop():
 import json
 
 def _get_active_jobs_path() -> str:
-    if getattr(sys, 'frozen', False):
-        import os
-        APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
-        d = os.path.join(APPDATA, "Burst")
-        os.makedirs(d, exist_ok=True)
-        return os.path.join(d, "burst_active_jobs.json")
-    return "burst_active_jobs.json"
+    import os
+    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+    d = os.path.join(APPDATA, "Burst")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "burst_active_jobs.json")
 
 async def load_state():
     try:
@@ -1477,7 +1475,7 @@ if __name__ == "__main__":
 
     startup_url = None
     if is_running:
-        if len(sys.argv) > 1:
+        if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
             try:
                 import os
                 sys.path.insert(0, os.path.dirname(__file__))
@@ -1486,16 +1484,17 @@ if __name__ == "__main__":
             except Exception as e:
                 print("Error sending to running instance:", e)
         else:
-            # Wake up/show the existing UI
-            try:
-                req = urllib.request.Request("http://127.0.0.1:59284/show", method="POST")
-                with urllib.request.urlopen(req) as response:
-                    pass
-            except Exception as e:
-                print("Error waking up running instance UI:", e)
+            # Wake up/show the existing UI unless we were launched in background/minimized mode
+            if not any(arg in sys.argv for arg in ("--minimized", "--headless")):
+                try:
+                    req = urllib.request.Request("http://127.0.0.1:59284/show", method="POST")
+                    with urllib.request.urlopen(req) as response:
+                        pass
+                except Exception as e:
+                    print("Error waking up running instance UI:", e)
         sys.exit(0)
     else:
-        if len(sys.argv) > 1:
+        if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
             startup_url = sys.argv[1]
 
     # Mutex check to prevent multiple concurrent launches / UAC prompt flooding

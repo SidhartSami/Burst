@@ -4,13 +4,10 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import sys
-if getattr(sys, 'frozen', False):
-    APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
-    SETTINGS_DIR = Path(APPDATA) / "Burst"
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE = SETTINGS_DIR / "burst_history.json"
-else:
-    HISTORY_FILE = Path("burst_history.json")
+APPDATA = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+SETTINGS_DIR = Path(APPDATA) / "Burst"
+SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY_FILE = SETTINGS_DIR / "burst_history.json"
 
 def load_history() -> List[Dict[str, Any]]:
     """Load history from disk."""
