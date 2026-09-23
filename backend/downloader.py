@@ -242,6 +242,13 @@ class InterfaceProgress:
             or self.status in ("paused_slow", "disconnected")
         ):
             return "degraded"
+        # ponytail: latency is one-shot startup probe; upgrade: continuous RTT EWMA across chunk requests
+        # ponytail: health failure/stall rate threshold uses 4-request window; upgrade: time-decayed rolling window if long downloads experience sporadic errors
+        if self.request_count >= 4:
+            failure_rate = self.failure_count / self.request_count
+            stall_rate = self.stall_count / self.request_count
+            if failure_rate >= 0.5 or stall_rate >= 0.25:
+                return "degraded"
         return "healthy"
 
 
@@ -480,6 +487,21 @@ def plan_adaptive_chunks(
         sizes = [max(min_cs, min(max_cs, int(base_cs * n))) for n in normalized]
         steady_cs = max(min_cs, min(max_cs, sum(sizes) // len(sizes)))
 
+    # For single-interface downloads, warm-up probing and tail tapering provide no straggler
+    # mitigation and introduce unnecessary chunk allocation, HTTP roundtrips, and fsync overhead.
+    # Therefore, single-interface downloads use uniform steady-state chunks.
+    # ponytail: ceiling: single-interface uses uniform chunks; upgrade: dynamic mid-flight chunk sizing on single interface if bandwidth is volatile
+    if num_interfaces <= 1:
+        ranges = []
+        cursor = 0
+        idx = 0
+        while cursor < expected_size:
+            end = min(cursor + steady_cs - 1, expected_size - 1)
+            ranges.append((idx, cursor, end))
+            cursor = end + 1
+            idx += 1
+        return ranges
+
     # Warmup covers first 2 chunks per interface (min 2, max 6)
     warmup_chunks = max(2, min(2 * max(1, num_interfaces), 6))
     warmup_size = min_cs
@@ -494,6 +516,12 @@ def plan_adaptive_chunks(
     while cursor < expected_size:
         remaining = expected_size - cursor
 
+        if remaining < min_cs and ranges:
+            # Absorb small leftover fragment into the last chunk
+            prev_idx, prev_start, _ = ranges[-1]
+            ranges[-1] = (prev_idx, prev_start, expected_size - 1)
+            break
+
         # Tail-end ramp-down: small chunks to eliminate stragglers
         # ponytail: ceiling: tail-end small chunks mitigate stragglers; upgrade: in-flight chunk splitting if extreme stragglers occur
         if remaining <= tail_threshold and idx >= warmup_chunks:
@@ -505,8 +533,8 @@ def plan_adaptive_chunks(
         else:
             chunk_size = steady_cs
 
-        chunk_size = max(min_cs, min(chunk_size, remaining))
-        end = cursor + chunk_size - 1
+        chunk_size = min(chunk_size, remaining)
+        end = min(cursor + chunk_size - 1, expected_size - 1)
         ranges.append((idx, cursor, end))
         cursor = end + 1
         idx += 1
@@ -837,6 +865,18 @@ class DownloadManager:
     # Worker — grabs chunks from the shared queue with EWMA/health adaptive sizing
     # ------------------------------------------------------------------
     def _calculate_worker_target_chunk_size(self, prog: InterfaceProgress) -> int:
+        """
+        Calculates optimal worker chunk size based on interface EWMA throughput and health.
+
+        Parameters & Sizing Model:
+        - EWMA smoothing factor: alpha = 0.3 (30% new chunk speed sample, 70% historical EWMA).
+        - Target throughput duration: 2.0 seconds of data per chunk.
+        - Clamping bounds: [MIN_CHUNK_SIZE (256 KB), MAX_CHUNK_SIZE (8 MB)].
+        - Default fallback: BASE_CHUNK_SIZE (2 MB) when EWMA is 0 or uninitialized.
+        - Health constraint: Any 'degraded' or consecutive_failures > 0 interface is strictly capped at MIN_CHUNK_SIZE (256 KB).
+        - Slicing hysteresis: Workers only slice chunks from the queue when (chunk_bytes - target_cs) >= MIN_CHUNK_SIZE (256 KB)
+          to prevent tiny residual fragment chunks.
+        """
         min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
         max_cs = config.get("MAX_CHUNK_SIZE") or (8 * 1024 * 1024)
         base_cs = config.get("BASE_CHUNK_SIZE") or (2 * 1024 * 1024)
@@ -915,10 +955,13 @@ class DownloadManager:
             # If chunk is larger than target_cs, slice off target_cs and return the remainder to the queue
             if chunk_bytes > target_cs and (chunk_bytes - target_cs) >= min_cs:
                 old_end = end
-                end = start + target_cs - 1
+                end = min(start + target_cs - 1, old_end - min_cs)
+                if job.expected_size > 0:
+                    end = min(end, job.expected_size - 1)
                 chunk.end = end
                 new_idx = max(job.chunks.keys()) + 1
-                remainder = Chunk(chunk_id=new_idx, start=end + 1, end=old_end)
+                remainder_end = min(old_end, job.expected_size - 1) if job.expected_size > 0 else old_end
+                remainder = Chunk(chunk_id=new_idx, start=end + 1, end=remainder_end)
                 job.chunks[new_idx] = remainder
                 temp_dir = output_file.parent
                 new_part = temp_dir / f"chunk_{new_idx:05d}.part"
@@ -1335,17 +1378,22 @@ class DownloadManager:
         job = self.get_job(job_id)
         if not job:
             raise ValueError("Job not found")
-        if job.status not in ("paused", "waiting_reconnect"):
+        if job.status not in ("paused", "waiting_reconnect", "failed"):
             return {"status": "not_paused", "current": job.status}
+        if job.status == "failed" and "resumable" not in (job.error or "").lower():
+            return {"status": "cannot_resume", "reason": "Job failed non-resumably"}
 
         job.status = "downloading"
         job.error = None
         
-        # Respawn workers for all non-excluded interfaces
+        # Respawn workers for all non-excluded interfaces (clear exclusion cooldown on explicit resume)
         spawned = 0
         for ip, prog in job.progress.items():
-            if prog.status not in ("excluded", "cancelled", "completed"):
+            if prog.status != "cancelled":
                 prog.status = "pending"
+                prog.consecutive_failures = 0
+                prog._cooldown_until = 0.0
+                prog.error = None
                 iface_dict = {"ip_address": ip, "name": prog.name}
                 num_workers = 3 if getattr(job, "boosted", False) else 1
                 for idx in range(num_workers):
@@ -1571,23 +1619,29 @@ class DownloadManager:
                         c.status = ChunkStatus.PENDING
                         job._queue.put_nowait(c)
 
+            # Bounded reconnect wait when all workers dead and work remains
             if not job._queue.empty() and all_done:
-                any_recoverable = any(
-                    p.status not in ("cancelled", "excluded") and p.consecutive_failures < max_failures
+                all_inactive = all(
+                    p.status in ("excluded", "disconnected", "cancelled", "paused_slow") or p.consecutive_failures >= max_failures
                     for p in job.progress.values()
                 )
-                if any_recoverable:
-                    if job.status != "waiting_reconnect":
-                        print(f"[MONITOR] No active workers but work remains. Waiting for connection...")
+                if getattr(job, "_reconnect_wait_start", None) is None:
+                    job._reconnect_wait_start = now
+
+                reconnect_timeout = float(config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT") or 10.0)
+                elapsed_wait = now - job._reconnect_wait_start
+
+                if elapsed_wait < reconnect_timeout:
                     job.status = "waiting_reconnect"
                     job.error = "All connections paused or lost — waiting to resume"
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.2)
                     continue
                 else:
+                    job.status = "failed"
                     last_chunk_err = next((c.last_error for c in job.chunks.values() if c.last_error), None)
-                    if last_chunk_err:
-                        raise Exception(f"All interfaces failed to download the remaining chunks. Last error: {last_chunk_err}")
-                    raise Exception("All interfaces failed to download the remaining chunks.")
+                    err_detail = f": {last_chunk_err}" if last_chunk_err else ""
+                    job.error = f"All interfaces failed to download remaining chunks (failed, resumable){err_detail}"
+                    raise Exception(job.error)
 
             # Event-based completion wakeup: unblock immediately when a chunk completes or worker finishes
             if getattr(job, "_completion_event", None):
@@ -1678,6 +1732,11 @@ class DownloadManager:
             os.replace(tmp_file, part_file)
 
         try:
+            # Thread boundary confirmation:
+            # File I/O, network streaming, handle.flush, fsync, and atomic os.replace occur in worker thread pool above.
+            # Below, execution resumes strictly on the single-threaded asyncio event loop.
+            # All dictionary mutations (job.chunks, chunk.status, completed_at, queue.task_done,
+            # and progress success/stall counters) execute on the event loop, avoiding cross-thread race conditions.
             await asyncio.to_thread(_do_chunk_download_and_commit)
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
@@ -1862,10 +1921,12 @@ class DownloadManager:
                                     throttle_window_bytes = 0
 
                         handle.flush()
-                        try:
-                            os.fsync(handle.fileno())
-                        except Exception:
-                            pass
+                        # ponytail: per-chunk fsync ensures durability on crash; upgrade: batched periodic fsync or asynchronous io_uring if disk I/O becomes bottleneck on spinning HDDs
+                        if config.get("ENABLE_CHUNK_FSYNC", True):
+                            try:
+                                os.fsync(handle.fileno())
+                            except Exception:
+                                pass
 
                     # Byte count validation
                     if expected_bytes is not None and chunk_downloaded != expected_bytes:

@@ -56,6 +56,8 @@ DISCONNECT_DETECTION_TIMEOUT: float = 3.0         # Seconds of zero progress bef
 RETRY_SAME_INTERFACE_COOLDOWN: float = 15.0       # Seconds before failed iface is eligible again
 MAX_CONSECUTIVE_FAILURES: int = 3                  # Consecutive chunk failures → exclude interface
 EXCLUDED_INTERFACE_COOLDOWN: float = 60.0          # Seconds an interface remains excluded before re-probing
+SINGLE_INTERFACE_RECONNECT_TIMEOUT: float = 10.0   # Bounded wait in seconds for single interface recovery before failing
+ENABLE_CHUNK_FSYNC: bool = True                    # Per-chunk fsync before atomic commit (durability vs throughput)
 
 # ---------------------------------------------------------------------------
 # Sliding-window speed measurement
@@ -102,6 +104,8 @@ _DEFAULTS: Dict[str, Any] = {
     "RETRY_SAME_INTERFACE_COOLDOWN": RETRY_SAME_INTERFACE_COOLDOWN,
     "MAX_CONSECUTIVE_FAILURES": MAX_CONSECUTIVE_FAILURES,
     "EXCLUDED_INTERFACE_COOLDOWN": EXCLUDED_INTERFACE_COOLDOWN,
+    "SINGLE_INTERFACE_RECONNECT_TIMEOUT": SINGLE_INTERFACE_RECONNECT_TIMEOUT,
+    "ENABLE_CHUNK_FSYNC": ENABLE_CHUNK_FSYNC,
     "SPEED_SAMPLE_INTERVAL": SPEED_SAMPLE_INTERVAL,
     "SPEED_WINDOW_SECONDS": SPEED_WINDOW_SECONDS,
     "SPEEDTEST_URL": SPEEDTEST_URL,
@@ -151,6 +155,7 @@ def reset_settings() -> Dict[str, Any]:
     return dict(_DEFAULTS)
 
 
-def get(key: str) -> Any:
+def get(key: str, default: Any = None) -> Any:
     """Get a single setting value (hot-reads from disk for runtime changes)."""
-    return load_settings().get(key, _DEFAULTS.get(key))
+    val = load_settings().get(key, _DEFAULTS.get(key))
+    return val if val is not None else default

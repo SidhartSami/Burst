@@ -1163,8 +1163,9 @@ def save_state():
     try:
         downloads = []
         for j in list(manager.jobs.values()):
+            is_resumable_failed = (j.status == "failed" and "resumable" in (j.error or "").lower())
             if (
-                j.status not in ("completed", "failed", "cancelled")
+                (j.status not in ("completed", "failed", "cancelled") or is_resumable_failed)
                 and not getattr(j, "is_cancelled", False)
                 and "BURST_INTERNAL_CHECK" not in j.url
             ):

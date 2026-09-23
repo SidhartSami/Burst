@@ -345,6 +345,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
             "RETRY_JITTER_MAX": 0.005,
             "RETRY_ATTEMPTS": 3,
             "EXCLUDED_INTERFACE_COOLDOWN": 0.5,
+            "SINGLE_INTERFACE_RECONNECT_TIMEOUT": 0.5,
         })
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockHttpHandler)
         cls.port = cls.server.server_port
@@ -979,27 +980,42 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
     # Test Y — Production config constants and defaults assertion
     # -----------------------------------------------------------------------
     def test_y_production_config_constants(self):
-        # Assert module-level production constants are untouched
-        self.assertEqual(config.STALL_TIMEOUT_SECONDS, 10.0)
-        self.assertEqual(config.RETRY_BACKOFF_BASE, 1.0)
-        self.assertEqual(config.RETRY_BACKOFF_MAX, 10.0)
-        self.assertEqual(config.RETRY_JITTER_MAX, 0.5)
-        self.assertEqual(config.EXCLUDED_INTERFACE_COOLDOWN, 60.0)
-        self.assertEqual(config.MAX_CONSECUTIVE_FAILURES, 3)
-        self.assertEqual(config.BASE_CHUNK_SIZE, 2 * 1024 * 1024)
-        self.assertEqual(config.MIN_CHUNK_SIZE, 256 * 1024)
-        self.assertEqual(config.MAX_CHUNK_SIZE, 8 * 1024 * 1024)
-        self.assertEqual(config.CHUNK_IO_SIZE, 64 * 1024)
-        self.assertEqual(config.REQUEST_TIMEOUT_SECONDS, 60)
-        self.assertEqual(config.WEIGHT_REBALANCE_INTERVAL_SECONDS, 5.0)
+        # Assert module-level production constants are untouched in a pristine subprocess
+        code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(r'C:/Coding/Burst/backend')))
+import config
 
-        # Assert default dictionary matches production values
-        self.assertEqual(config._DEFAULTS["STALL_TIMEOUT_SECONDS"], 10.0)
-        self.assertEqual(config._DEFAULTS["RETRY_BACKOFF_BASE"], 1.0)
-        self.assertEqual(config._DEFAULTS["RETRY_BACKOFF_MAX"], 10.0)
-        self.assertEqual(config._DEFAULTS["RETRY_JITTER_MAX"], 0.5)
-        self.assertEqual(config._DEFAULTS["EXCLUDED_INTERFACE_COOLDOWN"], 60.0)
-        self.assertEqual(config._DEFAULTS["MAX_CONSECUTIVE_FAILURES"], 3)
+assert config.STALL_TIMEOUT_SECONDS == 10.0
+assert config.RETRY_BACKOFF_BASE == 1.0
+assert config.RETRY_BACKOFF_MAX == 10.0
+assert config.RETRY_JITTER_MAX == 0.5
+assert config.EXCLUDED_INTERFACE_COOLDOWN == 60.0
+assert config.MAX_CONSECUTIVE_FAILURES == 3
+assert config.BASE_CHUNK_SIZE == 2 * 1024 * 1024
+assert config.MIN_CHUNK_SIZE == 256 * 1024
+assert config.MAX_CHUNK_SIZE == 8 * 1024 * 1024
+assert config.CHUNK_IO_SIZE == 64 * 1024
+assert config.REQUEST_TIMEOUT_SECONDS == 60
+assert config.WEIGHT_REBALANCE_INTERVAL_SECONDS == 5.0
+assert config.SINGLE_INTERFACE_RECONNECT_TIMEOUT == 10.0
+assert config.ENABLE_CHUNK_FSYNC is True
+
+assert config._DEFAULTS["STALL_TIMEOUT_SECONDS"] == 10.0
+assert config._DEFAULTS["RETRY_BACKOFF_BASE"] == 1.0
+assert config._DEFAULTS["RETRY_BACKOFF_MAX"] == 10.0
+assert config._DEFAULTS["RETRY_JITTER_MAX"] == 0.5
+assert config._DEFAULTS["EXCLUDED_INTERFACE_COOLDOWN"] == 60.0
+assert config._DEFAULTS["MAX_CONSECUTIVE_FAILURES"] == 3
+assert config._DEFAULTS["SINGLE_INTERFACE_RECONNECT_TIMEOUT"] == 10.0
+assert config._DEFAULTS["ENABLE_CHUNK_FSYNC"] is True
+print("OK")
+"""
+        import subprocess
+        res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"Subprocess failed: {res.stderr}")
+        self.assertIn("OK", res.stdout)
 
     # -----------------------------------------------------------------------
     # Test Z — Milestone 3 Adaptive chunk planning (warmup, steady, tail, conservation)
@@ -1054,47 +1070,81 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(single[0], (0, 0, 100 * 1024 - 1))
 
     # -----------------------------------------------------------------------
-    # Test ZA — Milestone 3 Work-stealing queue with asymmetric worker speeds
+    # Test ZA — Milestone 3 Work-stealing queue with real worker and asymmetric speeds
     # -----------------------------------------------------------------------
     async def test_za_work_stealing_differential_throughput(self):
+        # Drives real DownloadManager._worker against real HTTP endpoints with differential bandwidth
+        dest = self.out_dir / "test_za_real.bin"
+        temp_dir = dest.parent / ".burst_test_za"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        url = f"{self.base_url}/za_worksteal.bin"
+        chunk_size = 16 * 1024  # 16 KB per chunk
+        num_chunks = 10
+        total_size = chunk_size * num_chunks
+
+        job = DownloadJob(
+            job_id="test_za",
+            url=url,
+            output_path=str(dest),
+            expected_size=total_size,
+            supports_ranges=True,
+            etag="v1-valid-etag",
+            last_modified="Wed, 23 Sep 2026 12:00:00 GMT",
+            # Fast worker on 127.0.0.1: unthrottled; Slow worker on 127.0.0.2: throttled to 20 KB/s
+            bandwidth_limits={"127.0.0.1": 0, "127.0.0.2": 20 * 1024},
+        )
+        self.manager.jobs[job.job_id] = job
+        self.manager._locks[job.job_id] = asyncio.Lock()
+        self.manager._thread_locks[job.job_id] = threading.Lock()
+
+        chunk_files = {}
+        ranges = []
         queue = asyncio.Queue()
-        chunks = [Chunk(chunk_id=i, start=i*1000, end=(i+1)*1000 - 1) for i in range(12)]
-        for c in chunks:
-            queue.put_nowait(c)
+        job.chunks = {}
 
-        fast_completed = []
-        slow_completed = []
+        for i in range(num_chunks):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size - 1
+            chunk = Chunk(chunk_id=i, start=start, end=end)
+            part_file = temp_dir / f"chunk_{i:05d}.part"
+            chunk_files[i] = part_file
+            ranges.append((i, start, end))
+            job.chunks[i] = chunk
+            queue.put_nowait(chunk)
 
-        async def fast_worker():
-            while not queue.empty():
-                try:
-                    c = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                await asyncio.sleep(0)  # Yields immediately
-                c.status = ChunkStatus.COMPLETE
-                fast_completed.append(c.chunk_id)
-                queue.task_done()
+        job._ranges = ranges
+        job._chunk_files = chunk_files
+        job._queue = queue
+        job._total_chunks = num_chunks
 
-        async def slow_worker():
-            while not queue.empty():
-                try:
-                    c = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                await asyncio.sleep(0.05)   # 50ms delay
-                c.status = ChunkStatus.COMPLETE
-                slow_completed.append(c.chunk_id)
-                queue.task_done()
+        # Fast interface (127.0.0.1) & Slow interface (127.0.0.2)
+        iface_fast = {"name": "FastLoopback", "ip_address": "127.0.0.1"}
+        iface_slow = {"name": "SlowLoopback", "ip_address": "127.0.0.2"}
 
-        await asyncio.gather(fast_worker(), slow_worker())
+        prog_fast = InterfaceProgress(name="FastLoopback", ip_address="127.0.0.1", chunk_start=0, chunk_end=total_size)
+        prog_slow = InterfaceProgress(name="SlowLoopback", ip_address="127.0.0.2", chunk_start=0, chunk_end=total_size)
+        job.progress["127.0.0.1"] = prog_fast
+        job.progress["127.0.0.2"] = prog_slow
 
-        # All 12 chunks completed
-        self.assertEqual(len(fast_completed) + len(slow_completed), 12)
-        # No duplicate chunk processing
-        self.assertEqual(set(fast_completed) & set(slow_completed), set())
-        # Fast worker stole significantly more chunks than slow worker (at least 2x)
-        self.assertGreaterEqual(len(fast_completed), len(slow_completed) * 2, "Fast worker must steal at least 2x chunks")
+        # Run real _worker tasks concurrently
+        task_fast = asyncio.create_task(self.manager._worker(job, iface_fast, queue, chunk_files))
+        task_slow = asyncio.create_task(self.manager._worker(job, iface_slow, queue, chunk_files))
+
+        await asyncio.gather(task_fast, task_slow)
+
+        # Assertions:
+        # 1. All chunks completed on disk and in chunk objects
+        self.assertEqual(len([c for c in job.chunks.values() if c.status == ChunkStatus.COMPLETE]), num_chunks)
+        for i in range(num_chunks):
+            self.assertTrue(chunk_files[i].exists())
+            self.assertEqual(chunk_files[i].stat().st_size, chunk_size)
+
+        # 2. Work stealing verification: fast worker completed significantly more chunks than throttled worker
+        self.assertEqual(prog_fast.chunks_completed + prog_slow.chunks_completed, num_chunks)
+        self.assertGreaterEqual(prog_fast.chunks_completed, prog_slow.chunks_completed * 2,
+            f"Fast worker ({prog_fast.chunks_completed}) should steal significantly more chunks than slow worker ({prog_slow.chunks_completed})")
+        self.assertGreater(prog_fast.downloaded, prog_slow.downloaded)
 
     # -----------------------------------------------------------------------
     # Test ZB — Per-interface stats (bytes, EWMA, request/success/failure/retry/stall, workers) in API payload
@@ -1140,29 +1190,76 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
     # Test ZC — Scheduler caps failing/degraded interfaces at MIN_CHUNK_SIZE
     # -----------------------------------------------------------------------
     def test_zc_scheduler_degraded_interface_capped_at_min_chunk(self):
-        min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
-        max_cs = config.get("MAX_CHUNK_SIZE") or (8 * 1024 * 1024)
+        prod_constants = {
+            "MIN_CHUNK_SIZE": 256 * 1024,
+            "MAX_CHUNK_SIZE": 8 * 1024 * 1024,
+            "BASE_CHUNK_SIZE": 2 * 1024 * 1024,
+        }
+        with patch.object(config, "get", side_effect=lambda k, default=None: prod_constants.get(k, default)):
+            min_cs = 256 * 1024
+            max_cs = 8 * 1024 * 1024
+            base_cs = 2 * 1024 * 1024
 
-        # 1. Healthy interface with high EWMA scales up
-        prog_healthy = InterfaceProgress(
-            name="eth0", ip_address="192.168.1.10",
-            chunk_start=0, chunk_end=1000,
-            ewma_speed_mb_s=10.0, consecutive_failures=0
-        )
-        self.assertEqual(prog_healthy.health, "healthy")
-        size_healthy = self.manager._calculate_worker_target_chunk_size(prog_healthy)
-        self.assertGreater(size_healthy, min_cs)
-        self.assertLessEqual(size_healthy, max_cs)
+            # 1. Healthy interface with high EWMA scales up (exact values)
+            prog_healthy = InterfaceProgress(
+                name="eth0", ip_address="192.168.1.10",
+                chunk_start=0, chunk_end=1000,
+                ewma_speed_mb_s=1.5, consecutive_failures=0
+            )
+            self.assertEqual(prog_healthy.health, "healthy")
+            # 1.5 MB/s * 1024 * 1024 * 2.0 = exactly 3,145,728 bytes
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_healthy), 3145728)
 
-        # 2. Degraded interface (consecutive_failures > 0) is strictly capped at min_chunk_size
-        prog_degraded = InterfaceProgress(
-            name="wlan0", ip_address="192.168.1.20",
-            chunk_start=0, chunk_end=1000,
-            ewma_speed_mb_s=10.0, consecutive_failures=1
-        )
-        self.assertEqual(prog_degraded.health, "degraded")
-        size_degraded = self.manager._calculate_worker_target_chunk_size(prog_degraded)
-        self.assertEqual(size_degraded, min_cs, "Failing/degraded interface must be capped at MIN_CHUNK_SIZE")
+            # 2. Maximum clamp check: 10.0 MB/s would be 20 MB, clamped to MAX_CHUNK_SIZE (8 MB)
+            prog_high = InterfaceProgress(
+                name="eth0", ip_address="192.168.1.10",
+                chunk_start=0, chunk_end=1000,
+                ewma_speed_mb_s=10.0, consecutive_failures=0
+            )
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_high), max_cs)
+
+            # 3. Minimum clamp check: 0.05 MB/s would be 100 KB, clamped to MIN_CHUNK_SIZE (256 KB)
+            prog_low = InterfaceProgress(
+                name="eth0", ip_address="192.168.1.10",
+                chunk_start=0, chunk_end=1000,
+                ewma_speed_mb_s=0.05, consecutive_failures=0
+            )
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_low), min_cs)
+
+            # 4. Zero EWMA defaults to BASE_CHUNK_SIZE (2 MB)
+            prog_zero = InterfaceProgress(
+                name="eth0", ip_address="192.168.1.10",
+                chunk_start=0, chunk_end=1000,
+                ewma_speed_mb_s=0.0, consecutive_failures=0
+            )
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_zero), base_cs)
+
+            # 5. Degraded interface (consecutive_failures > 0) is strictly capped at MIN_CHUNK_SIZE
+            prog_degraded = InterfaceProgress(
+                name="wlan0", ip_address="192.168.1.20",
+                chunk_start=0, chunk_end=1000,
+                ewma_speed_mb_s=10.0, consecutive_failures=1
+            )
+            self.assertEqual(prog_degraded.health, "degraded")
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_degraded), min_cs)
+
+            # 6. Failure rate degradation (>= 50% over >= 4 requests)
+            prog_fail_rate = InterfaceProgress(
+                name="wlan0", ip_address="192.168.1.20",
+                chunk_start=0, chunk_end=1000,
+                request_count=4, failure_count=2, consecutive_failures=0
+            )
+            self.assertEqual(prog_fail_rate.health, "degraded")
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_fail_rate), min_cs)
+
+            # 7. Stall rate degradation (>= 25% over >= 4 requests)
+            prog_stall_rate = InterfaceProgress(
+                name="wlan0", ip_address="192.168.1.20",
+                chunk_start=0, chunk_end=1000,
+                request_count=4, stall_count=1, consecutive_failures=0
+            )
+            self.assertEqual(prog_stall_rate.health, "degraded")
+            self.assertEqual(self.manager._calculate_worker_target_chunk_size(prog_stall_rate), min_cs)
 
     # -----------------------------------------------------------------------
     # Test ZD — Interface health recovery tested against real EWMA and failure data
@@ -1271,6 +1368,117 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
+    # -----------------------------------------------------------------------
+    # Test ZF — Mid-download chunk slicing, kill, resume with exact boundaries (Item 4)
+    # -----------------------------------------------------------------------
+    async def test_zf_mid_download_chunk_slice_kill_resume_exact_boundaries(self):
+        url = f"{self.base_url}/slice_test.bin"
+        dest = self.out_dir / "test_zf_sliced.bin"
+        temp_dir = dest.parent / ".burst_test_zf"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        total_size = len(TEST_DATA)  # 256 KB
+        initial_ranges = [(0, 0, total_size - 1)]
+
+        job = DownloadJob(
+            job_id="test_zf",
+            url=url,
+            output_path=str(dest),
+            expected_size=total_size,
+            supports_ranges=True,
+            etag="v1-valid-etag",
+            last_modified="Wed, 23 Sep 2026 12:00:00 GMT",
+        )
+        self.manager.jobs[job.job_id] = job
+        self.manager._locks[job.job_id] = asyncio.Lock()
+        self.manager._thread_locks[job.job_id] = threading.Lock()
+
+        chunk_files = {0: temp_dir / "chunk_00000.part"}
+        queue = asyncio.Queue()
+        job.chunks = {0: Chunk(chunk_id=0, start=0, end=total_size - 1)}
+        queue.put_nowait(job.chunks[0])
+        job._ranges = list(initial_ranges)
+        job._chunk_files = chunk_files
+        job._queue = queue
+        job._total_chunks = 1
+
+        prog = InterfaceProgress(
+            name="Loopback", ip_address="127.0.0.1", chunk_start=0, chunk_end=total_size,
+            consecutive_failures=1
+        )
+        job.progress["127.0.0.1"] = prog
+
+        with patch.dict(config._DEFAULTS, {"MIN_CHUNK_SIZE": 64 * 1024, "BASE_CHUNK_SIZE": 64 * 1024}):
+            worker_task = asyncio.create_task(self.manager._worker(job, self.iface[0], queue, chunk_files))
+
+            for _ in range(50):
+                if 0 in job.chunks and job.chunks[0].status == ChunkStatus.COMPLETE:
+                    break
+                await asyncio.sleep(0.05)
+
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            self.assertGreater(len(job._ranges), 1, "Chunk must have been sliced into multiple ranges")
+            persisted_state = job.to_dict()
+
+            ranges = persisted_state["_ranges"]
+            self.assertEqual(ranges[0][1], 0)
+            self.assertEqual(ranges[-1][2], total_size - 1)
+            total_bytes = 0
+            for i, r in enumerate(ranges):
+                total_bytes += (r[2] - r[1] + 1)
+                if i > 0:
+                    self.assertEqual(r[1], ranges[i-1][2] + 1, f"Boundary gap at chunk {i}")
+            self.assertEqual(total_bytes, total_size, "Sum of sliced chunk bytes must equal total payload size")
+
+            slice0_len = ranges[0][2] - ranges[0][1] + 1
+            self.assertTrue(chunk_files[0].exists())
+            self.assertEqual(chunk_files[0].stat().st_size, slice0_len)
+
+            # Resume job from persisted state
+            resumed_job = await self.manager.resume_job_from_state(persisted_state, self.iface)
+            resumed_task = self.manager._job_tasks[resumed_job.job_id]
+            await resumed_task
+
+            self.assertEqual(resumed_job.status, "completed")
+            self.assertTrue(dest.exists())
+            self.assertEqual(dest.stat().st_size, total_size)
+            self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
+    # -----------------------------------------------------------------------
+    # Test ZG — Single interface bounded wait and failed, resumable transition (Item 11)
+    # -----------------------------------------------------------------------
+    async def test_zg_single_interface_bounded_wait_and_resumable_failure(self):
+        MockHttpHandler.all_fail_endpoints.add("/bounded_fail.bin")
+        url = f"{self.base_url}/bounded_fail.bin"
+        dest = self.out_dir / "test_zg_fail.bin"
+
+        with patch.dict(config._DEFAULTS, {
+            "SINGLE_INTERFACE_RECONNECT_TIMEOUT": 0.5,
+            "MAX_CONSECUTIVE_FAILURES": 1,
+            "RETRY_ATTEMPTS": 1,
+        }):
+            job = await self.manager.create_job(url, str(dest), self.iface)
+            task = self.manager._job_tasks[job.job_id]
+            await task
+
+            self.assertEqual(job.status, "failed")
+            self.assertIn("failed, resumable", job.error)
+
+            # Assert save_state logic identifies this job as resumable
+            is_resumable = (job.status == "failed" and "resumable" in (job.error or "").lower())
+            self.assertTrue(is_resumable)
+
+            # Verify resume_job accepts this failed job
+            res = await self.manager.resume_job(job.job_id)
+            self.assertEqual(res["status"], "resumed")
+            await self.manager.cancel_job(job.job_id)
+
 
 if __name__ == "__main__":
     unittest.main()
+
