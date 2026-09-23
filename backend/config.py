@@ -55,6 +55,7 @@ DISCONNECT_DETECTION_TIMEOUT: float = 3.0         # Seconds of zero progress bef
 # ---------------------------------------------------------------------------
 RETRY_SAME_INTERFACE_COOLDOWN: float = 15.0       # Seconds before failed iface is eligible again
 MAX_CONSECUTIVE_FAILURES: int = 3                  # Consecutive chunk failures → exclude interface
+EXCLUDED_INTERFACE_COOLDOWN: float = 60.0          # Seconds an interface remains excluded before re-probing
 
 # ---------------------------------------------------------------------------
 # Sliding-window speed measurement
@@ -100,6 +101,7 @@ _DEFAULTS: Dict[str, Any] = {
     "DISCONNECT_DETECTION_TIMEOUT": DISCONNECT_DETECTION_TIMEOUT,
     "RETRY_SAME_INTERFACE_COOLDOWN": RETRY_SAME_INTERFACE_COOLDOWN,
     "MAX_CONSECUTIVE_FAILURES": MAX_CONSECUTIVE_FAILURES,
+    "EXCLUDED_INTERFACE_COOLDOWN": EXCLUDED_INTERFACE_COOLDOWN,
     "SPEED_SAMPLE_INTERVAL": SPEED_SAMPLE_INTERVAL,
     "SPEED_WINDOW_SECONDS": SPEED_WINDOW_SECONDS,
     "SPEEDTEST_URL": SPEEDTEST_URL,

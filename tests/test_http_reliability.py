@@ -7,11 +7,20 @@ Verifies:
 - Test C: Wrong byte count rejection & retry
 - Test D: Exponential backoff on retry
 - Test E: Per-worker stall watchdog
-- Test F: Safe resume without redownloading complete chunks
-- Test G: Changed ETag detection and safe restart
+- Test F: Safe resume without redownloading complete chunks (request-count verified)
+- Test G: Changed ETag detection and safe restart (request-count verified)
 - Test H: Atomic chunk write (no partial .part files)
 - Test I: Interface failure routing and requeue
 - Test J: Concurrent multi-worker chunk completion & integrity
+- Test K: Mid-download interface failure & rollback
+- Test L: Too-many-bytes rejection & terminal failure
+- Test M: Wrong-Content-Range rejection & terminal failure
+- Test N: Stall after initial bytes watchdog trigger & recovery
+- Test O: Mid-download HTTP 200 rejection & terminal failure
+- Test P: Interface health state exposure (healthy, degraded, excluded)
+- Test Q: Slow-but-progressing transfer is not stalled
+- Test R: Degraded to healthy recovery and temporary exclusion expiration
+- Test S: If-Range header and mid-flight origin mutation detection
 """
 from __future__ import annotations
 
@@ -37,6 +46,7 @@ from downloader import (
     ChunkStatus,
     DownloadJob,
     DownloadManager,
+    InterfaceProgress,
     StalledDownloadError,
     URLAnalysis,
     analyze_url,
@@ -58,16 +68,16 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     oversized_endpoints = set()
     wrong_range_endpoints = set()
     mid_200_endpoints = set()
-    trickle_stall_endpoints = set()
+    stall_after_bytes_endpoints = set()
     mid_fail_endpoints = set()
+    slow_endpoints = set()
+    mid_mutation_endpoints = set()
     request_counts = {}
 
     def log_message(self, format, *args):
-        # Silence standard HTTP access logging in tests
         pass
 
     def handle_error(self, request, client_address):
-        # Silence connection abort logging in tests
         pass
 
     def do_HEAD(self):
@@ -84,19 +94,19 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         self.request_counts[endpoint] = self.request_counts.get(endpoint, 0) + 1
         count = self.request_counts[endpoint]
 
-        # Simulate initial failure if requested
+        # Fail first N requests simulation
         if endpoint == "/fail_first" and count <= self.fail_first_n_requests:
             self.send_response(503)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
-        # Simulate stall
+        # Immediate stall simulation (sleep longer than STALL_TIMEOUT_SECONDS)
         if endpoint in self.stall_endpoints:
             self.send_response(200)
             self.send_header("Content-Length", str(len(TEST_DATA)))
             self.end_headers()
-            time.sleep(2.5)
+            time.sleep(0.45)
             return
 
         range_header = self.headers.get("Range")
@@ -143,6 +153,17 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         end = min(end, len(TEST_DATA) - 1)
         length = end - start + 1
 
+        # Mid-flight mutation: on chunk request, change ETag and respond
+        if endpoint in self.mid_mutation_endpoints and range_header != "bytes=0-0":
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("ETag", '"v2-mutated-etag"')
+            self.end_headers()
+            self.wfile.write(TEST_DATA[start : end + 1])
+            return
+
         # Wrong Content-Range simulation
         if endpoint in self.wrong_range_endpoints and range_header != "bytes=0-0":
             self.send_response(206)
@@ -166,18 +187,32 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(TEST_DATA[start : end + 1] + b"Z" * 500)
             return
 
-        # Trickle stall simulation
-        if endpoint in self.trickle_stall_endpoints and count == 1:
+        # Stall after initial bytes simulation
+        if endpoint in self.stall_after_bytes_endpoints and count == 1:
             self.send_response(206)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(length))
             self.send_header("ETag", f'"{self.etag}"')
             self.end_headers()
-            # Send 50 bytes, then stall
             self.wfile.write(TEST_DATA[start : start + 50])
             self.wfile.flush()
-            time.sleep(2.5)
+            time.sleep(0.45)
+            return
+
+        # Slow-but-progressing simulation (delay between chunks, well within 0.25s stall timeout)
+        if endpoint in self.slow_endpoints:
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("ETag", f'"{self.etag}"')
+            self.end_headers()
+            step = 8192
+            for i in range(start, end + 1, step):
+                self.wfile.write(TEST_DATA[i : min(i + step, end + 1)])
+                self.wfile.flush()
+                time.sleep(0.015)
             return
 
         # Mid-download socket severance simulation
@@ -204,7 +239,6 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
 
         if endpoint in self.truncate_endpoints and count == 1:
-            # Send truncated data (fewer bytes than expected)
             truncated_len = max(1, length // 2)
             self.send_header("Content-Length", str(truncated_len))
             self.end_headers()
@@ -218,16 +252,17 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
 class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
-        # Configure fast test thresholds
+        # Configure fast test thresholds for sub-second, deterministic testing
         config.save_settings({
             "BASE_CHUNK_SIZE": 64 * 1024,
             "MIN_CHUNK_SIZE": 16 * 1024,
             "MAX_CHUNK_SIZE": 64 * 1024,
-            "STALL_TIMEOUT_SECONDS": 1.0,
-            "RETRY_BACKOFF_BASE": 0.1,
-            "RETRY_BACKOFF_MAX": 0.4,
-            "RETRY_JITTER_MAX": 0.05,
+            "STALL_TIMEOUT_SECONDS": 0.25,
+            "RETRY_BACKOFF_BASE": 0.01,
+            "RETRY_BACKOFF_MAX": 0.05,
+            "RETRY_JITTER_MAX": 0.005,
             "RETRY_ATTEMPTS": 3,
+            "EXCLUDED_INTERFACE_COOLDOWN": 0.5,
         })
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockHttpHandler)
         cls.port = cls.server.server_port
@@ -247,6 +282,13 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         MockHttpHandler.stall_endpoints.clear()
         MockHttpHandler.no_range_endpoints.clear()
         MockHttpHandler.truncate_endpoints.clear()
+        MockHttpHandler.oversized_endpoints.clear()
+        MockHttpHandler.wrong_range_endpoints.clear()
+        MockHttpHandler.mid_200_endpoints.clear()
+        MockHttpHandler.stall_after_bytes_endpoints.clear()
+        MockHttpHandler.mid_fail_endpoints.clear()
+        MockHttpHandler.slow_endpoints.clear()
+        MockHttpHandler.mid_mutation_endpoints.clear()
         MockHttpHandler.request_counts.clear()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.out_dir = Path(self.temp_dir.name)
@@ -260,11 +302,13 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
     # Test A — Range support (206 Partial Content)
     # -----------------------------------------------------------------------
     async def test_a_range_support(self):
-        url = f"{self.base_url}/range_file.bin"
+        url = f"{self.base_url}/test_a.bin"
         analysis = await analyze_url(url, "127.0.0.1")
+
         self.assertTrue(analysis.supports_ranges)
         self.assertEqual(analysis.content_length, len(TEST_DATA))
         self.assertEqual(analysis.etag, "v1-valid-etag")
+        self.assertIsNotNone(analysis.last_modified)
 
         dest = self.out_dir / "test_a.bin"
         job = await self.manager.create_job(url, str(dest), self.iface)
@@ -285,7 +329,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
         analysis = await analyze_url(url, "127.0.0.1")
         self.assertFalse(analysis.supports_ranges)
-        self.assertIn("200 OK", analysis.range_error_reason)
+        self.assertIn("200 OK", analysis.range_error_reason or "")
 
         dest = self.out_dir / "test_b.bin"
         job = await self.manager.create_job(url, str(dest), self.iface)
@@ -310,7 +354,6 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         task = self.manager._job_tasks[job.job_id]
         await task
 
-        # The first request was truncated and rejected; retry succeeded
         self.assertEqual(job.status, "completed")
         self.assertTrue(dest.exists())
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
@@ -331,8 +374,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         elapsed = time.perf_counter() - t0
 
         self.assertEqual(job.status, "completed")
-        # Ensure that backoff caused at least a brief measurable delay
-        self.assertGreater(elapsed, 0.08)
+        self.assertGreater(elapsed, 0.01)
         self.assertTrue(dest.exists())
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
 
@@ -347,10 +389,8 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         job = await self.manager.create_job(url, str(dest), self.iface)
         task = self.manager._job_tasks[job.job_id]
 
-        # Give watchdog time to fire and fail
-        await asyncio.wait_for(task, timeout=10.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
-        # Job should fail due to stall without corruption
         self.assertEqual(job.status, "failed")
         self.assertTrue(
             "stalled" in (job.error or "").lower() or "timed out" in (job.error or "").lower(),
@@ -358,21 +398,21 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         )
 
     # -----------------------------------------------------------------------
-    # Test F — Safe resume without redownloading completed chunks
+    # Test F — Safe resume without redownloading completed chunks (request-count verified)
     # -----------------------------------------------------------------------
     async def test_f_safe_resume(self):
         url = f"{self.base_url}/resume_file.bin"
         dest = self.out_dir / "test_f.bin"
 
-        # Start job
+        # Complete initial download
         job = await self.manager.create_job(url, str(dest), self.iface)
         task = self.manager._job_tasks[job.job_id]
         await task
         self.assertEqual(job.status, "completed")
 
-        # Now simulate resume from saved state
+        initial_requests = MockHttpHandler.request_counts.get("/resume_file.bin", 0)
+
         state = job.to_dict()
-        # Reset output file
         dest.unlink()
 
         # Recreate chunk 0 .part file on disk so it acts as partially downloaded
@@ -389,18 +429,23 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await resume_task
 
         self.assertEqual(resumed_job.status, "completed")
+        self.assertEqual(resumed_job.resume_confidence, "high")
         self.assertTrue(dest.exists())
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
+        # Request count verification: chunk 0 was NOT re-requested from server!
+        # Total chunks = 4. Resumed download only requested 1 probe + remaining 3 chunks = 4 requests.
+        resumed_requests = MockHttpHandler.request_counts.get("/resume_file.bin", 0) - initial_requests
+        self.assertEqual(resumed_requests, 4, "Completed chunk 0 must not be requested again")
+
     # -----------------------------------------------------------------------
-    # Test G — Changed ETag detection and safe restart
+    # Test G — Changed ETag detection and safe restart (request-count verified)
     # -----------------------------------------------------------------------
     async def test_g_changed_etag_safe_restart(self):
         url = f"{self.base_url}/etag_file.bin"
         dest = self.out_dir / "test_g.bin"
 
-        # Analyze with ETag v1
         MockHttpHandler.etag = "etag-v1"
         analysis = await analyze_url(url, "127.0.0.1")
         self.assertEqual(analysis.etag, "etag-v1")
@@ -413,7 +458,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
             "supports_ranges": True,
             "etag": "etag-v1",
             "total_downloaded": 65536,
-            "_ranges": [(0, 0, 65535), (1, 65536, len(TEST_DATA) - 1)],
+            "_ranges": [(0, 0, 65535), (1, 65536, 131071), (2, 131072, 196607), (3, 196608, len(TEST_DATA) - 1)],
             "interfaces": {"127.0.0.1": {"name": "Loopback", "ip_address": "127.0.0.1", "chunk_start": 0, "chunk_end": 65535}},
         }
 
@@ -422,19 +467,26 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         (temp_dir / "chunk_00000.part").write_bytes(b"\x00" * 65536)
 
+        initial_requests = MockHttpHandler.request_counts.get("/etag_file.bin", 0)
+
         # Change server ETag to v2
         MockHttpHandler.etag = "etag-v2"
 
-        # Resume job -> should detect mismatch, wipe old chunk, and download cleanly
+        # Resume job -> should detect mismatch, wipe old chunk, and download all 4 chunks
         job = await self.manager.resume_job_from_state(state, self.iface)
         task = self.manager._job_tasks[job.job_id]
         await task
 
         self.assertEqual(job.status, "completed")
         self.assertEqual(job.etag, "etag-v2")
+        self.assertEqual(job.resume_confidence, "none", "Confidence must be none when ETag change forces restart")
         self.assertTrue(dest.exists())
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
+        # Request count verification: 2 probes (resume check + clean restart) + 4 chunks = 6 requests
+        resumed_requests = MockHttpHandler.request_counts.get("/etag_file.bin", 0) - initial_requests
+        self.assertEqual(resumed_requests, 6, "All 4 chunks plus probes must be executed on restart")
 
     # -----------------------------------------------------------------------
     # Test H — Atomic chunk write
@@ -451,9 +503,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         output_file = temp_dir / "chunk_00000.part"
 
-        # Cancel job mid-download to verify atomic protection
         job.is_cancelled = True
-        worker_id = socket.gethostname()
         import uuid
         uid = uuid.uuid4()
 
@@ -464,7 +514,6 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         except Exception:
             pass
 
-        # Verify no .part file was left behind
         self.assertFalse(output_file.exists(), ".part file must not exist for interrupted chunk")
 
     # -----------------------------------------------------------------------
@@ -474,13 +523,11 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         url = f"{self.base_url}/iface_fail.bin"
         dest = self.out_dir / "test_i.bin"
 
-        # Two interfaces: bad IP (unroutable) and loopback
         ifaces = [
-            {"name": "BadInterface", "ip_address": "192.0.2.1"},  # TEST-NET-1 (fails immediately)
+            {"name": "BadInterface", "ip_address": "192.0.2.1"},
             {"name": "GoodInterface", "ip_address": "127.0.0.1"},
         ]
 
-        # Should route through or alternate to the good interface
         job = await self.manager.create_job(url, str(dest), ifaces)
         task = self.manager._job_tasks[job.job_id]
         await task
@@ -497,7 +544,6 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         url = f"{self.base_url}/concurrent.bin"
         dest = self.out_dir / "test_j.bin"
 
-        # Use 3 concurrent workers (Boost Mode)
         job = await self.manager.create_job(url, str(dest), self.iface)
         await self.manager.toggle_boost(job.job_id, self.iface)
         task = self.manager._job_tasks[job.job_id]
@@ -508,7 +554,6 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
-        # Verify every chunk was completed exactly once
         for c in job.chunks.values():
             self.assertEqual(c.status, ChunkStatus.COMPLETE)
             self.assertIsNotNone(c.completed_at)
@@ -531,7 +576,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
     # -----------------------------------------------------------------------
-    # Test L — Too-many-bytes rejection (oversized payload)
+    # Test L — Too-many-bytes rejection (terminal failure)
     # -----------------------------------------------------------------------
     async def test_l_too_many_bytes_rejection(self):
         url = f"{self.base_url}/oversized.bin"
@@ -542,12 +587,13 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         task = self.manager._job_tasks[job.job_id]
         await task
 
+        # Terminal state behavior
         self.assertEqual(job.status, "failed")
         self.assertIn("too many bytes", job.error.lower())
-        self.assertFalse(dest.exists())
+        self.assertFalse(dest.exists(), "Corrupt destination file must not be committed")
 
     # -----------------------------------------------------------------------
-    # Test M — Wrong-Content-Range rejection
+    # Test M — Wrong-Content-Range rejection (terminal failure)
     # -----------------------------------------------------------------------
     async def test_m_wrong_content_range(self):
         url = f"{self.base_url}/wrong_range.bin"
@@ -558,17 +604,18 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         task = self.manager._job_tasks[job.job_id]
         await task
 
+        # Terminal state behavior
         self.assertEqual(job.status, "failed")
         self.assertIn("content-range mismatch", job.error.lower())
-        self.assertFalse(dest.exists())
+        self.assertFalse(dest.exists(), "Corrupt destination file must not be committed")
 
     # -----------------------------------------------------------------------
-    # Test N — Trickle-stall watchdog trigger and recovery
+    # Test N — Stall after initial bytes watchdog trigger and recovery
     # -----------------------------------------------------------------------
-    async def test_n_trickle_stall(self):
-        url = f"{self.base_url}/trickle_stall.bin"
+    async def test_n_stall_after_initial_bytes(self):
+        url = f"{self.base_url}/stall_after_bytes.bin"
         dest = self.out_dir / "test_n.bin"
-        MockHttpHandler.trickle_stall_endpoints.add("/trickle_stall.bin")
+        MockHttpHandler.stall_after_bytes_endpoints.add("/stall_after_bytes.bin")
 
         job = await self.manager.create_job(url, str(dest), self.iface)
         task = self.manager._job_tasks[job.job_id]
@@ -580,7 +627,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
     # -----------------------------------------------------------------------
-    # Test O — Mid-download HTTP 200 response rejection for Range request
+    # Test O — Mid-download HTTP 200 response rejection (terminal failure)
     # -----------------------------------------------------------------------
     async def test_o_mid_download_200(self):
         url = f"{self.base_url}/mid_200.bin"
@@ -591,15 +638,15 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         task = self.manager._job_tasks[job.job_id]
         await task
 
+        # Terminal state behavior
         self.assertEqual(job.status, "failed")
         self.assertIn("expected 206", job.error.lower())
-        self.assertFalse(dest.exists())
+        self.assertFalse(dest.exists(), "Corrupt destination file must not be committed")
 
     # -----------------------------------------------------------------------
     # Test P — Interface health state exposure (healthy, degraded, excluded)
     # -----------------------------------------------------------------------
     def test_p_interface_health_state(self):
-        from downloader import InterfaceProgress
         prog = InterfaceProgress(name="eth0", ip_address="192.168.1.10", chunk_start=0, chunk_end=1000)
         self.assertEqual(prog.health, "healthy")
 
@@ -607,10 +654,71 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prog.health, "degraded")
 
         prog.consecutive_failures = 3
+        prog._cooldown_until = time.time() + 60.0
         self.assertEqual(prog.health, "excluded")
 
         prog.status = "excluded"
         self.assertEqual(prog.health, "excluded")
+
+    # -----------------------------------------------------------------------
+    # Test Q — Slow-but-progressing transfer is NOT stalled
+    # -----------------------------------------------------------------------
+    async def test_q_slow_but_progressing_not_stalled(self):
+        url = f"{self.base_url}/slow_progress.bin"
+        dest = self.out_dir / "test_q.bin"
+        MockHttpHandler.slow_endpoints.add("/slow_progress.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        # Must succeed without stall watchdog triggering because bytes were steadily progressing
+        self.assertEqual(job.status, "completed")
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(TEST_DATA))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
+    # -----------------------------------------------------------------------
+    # Test R — Degraded to healthy recovery and temporary exclusion expiration
+    # -----------------------------------------------------------------------
+    def test_r_degraded_to_healthy_recovery(self):
+        prog = InterfaceProgress(name="wlan0", ip_address="10.0.0.5", chunk_start=0, chunk_end=1000)
+        self.assertEqual(prog.health, "healthy")
+
+        # Step 1: Failure causes transition to degraded
+        prog.consecutive_failures = 1
+        self.assertEqual(prog.health, "degraded")
+
+        # Step 2: Successful chunk resets failures to 0 -> healthy
+        prog.consecutive_failures = 0
+        self.assertEqual(prog.health, "healthy")
+
+        # Step 3: Hits max failures -> excluded
+        prog.consecutive_failures = 3
+        prog.status = "excluded"
+        prog._cooldown_until = time.time() + 0.1
+        self.assertEqual(prog.health, "excluded")
+
+        # Step 4: After cooldown expires -> transitions to degraded (ready for probe)
+        time.sleep(0.15)
+        self.assertEqual(prog.health, "degraded")
+
+    # -----------------------------------------------------------------------
+    # Test S — If-Range header and mid-flight origin mutation detection
+    # -----------------------------------------------------------------------
+    async def test_s_if_range_mid_flight_mutation(self):
+        url = f"{self.base_url}/mid_mutation.bin"
+        dest = self.out_dir / "test_s.bin"
+        MockHttpHandler.mid_mutation_endpoints.add("/mid_mutation.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        # Origin mutation detected mid-flight via ETag change on 206 response
+        self.assertEqual(job.status, "failed")
+        self.assertIn("remote resource modified mid-flight", job.error.lower())
+        self.assertFalse(dest.exists(), "Partially mutated file must not be assembled")
 
 
 if __name__ == "__main__":

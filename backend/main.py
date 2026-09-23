@@ -1159,8 +1159,15 @@ def save_state():
         ]
         
         path = _get_active_jobs_path()
-        with open(path, "w") as f:
-            json.dump({"downloads": downloads, "torrents": torrents}, f)
+        tmp_path = path + f".tmp_{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({"downloads": downloads, "torrents": torrents}, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, path)
     except Exception as e:
         print(f"State save error: {e}")
 

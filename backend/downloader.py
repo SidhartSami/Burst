@@ -70,6 +70,7 @@ def is_non_retryable_error(exc: Exception) -> bool:
             or "expected 206" in msg
             or "content-range mismatch" in msg
             or "too many bytes" in msg
+            or "remote resource modified mid-flight" in msg
         ):
             return True
     return False
@@ -195,11 +196,12 @@ class InterfaceProgress:
     @property
     def health(self) -> str:
         max_failures = config.get("MAX_CONSECUTIVE_FAILURES") or 3
-        if self.status == "excluded" or self.consecutive_failures >= max_failures:
+        now = time.time()
+        if (self.status == "excluded" or self.consecutive_failures >= max_failures) and now < self._cooldown_until:
             return "excluded"
         if (
             self.consecutive_failures > 0
-            or self._cooldown_until > time.time()
+            or self._cooldown_until > now
             or self.status in ("paused_slow", "disconnected")
         ):
             return "degraded"
@@ -228,6 +230,7 @@ class DownloadJob:
     last_modified: Optional[str] = None
     final_url: Optional[str] = None
     range_error_reason: Optional[str] = None
+    resume_confidence: str = "high"
     chunks: Dict[int, Chunk] = field(default_factory=dict)
     _queue: Any = field(default=None, repr=False)
     _chunk_files: Any = field(default=None, repr=False)
@@ -270,6 +273,7 @@ class DownloadJob:
             "last_modified": self.last_modified,
             "final_url": self.final_url,
             "range_error_reason": self.range_error_reason,
+            "resume_confidence": self.resume_confidence,
             "chunks": {k: c.to_dict() for k, c in self.chunks.items()},
         }
 
@@ -435,6 +439,7 @@ class DownloadManager:
             last_modified=data.get("last_modified"),
             final_url=data.get("final_url"),
             range_error_reason=data.get("range_error_reason"),
+            resume_confidence=data.get("resume_confidence", "high"),
         )
         job._ranges = data.get("_ranges", [])
         for r in job._ranges:
@@ -494,6 +499,7 @@ class DownloadManager:
 
                 if mismatch:
                     print(f"[RESUME] Remote resource modified ({reason}). Restarting download safely to prevent corruption.")
+                    job.resume_confidence = "none"
                     temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
                     if temp_dir.exists():
                         for f in temp_dir.glob("chunk_*.*"):
@@ -513,6 +519,15 @@ class DownloadManager:
                     await self._run_job(job, interfaces)
                     return
                 else:
+                    if current_info.etag and job.etag and current_info.etag == job.etag:
+                        job.resume_confidence = "high"
+                    elif current_info.last_modified and job.last_modified and current_info.last_modified == job.last_modified:
+                        job.resume_confidence = "medium"
+                    elif job.expected_size > 0 and current_info.content_length == job.expected_size:
+                        job.resume_confidence = "low"
+                    else:
+                        job.resume_confidence = "none"
+
                     if current_info.etag:
                         job.etag = current_info.etag
                     if current_info.last_modified:
@@ -1287,14 +1302,22 @@ class DownloadManager:
                         prog.speed_mb_s = 0.0
 
             # Proactively restart dead workers when work remains in queue
-            max_failures = config.get("MAX_CONSECUTIVE_FAILURES")
+            max_failures = config.get("MAX_CONSECUTIVE_FAILURES") or 3
             if not job._queue.empty():
                 for ip, prog in job.progress.items():
                     active_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
-                    if not active_tasks and prog.status not in ("excluded", "cancelled"):
-                        if prog.consecutive_failures >= max_failures:
-                            prog.status = "excluded"
-                            continue
+                    if not active_tasks and prog.status != "cancelled":
+                        if prog.status == "excluded" or prog.consecutive_failures >= max_failures:
+                            if now >= prog._cooldown_until and prog._cooldown_until > 0:
+                                # Exclusion cooldown expired: restore to degraded state for probe attempt
+                                prog.status = "pending"
+                                prog.consecutive_failures = max_failures - 1
+                                prog.error = None
+                            else:
+                                if prog.status != "excluded":
+                                    prog.status = "excluded"
+                                    prog._cooldown_until = now + float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
+                                continue
                         if now < prog._cooldown_until:
                             continue
 
@@ -1342,7 +1365,8 @@ class DownloadManager:
                         raise Exception(f"All interfaces failed to download the remaining chunks. Last error: {last_chunk_err}")
                     raise Exception("All interfaces failed to download the remaining chunks.")
 
-            await asyncio.sleep(0.5)
+            sleep_time = 0.05 if job._queue.empty() or all(w.done() for w in job._workers.values()) else 0.25
+            await asyncio.sleep(sleep_time)
 
         if not job.is_cancelled:
             # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge
@@ -1353,7 +1377,8 @@ class DownloadManager:
                 c.status = ChunkStatus.COMPLETE
 
             sorted_files = [job._chunk_files[r[0]] for r in job._ranges]
-            await merge_chunks(sorted_files, Path(job.output_path), job.expected_size)
+            expected_chunk_sizes = [r[2] - r[1] + 1 for r in job._ranges]
+            await merge_chunks(sorted_files, Path(job.output_path), job.expected_size, expected_chunk_sizes)
             out_file = Path(job.output_path)
             if not out_file.exists() or out_file.stat().st_size != job.expected_size:
                 raise ValueError(f"Final file size verification failed: expected {job.expected_size}, got {out_file.stat().st_size if out_file.exists() else 0}")
@@ -1398,6 +1423,10 @@ class DownloadManager:
             "Range": f"bytes={start}-{end}",
             "Accept-Encoding": "identity",
         }
+        if job.etag:
+            headers["If-Range"] = f'"{job.etag}"' if not job.etag.startswith('"') else job.etag
+        elif job.last_modified:
+            headers["If-Range"] = job.last_modified
 
         try:
             await asyncio.to_thread(
@@ -1517,6 +1546,17 @@ class DownloadManager:
                                     raise ValueError(
                                         f"Content-Range mismatch: requested {exp_start}-{exp_end}, received {r_start}-{r_end}"
                                     )
+
+                        resp_etag = response.headers.get("ETag", "").strip('"') or None
+                        if job.etag and resp_etag and resp_etag != job.etag:
+                            raise ValueError(
+                                f"Remote resource modified mid-flight: ETag changed from {job.etag} to {resp_etag}"
+                            )
+                        resp_last_modified = response.headers.get("Last-Modified") or None
+                        if job.last_modified and resp_last_modified and resp_last_modified != job.last_modified:
+                            raise ValueError(
+                                f"Remote resource modified mid-flight: Last-Modified changed from {job.last_modified} to {resp_last_modified}"
+                            )
 
                     # Token-bucket throttle state
                     throttle_window_start = time.monotonic()
