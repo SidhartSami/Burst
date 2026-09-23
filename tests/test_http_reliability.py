@@ -1096,6 +1096,46 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         # Fast worker stole significantly more chunks than slow worker (at least 2x)
         self.assertGreaterEqual(len(fast_completed), len(slow_completed) * 2, "Fast worker must steal at least 2x chunks")
 
+    # -----------------------------------------------------------------------
+    # Test ZB — Per-interface stats (bytes, EWMA, request/success/failure/retry/stall, workers) in API payload
+    # -----------------------------------------------------------------------
+    async def test_zb_per_interface_stats_in_api_payload(self):
+        url = f"{self.base_url}/stats_test.bin"
+        dest = self.out_dir / "test_zb.bin"
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "completed")
+        payload = job.to_dict()
+        self.assertIn("interfaces", payload)
+        self.assertIn("127.0.0.1", payload["interfaces"])
+
+        stats = payload["interfaces"]["127.0.0.1"]
+        # Required stats fields
+        self.assertIn("bytes", stats)
+        self.assertIn("ewma_speed_mb_s", stats)
+        self.assertIn("request_count", stats)
+        self.assertIn("success_count", stats)
+        self.assertIn("failure_count", stats)
+        self.assertIn("retry_count", stats)
+        self.assertIn("stall_count", stats)
+        self.assertIn("last_success_time", stats)
+        self.assertIn("active_workers", stats)
+
+        # Assert correct values
+        self.assertEqual(stats["bytes"], len(TEST_DATA))
+        self.assertGreater(stats["request_count"], 0)
+        self.assertEqual(stats["success_count"], stats["request_count"])
+        self.assertEqual(stats["failure_count"], 0)
+        self.assertEqual(stats["retry_count"], 0)
+        self.assertEqual(stats["stall_count"], 0)
+        self.assertGreater(stats["ewma_speed_mb_s"], 0.0)
+        self.assertIsNotNone(stats["last_success_time"])
+        self.assertGreater(stats["last_success_time"], 0.0)
+        self.assertEqual(stats["active_workers"], 0)  # All finished
+
 
 if __name__ == "__main__":
     unittest.main()

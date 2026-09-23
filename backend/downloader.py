@@ -217,6 +217,14 @@ class InterfaceProgress:
     latency_ms: float = 0.0
     chunks_completed: int = 0
     consecutive_failures: int = 0
+    ewma_speed_mb_s: float = 0.0
+    request_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    retry_count: int = 0
+    stall_count: int = 0
+    last_success_time: Optional[float] = None
+    active_workers: int = 0
     _speed_samples: Any = field(default_factory=list, repr=False)
     _slow_since: Optional[float] = field(default=None, repr=False)
     _last_progress_time: float = field(default_factory=time.time, repr=False)
@@ -272,12 +280,26 @@ class DownloadJob:
     def to_dict(self) -> Dict[str, Any]:
         iface_dict = {}
         for k, v in self.progress.items():
+            active_cnt = sum(
+                1 for w_key, t in self._workers.items()
+                if (w_key == k or w_key.startswith(f"{k}_")) and not t.done()
+            )
             d = {
                 "name": v.name, "ip_address": v.ip_address,
                 "chunk_start": v.chunk_start, "chunk_end": v.chunk_end,
+                "bytes": v.downloaded,
                 "downloaded": v.downloaded, "status": v.status,
                 "health": v.health,
-                "speed_mb_s": v.speed_mb_s, "error": v.error,
+                "speed_mb_s": v.speed_mb_s,
+                "ewma_speed_mb_s": round(v.ewma_speed_mb_s, 2),
+                "request_count": v.request_count,
+                "success_count": v.success_count,
+                "failure_count": v.failure_count,
+                "retry_count": v.retry_count,
+                "stall_count": v.stall_count,
+                "last_success_time": v.last_success_time,
+                "active_workers": active_cnt,
+                "error": v.error,
                 "weight": v.weight, "weight_percent": v.weight_percent,
                 "latency_ms": v.latency_ms, "chunks_completed": v.chunks_completed,
                 "consecutive_failures": v.consecutive_failures,
@@ -782,10 +804,9 @@ class DownloadManager:
             job._active_threads = set()
         job._active_threads.add(worker_id)
         
-        try:
-            temp_out.unlink(missing_ok=True)
-            await asyncio.to_thread(
-                self._download_with_requests, job, interface["ip_address"],
+        def _do_single_download_and_commit():
+            self._download_with_requests(
+                job, interface["ip_address"],
                 job.url, temp_out, "wb", None, progress, started,
                 worker_id, 0, job.expected_size if job.expected_size > 0 else None
             )
@@ -794,6 +815,10 @@ class DownloadManager:
                     temp_out.unlink(missing_ok=True)
                     raise ValueError(f"Single download size mismatch: expected {job.expected_size}, got {temp_out.stat().st_size}")
                 os.replace(temp_out, out_path)
+
+        try:
+            temp_out.unlink(missing_ok=True)
+            await asyncio.to_thread(_do_single_download_and_commit)
         finally:
             if hasattr(job, "_active_threads"):
                 job._active_threads.discard(worker_id)
@@ -880,13 +905,25 @@ class DownloadManager:
             if not hasattr(job, "_active_threads"):
                 job._active_threads = set()
             job._active_threads.add(worker_id)
+            prog.request_count += 1
 
             try:
                 await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
                 prog.error = None
                 prog.consecutive_failures = 0
                 prog.chunks_completed += 1
+                prog.success_count += 1
+                prog.last_success_time = time.time()
                 prog._last_progress_time = time.time()
+
+                # Update EWMA throughput
+                chunk_dur = max(time.time() - chunk.started_at, 0.001)
+                chunk_speed = ((end - start + 1) / (1024 * 1024)) / chunk_dur
+                if prog.ewma_speed_mb_s <= 0.0:
+                    prog.ewma_speed_mb_s = chunk_speed
+                else:
+                    prog.ewma_speed_mb_s = 0.3 * chunk_speed + 0.7 * prog.ewma_speed_mb_s
+
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
                 chunk.last_error = None
@@ -908,6 +945,9 @@ class DownloadManager:
                     chunk.assigned_interface = None
 
                 prog.consecutive_failures += 1
+                prog.failure_count += 1
+                if is_stall:
+                    prog.stall_count += 1
                 job._chunk_failures[chunk_idx] = job._chunk_failures.get(chunk_idx, 0) + 1
 
                 if isinstance(e, OriginResourceModifiedError):
@@ -948,6 +988,7 @@ class DownloadManager:
                     job.is_cancelled = True
                     break
 
+                prog.retry_count += 1
                 backoff_delay = calculate_backoff(chunk.attempts)
                 best_alt = self._find_best_alternate(job, ip)
                 reason = "Stalled watchdog timeout" if is_stall else str(e)[:100]
@@ -1578,20 +1619,23 @@ class DownloadManager:
         elif job.last_modified:
             headers["If-Range"] = job.last_modified
 
-        try:
-            await asyncio.to_thread(
-                self._download_with_requests, job, interface["ip_address"],
+        def _do_chunk_download_and_commit():
+            self._download_with_requests(
+                job, interface["ip_address"],
                 job.url, tmp_file, "wb", headers, progress, started,
                 worker_id, 0, expected_bytes
             )
 
-            # Atomic Chunk Completion:
+            # Atomic Chunk Completion in worker thread (off event loop):
             if not tmp_file.exists() or tmp_file.stat().st_size != expected_bytes:
                 actual = tmp_file.stat().st_size if tmp_file.exists() else 0
                 tmp_file.unlink(missing_ok=True)
                 raise ValueError(f"Chunk byte count mismatch: expected {expected_bytes} bytes, got {actual} bytes")
 
             os.replace(tmp_file, part_file)
+
+        try:
+            await asyncio.to_thread(_do_chunk_download_and_commit)
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
