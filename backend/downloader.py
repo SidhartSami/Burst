@@ -46,6 +46,35 @@ class StalledDownloadError(Exception):
     pass
 
 
+class OriginResourceModifiedError(ValueError):
+    """Raised when the remote resource has been modified mid-flight (ETag/Last-Modified mismatch or 200 OK to Range)."""
+    pass
+
+
+def normalize_etag(etag: Optional[str]) -> Optional[str]:
+    """Normalize ETag string, preserving weak indicator (W/) if present."""
+    if not etag:
+        return None
+    val = etag.strip()
+    if not val:
+        return None
+    if val.startswith(("W/", "w/")):
+        inner = val[2:].strip().strip('"')
+        return f'W/"{inner}"'
+    return val.strip('"')
+
+
+def is_strong_etag(etag: Optional[str]) -> bool:
+    """Return True if etag is present and is a strong entity tag per RFC 9110 Section 8.8.3.
+
+    Weak entity tags begin with W/ or w/ and MUST NOT be used in If-Range.
+    """
+    if not etag:
+        return False
+    val = etag.strip()
+    return bool(val) and not (val.startswith("W/") or val.startswith("w/"))
+
+
 def calculate_backoff(attempt: int) -> float:
     """Calculate exponential backoff with jitter."""
     base = float(config.get("RETRY_BACKOFF_BASE") or 1.0)
@@ -58,7 +87,7 @@ def calculate_backoff(attempt: int) -> float:
 
 def is_non_retryable_error(exc: Exception) -> bool:
     """Identify permanent non-retryable errors that should fail immediately."""
-    if isinstance(exc, (FileNotFoundError, PermissionError)):
+    if isinstance(exc, (FileNotFoundError, PermissionError, OriginResourceModifiedError)):
         return True
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         if exc.response.status_code in (400, 401, 403, 404, 405, 410, 416):
@@ -296,7 +325,7 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
             async with session.get(url, allow_redirects=True, headers=headers, ssl=False) as resp:
                 final_url = str(resp.url)
                 content_type = resp.headers.get("Content-Type", "application/octet-stream")
-                etag = resp.headers.get("ETag", "").strip('"') or None
+                etag = normalize_etag(resp.headers.get("ETag"))
                 last_modified = resp.headers.get("Last-Modified") or None
 
                 if resp.status == 206:
@@ -349,7 +378,7 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
                 final_url = str(resp.url)
                 if resp.status < 400:
                     total_size = int(resp.headers.get("Content-Length", "0"))
-                    etag = resp.headers.get("ETag", "").strip('"') or None
+                    etag = normalize_etag(resp.headers.get("ETag"))
                     last_modified = resp.headers.get("Last-Modified") or None
                     content_type = resp.headers.get("Content-Type", "application/octet-stream")
                     return URLAnalysis(
@@ -375,7 +404,7 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
                 content_length=total_size,
                 supports_ranges=False,
                 content_type=resp.headers.get("Content-Type", "application/octet-stream"),
-                etag=resp.headers.get("ETag", "").strip('"') or None,
+                etag=normalize_etag(resp.headers.get("ETag")),
                 last_modified=resp.headers.get("Last-Modified") or None,
                 range_error_reason="Fallback to basic GET; ranges disabled",
             )
@@ -546,7 +575,7 @@ class DownloadManager:
                 await self._run_job(job, interfaces)
                 return
                 
-            if job.is_cancelled:
+            if job.status == "failed" or job.is_cancelled:
                 if job.status != "failed":
                     job.status = "failed"
                     job.error = "Cancelled by user"
@@ -637,7 +666,7 @@ class DownloadManager:
                 job.status = "downloading"
                 await self._parallel_download(job, interfaces)
 
-            if job.is_cancelled:
+            if job.status == "failed" or job.is_cancelled:
                 if job.status != "failed":
                     job.status = "failed"
                     job.error = "Cancelled by user"
@@ -793,6 +822,37 @@ class DownloadManager:
 
                 prog.consecutive_failures += 1
                 job._chunk_failures[chunk_idx] = job._chunk_failures.get(chunk_idx, 0) + 1
+
+                if isinstance(e, OriginResourceModifiedError):
+                    job.status = "failed"
+                    job.resume_confidence = "none"
+                    job.error = str(e)
+                    chunk.status = ChunkStatus.FAILED
+                    job.is_cancelled = True
+                    # Defined Mutation Abort Outcome:
+                    # 1. Abort chunk stream immediately without writing to .part
+                    # 2. Unlink any active .tmp files (handled in finally of _download_range)
+                    # 3. Purge existing .part files in .burst_{job_id}
+                    temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
+                    if temp_dir.exists():
+                        for f in temp_dir.glob("chunk_*"):
+                            try:
+                                f.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                    # 4. Clean up destination file if present
+                    try:
+                        Path(job.output_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    # 5. Drain the queue so other workers immediately exit
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            queue.task_done()
+                        except Exception:
+                            break
+                    break
 
                 if is_non_retryable_error(e) or job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2:
                     job.status = "failed"
@@ -1368,7 +1428,7 @@ class DownloadManager:
             sleep_time = 0.05 if job._queue.empty() or all(w.done() for w in job._workers.values()) else 0.25
             await asyncio.sleep(sleep_time)
 
-        if not job.is_cancelled:
+        if not job.is_cancelled and job.status != "failed":
             # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge
             for c in job.chunks.values():
                 part_f = job._chunk_files[c.chunk_id]
@@ -1423,8 +1483,9 @@ class DownloadManager:
             "Range": f"bytes={start}-{end}",
             "Accept-Encoding": "identity",
         }
-        if job.etag:
-            headers["If-Range"] = f'"{job.etag}"' if not job.etag.startswith('"') else job.etag
+        if is_strong_etag(job.etag):
+            etag_val = job.etag
+            headers["If-Range"] = f'"{etag_val}"' if not etag_val.startswith('"') else etag_val
         elif job.last_modified:
             headers["If-Range"] = job.last_modified
 
@@ -1528,7 +1589,11 @@ class DownloadManager:
                 with response:
                     response.raise_for_status()
                     if headers and "Range" in headers:
-                        if response.status_code != 206:
+                        if response.status_code == 200:
+                            raise OriginResourceModifiedError(
+                                "Server responded with HTTP 200 to Range request, expected 206 Partial Content (origin resource modified or ranges unsupported)"
+                            )
+                        elif response.status_code != 206:
                             raise ValueError(
                                 f"Server responded with HTTP {response.status_code} to Range request, expected 206 Partial Content"
                             )
@@ -1547,14 +1612,14 @@ class DownloadManager:
                                         f"Content-Range mismatch: requested {exp_start}-{exp_end}, received {r_start}-{r_end}"
                                     )
 
-                        resp_etag = response.headers.get("ETag", "").strip('"') or None
+                        resp_etag = normalize_etag(response.headers.get("ETag"))
                         if job.etag and resp_etag and resp_etag != job.etag:
-                            raise ValueError(
+                            raise OriginResourceModifiedError(
                                 f"Remote resource modified mid-flight: ETag changed from {job.etag} to {resp_etag}"
                             )
                         resp_last_modified = response.headers.get("Last-Modified") or None
                         if job.last_modified and resp_last_modified and resp_last_modified != job.last_modified:
-                            raise ValueError(
+                            raise OriginResourceModifiedError(
                                 f"Remote resource modified mid-flight: Last-Modified changed from {job.last_modified} to {resp_last_modified}"
                             )
 

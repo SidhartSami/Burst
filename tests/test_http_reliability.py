@@ -61,6 +61,7 @@ TEST_DATA_HASH = hashlib.sha256(TEST_DATA).hexdigest()
 class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     """Configurable HTTP handler simulating various server behaviors."""
     etag = "v1-valid-etag"
+    last_modified = "Wed, 23 Sep 2026 12:00:00 GMT"
     fail_first_n_requests = 0
     stall_endpoints = set()
     no_range_endpoints = set()
@@ -72,7 +73,9 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     mid_fail_endpoints = set()
     slow_endpoints = set()
     mid_mutation_endpoints = set()
+    mutation_abort_endpoints = set()
     request_counts = {}
+    recorded_requests = []
 
     def log_message(self, format, *args):
         pass
@@ -80,12 +83,24 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     def handle_error(self, request, client_address):
         pass
 
+    @classmethod
+    def _format_etag(cls):
+        if not cls.etag:
+            return None
+        val = str(cls.etag).strip()
+        if val.startswith(('W/', 'w/', '"')):
+            return val
+        return f'"{val}"'
+
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-Length", str(len(TEST_DATA)))
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("ETag", f'"{self.etag}"')
-        self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
+        et = self._format_etag()
+        if et:
+            self.send_header("ETag", et)
+        if self.last_modified:
+            self.send_header("Last-Modified", self.last_modified)
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
 
@@ -93,6 +108,8 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         endpoint = self.path.split("?")[0]
         self.request_counts[endpoint] = self.request_counts.get(endpoint, 0) + 1
         count = self.request_counts[endpoint]
+        range_header = self.headers.get("Range")
+        self.recorded_requests.append((endpoint, range_header, dict(self.headers)))
 
         # Fail first N requests simulation
         if endpoint == "/fail_first" and count <= self.fail_first_n_requests:
@@ -109,15 +126,16 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             time.sleep(0.45)
             return
 
-        range_header = self.headers.get("Range")
-
         # Fallback / No-range endpoint
         if endpoint in self.no_range_endpoints or not range_header:
             self.send_response(200)
             self.send_header("Content-Length", str(len(TEST_DATA)))
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("ETag", f'"{self.etag}"')
-            self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             self.wfile.write(TEST_DATA)
             return
@@ -129,7 +147,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Range", f"bytes 0-0/{len(TEST_DATA)}")
                 self.send_header("Content-Length", "1")
-                self.send_header("ETag", f'"{self.etag}"')
+                et = self._format_etag()
+                if et:
+                    self.send_header("ETag", et)
+                if self.last_modified:
+                    self.send_header("Last-Modified", self.last_modified)
                 self.end_headers()
                 self.wfile.write(TEST_DATA[0:1])
                 return
@@ -164,13 +186,29 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(TEST_DATA[start : end + 1])
             return
 
+        # Mutation abort simulation: request 1 (probe bytes=0-0) -> 206, request 2 (chunk 0) -> 206, request 3 (chunk 1) -> 206 with mutated ETag
+        if endpoint in self.mutation_abort_endpoints and range_header != "bytes=0-0":
+            if count >= 3:
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+                self.send_header("Content-Length", str(length))
+                self.send_header("ETag", '"v2-mutated-etag"')
+                self.end_headers()
+                self.wfile.write(TEST_DATA[start : end + 1])
+                return
+
         # Wrong Content-Range simulation
         if endpoint in self.wrong_range_endpoints and range_header != "bytes=0-0":
             self.send_response(206)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes 0-10/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(length))
-            self.send_header("ETag", f'"{self.etag}"')
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             self.wfile.write(TEST_DATA[start : end + 1])
             return
@@ -182,7 +220,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(oversized_len))
-            self.send_header("ETag", f'"{self.etag}"')
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             self.wfile.write(TEST_DATA[start : end + 1] + b"Z" * 500)
             return
@@ -193,7 +235,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(length))
-            self.send_header("ETag", f'"{self.etag}"')
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             self.wfile.write(TEST_DATA[start : start + 50])
             self.wfile.flush()
@@ -206,7 +252,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(length))
-            self.send_header("ETag", f'"{self.etag}"')
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             step = 8192
             for i in range(start, end + 1, step):
@@ -221,7 +271,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
             self.send_header("Content-Length", str(length))
-            self.send_header("ETag", f'"{self.etag}"')
+            et = self._format_etag()
+            if et:
+                self.send_header("ETag", et)
+            if self.last_modified:
+                self.send_header("Last-Modified", self.last_modified)
             self.end_headers()
             self.wfile.write(TEST_DATA[start : start + 512])
             self.wfile.flush()
@@ -235,8 +289,11 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(206)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
-        self.send_header("ETag", f'"{self.etag}"')
-        self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
+        et = self._format_etag()
+        if et:
+            self.send_header("ETag", et)
+        if self.last_modified:
+            self.send_header("Last-Modified", self.last_modified)
 
         if endpoint in self.truncate_endpoints and count == 1:
             truncated_len = max(1, length // 2)
@@ -278,6 +335,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         MockHttpHandler.etag = "v1-valid-etag"
+        MockHttpHandler.last_modified = "Wed, 23 Sep 2026 12:00:00 GMT"
         MockHttpHandler.fail_first_n_requests = 0
         MockHttpHandler.stall_endpoints.clear()
         MockHttpHandler.no_range_endpoints.clear()
@@ -289,7 +347,9 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         MockHttpHandler.mid_fail_endpoints.clear()
         MockHttpHandler.slow_endpoints.clear()
         MockHttpHandler.mid_mutation_endpoints.clear()
+        MockHttpHandler.mutation_abort_endpoints.clear()
         MockHttpHandler.request_counts.clear()
+        MockHttpHandler.recorded_requests.clear()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.out_dir = Path(self.temp_dir.name)
         self.manager = DownloadManager()
@@ -719,6 +779,85 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "failed")
         self.assertIn("remote resource modified mid-flight", job.error.lower())
         self.assertFalse(dest.exists(), "Partially mutated file must not be assembled")
+
+    # -----------------------------------------------------------------------
+    # Test T — Weak ETag handling in If-Range (RFC 9110 §13.1.2)
+    # -----------------------------------------------------------------------
+    async def test_t_weak_etag_if_range_handling(self):
+        # Case 1: Weak ETag with Last-Modified -> If-Range must fall back to Last-Modified
+        MockHttpHandler.etag = 'W/"weak-rev-123"'
+        MockHttpHandler.last_modified = "Wed, 23 Sep 2026 12:00:00 GMT"
+        url1 = f"{self.base_url}/weak_with_lm.bin"
+        dest1 = self.out_dir / "test_t1.bin"
+
+        job1 = await self.manager.create_job(url1, str(dest1), self.iface)
+        await self.manager._job_tasks[job1.job_id]
+
+        self.assertEqual(job1.status, "completed")
+        self.assertTrue(dest1.exists())
+        self.assertEqual(dest1.stat().st_size, len(TEST_DATA))
+
+        # Check recorded chunk requests
+        chunk_reqs1 = [
+            headers for (ep, rng, headers) in MockHttpHandler.recorded_requests
+            if ep == "/weak_with_lm.bin" and rng and rng != "bytes=0-0"
+        ]
+        self.assertGreater(len(chunk_reqs1), 0)
+        for h in chunk_reqs1:
+            self.assertIn("If-Range", h, "If-Range must fall back to Last-Modified when ETag is weak")
+            self.assertEqual(h["If-Range"], "Wed, 23 Sep 2026 12:00:00 GMT")
+            self.assertNotIn("W/", h["If-Range"], "Weak ETag must never be sent in If-Range")
+
+        # Case 2: Weak ETag without Last-Modified -> If-Range must be omitted
+        MockHttpHandler.etag = 'W/"weak-rev-456"'
+        MockHttpHandler.last_modified = None
+        url2 = f"{self.base_url}/weak_no_lm.bin"
+        dest2 = self.out_dir / "test_t2.bin"
+
+        job2 = await self.manager.create_job(url2, str(dest2), self.iface)
+        await self.manager._job_tasks[job2.job_id]
+
+        self.assertEqual(job2.status, "completed")
+        self.assertTrue(dest2.exists())
+        self.assertEqual(dest2.stat().st_size, len(TEST_DATA))
+
+        chunk_reqs2 = [
+            headers for (ep, rng, headers) in MockHttpHandler.recorded_requests
+            if ep == "/weak_no_lm.bin" and rng and rng != "bytes=0-0"
+        ]
+        self.assertGreater(len(chunk_reqs2), 0)
+        for h in chunk_reqs2:
+            self.assertNotIn("If-Range", h, "If-Range must be omitted if ETag is weak and no Last-Modified exists")
+
+    # -----------------------------------------------------------------------
+    # Test U — Mutation abort outcome: immediate abort, purge .part, resume_confidence='none'
+    # -----------------------------------------------------------------------
+    async def test_u_mutation_abort_purges_stale_chunks(self):
+        MockHttpHandler.etag = "v1-valid-etag"
+        url = f"{self.base_url}/mutation_abort.bin"
+        dest = self.out_dir / "test_u.bin"
+        MockHttpHandler.mutation_abort_endpoints.add("/mutation_abort.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        # Defined Mutation Abort Outcome Verification:
+        # 1. Terminal state is 'failed'
+        self.assertEqual(job.status, "failed")
+        self.assertIn("remote resource modified mid-flight", job.error.lower())
+
+        # 2. Resume confidence is explicitly set to 'none'
+        self.assertEqual(job.resume_confidence, "none")
+
+        # 3. Any completed .part files from old version must be purged
+        job_temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
+        if job_temp_dir.exists():
+            remaining_parts = list(job_temp_dir.glob("chunk_*.part"))
+            self.assertEqual(remaining_parts, [], "Stale .part files must be purged upon mutation abort")
+
+        # 4. Destination file must not be committed/created
+        self.assertFalse(dest.exists(), "Corrupted output file must not be committed")
 
 
 if __name__ == "__main__":
