@@ -834,8 +834,24 @@ class DownloadManager:
             progress.status = "completed"
 
     # ------------------------------------------------------------------
-    # Worker — grabs chunks from the shared queue
+    # Worker — grabs chunks from the shared queue with EWMA/health adaptive sizing
     # ------------------------------------------------------------------
+    def _calculate_worker_target_chunk_size(self, prog: InterfaceProgress) -> int:
+        min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+        max_cs = config.get("MAX_CHUNK_SIZE") or (8 * 1024 * 1024)
+        base_cs = config.get("BASE_CHUNK_SIZE") or (2 * 1024 * 1024)
+
+        # Degraded or failing interfaces are strictly restricted to min_chunk_size
+        if prog.health == "degraded" or prog.consecutive_failures > 0:
+            return min_cs
+
+        if prog.ewma_speed_mb_s > 0:
+            # Target ~2.0 seconds of throughput based on EWMA
+            target_bytes = int(prog.ewma_speed_mb_s * 1024 * 1024 * 2.0)
+            return max(min_cs, min(max_cs, target_bytes))
+
+        return base_cs
+
     async def _worker(self, job: DownloadJob, iface: Dict[str, str],
                       queue: asyncio.Queue, chunk_files: Dict[int, Path]) -> None:
         ip = iface["ip_address"]
@@ -889,6 +905,33 @@ class DownloadManager:
 
             chunk_idx = chunk.chunk_id
             start, end = chunk.start, chunk.end
+            output_file = chunk_files[chunk_idx]
+
+            # --- Adaptive Chunk Sizing & Slicing based on EWMA and Health ---
+            target_cs = self._calculate_worker_target_chunk_size(prog)
+            chunk_bytes = end - start + 1
+            min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+
+            # If chunk is larger than target_cs, slice off target_cs and return the remainder to the queue
+            if chunk_bytes > target_cs and (chunk_bytes - target_cs) >= min_cs:
+                old_end = end
+                end = start + target_cs - 1
+                chunk.end = end
+                new_idx = max(job.chunks.keys()) + 1
+                remainder = Chunk(chunk_id=new_idx, start=end + 1, end=old_end)
+                job.chunks[new_idx] = remainder
+                temp_dir = output_file.parent
+                new_part = temp_dir / f"chunk_{new_idx:05d}.part"
+                chunk_files[new_idx] = new_part
+                job._chunk_files[new_idx] = new_part
+                for i_r, r in enumerate(job._ranges):
+                    if r[0] == chunk_idx:
+                        job._ranges[i_r] = (chunk_idx, start, end)
+                        break
+                job._ranges.append((new_idx, remainder.start, remainder.end))
+                job._total_chunks = len(job._ranges)
+                queue.put_nowait(remainder)
+
             chunk.status = ChunkStatus.DOWNLOADING
             chunk.assigned_interface = ip
             chunk.started_at = time.time()
@@ -898,7 +941,6 @@ class DownloadManager:
             prog.chunk_end = end
             prog.current_chunk_idx = chunk_idx
             prog._bytes_at_start_of_chunk = prog.downloaded
-            output_file = chunk_files[chunk_idx]
             prog.status = "downloading"
 
             worker_id = uuid.uuid4()
@@ -1566,8 +1608,9 @@ class DownloadManager:
                     raise ValueError(f"Chunk {c.chunk_id} missing or incomplete before merge")
                 c.status = ChunkStatus.COMPLETE
 
-            sorted_files = [job._chunk_files[r[0]] for r in job._ranges]
-            expected_chunk_sizes = [r[2] - r[1] + 1 for r in job._ranges]
+            sorted_ranges = sorted(job._ranges, key=lambda r: r[1])
+            sorted_files = [job._chunk_files[r[0]] for r in sorted_ranges]
+            expected_chunk_sizes = [r[2] - r[1] + 1 for r in sorted_ranges]
             await merge_chunks(sorted_files, Path(job.output_path), job.expected_size, expected_chunk_sizes)
             out_file = Path(job.output_path)
             if not out_file.exists() or out_file.stat().st_size != job.expected_size:

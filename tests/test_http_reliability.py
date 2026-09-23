@@ -1136,6 +1136,34 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(stats["last_success_time"], 0.0)
         self.assertEqual(stats["active_workers"], 0)  # All finished
 
+    # -----------------------------------------------------------------------
+    # Test ZC — Scheduler caps failing/degraded interfaces at MIN_CHUNK_SIZE
+    # -----------------------------------------------------------------------
+    def test_zc_scheduler_degraded_interface_capped_at_min_chunk(self):
+        min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+        max_cs = config.get("MAX_CHUNK_SIZE") or (8 * 1024 * 1024)
+
+        # 1. Healthy interface with high EWMA scales up
+        prog_healthy = InterfaceProgress(
+            name="eth0", ip_address="192.168.1.10",
+            chunk_start=0, chunk_end=1000,
+            ewma_speed_mb_s=10.0, consecutive_failures=0
+        )
+        self.assertEqual(prog_healthy.health, "healthy")
+        size_healthy = self.manager._calculate_worker_target_chunk_size(prog_healthy)
+        self.assertGreater(size_healthy, min_cs)
+        self.assertLessEqual(size_healthy, max_cs)
+
+        # 2. Degraded interface (consecutive_failures > 0) is strictly capped at min_chunk_size
+        prog_degraded = InterfaceProgress(
+            name="wlan0", ip_address="192.168.1.20",
+            chunk_start=0, chunk_end=1000,
+            ewma_speed_mb_s=10.0, consecutive_failures=1
+        )
+        self.assertEqual(prog_degraded.health, "degraded")
+        size_degraded = self.manager._calculate_worker_target_chunk_size(prog_degraded)
+        self.assertEqual(size_degraded, min_cs, "Failing/degraded interface must be capped at MIN_CHUNK_SIZE")
+
 
 if __name__ == "__main__":
     unittest.main()
