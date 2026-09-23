@@ -1203,6 +1203,74 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         recovered_size = self.manager._calculate_worker_target_chunk_size(p)
         self.assertGreaterEqual(recovered_size, min_cs)
 
+    # -----------------------------------------------------------------------
+    # Test ZE — Non-uniform chunk plan persistence, resume, and exact boundaries
+    # -----------------------------------------------------------------------
+    async def test_ze_non_uniform_chunk_plan_persistence_and_resume_exact_boundaries(self):
+        # 1. Deterministic boundary assertions across arbitrary payload sizes
+        for test_size in (10 * 1024 * 1024, 64 * 1024 * 1024, 100 * 1024 * 1024):
+            ranges = plan_adaptive_chunks(
+                expected_size=test_size,
+                base_chunk_size=2 * 1024 * 1024,
+                min_chunk_size=256 * 1024,
+                max_chunk_size=8 * 1024 * 1024,
+                num_interfaces=2,
+            )
+            self.assertEqual(ranges[0][1], 0, "Chunk plan must start at byte 0")
+            self.assertEqual(ranges[-1][2], test_size - 1, "Chunk plan must end at expected_size - 1")
+
+            total_planned = 0
+            chunk_sizes = set()
+            for i, (cid, start, end) in enumerate(ranges):
+                self.assertEqual(cid, i)
+                self.assertLessEqual(start, end)
+                c_len = end - start + 1
+                chunk_sizes.add(c_len)
+                total_planned += c_len
+                if i > 0:
+                    self.assertEqual(start, ranges[i - 1][2] + 1, f"Boundary gap/overlap between chunks {i-1} and {i}")
+
+            self.assertEqual(total_planned, test_size, "Sum of chunk lengths must strictly match payload size")
+            self.assertGreater(len(chunk_sizes), 1, "Adaptive plan must have non-uniform chunk sizes")
+
+        # 2. Persistence and Resume with non-uniform ranges
+        # Non-uniform layout: chunk 0 = 64KB, chunk 1 = 128KB, chunk 2 = 64KB (total 256KB)
+        nu_ranges = [(0, 0, 65535), (1, 65536, 196607), (2, 196608, 262143)]
+        url = f"{self.base_url}/non_uniform_resume.bin"
+        dest = self.out_dir / "test_ze_resume.bin"
+
+        state = {
+            "job_id": "test-ze-non-uniform",
+            "url": url,
+            "output_path": str(dest),
+            "expected_size": len(TEST_DATA),
+            "supports_ranges": True,
+            "etag": '"v1-valid-etag"',
+            "last_modified": "Wed, 23 Sep 2026 12:00:00 GMT",
+            "_ranges": nu_ranges,
+            "chunks": {
+                "0": {"status": "COMPLETE", "attempts": 1, "last_error": None},
+                "1": {"status": "PENDING", "attempts": 0, "last_error": None},
+                "2": {"status": "PENDING", "attempts": 0, "last_error": None},
+            },
+            "interfaces": {"127.0.0.1": {"name": "Loopback", "ip_address": "127.0.0.1", "chunk_start": 0, "chunk_end": 65535}},
+        }
+
+        # Create chunk 0 on disk matching its 64 KB non-uniform size
+        temp_dir = dest.parent / f".burst_{state['job_id']}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "chunk_00000.part").write_bytes(TEST_DATA[:65536])
+
+        # Resume download
+        job = await self.manager.resume_job_from_state(state, self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "completed")
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(TEST_DATA))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
 
 if __name__ == "__main__":
     unittest.main()
