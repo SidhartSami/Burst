@@ -1164,6 +1164,45 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         size_degraded = self.manager._calculate_worker_target_chunk_size(prog_degraded)
         self.assertEqual(size_degraded, min_cs, "Failing/degraded interface must be capped at MIN_CHUNK_SIZE")
 
+    # -----------------------------------------------------------------------
+    # Test ZD — Interface health recovery tested against real EWMA and failure data
+    # -----------------------------------------------------------------------
+    async def test_zd_health_recovery_against_real_ewma_failure_data(self):
+        url = f"{self.base_url}/health_recovery.bin"
+        dest = self.out_dir / "test_zd.bin"
+
+        prog = InterfaceProgress(
+            name="eth0", ip_address="127.0.0.1",
+            chunk_start=0, chunk_end=1024,
+            ewma_speed_mb_s=0.0, consecutive_failures=0
+        )
+        self.assertEqual(prog.health, "healthy")
+
+        # Step 1: Simulate failures -> transitions to degraded and caps chunk size
+        prog.consecutive_failures = 1
+        prog.failure_count = 1
+        self.assertEqual(prog.health, "degraded")
+        capped_size = self.manager._calculate_worker_target_chunk_size(prog)
+        min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+        self.assertEqual(capped_size, min_cs)
+
+        # Step 2: Real chunk execution and success -> updates EWMA and recovers health
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        # Inspect resulting interface progress
+        p = job.progress["127.0.0.1"]
+        self.assertEqual(p.health, "healthy")
+        self.assertEqual(p.consecutive_failures, 0)
+        self.assertGreater(p.success_count, 0)
+        self.assertGreater(p.ewma_speed_mb_s, 0.0)
+        self.assertIsNotNone(p.last_success_time)
+
+        # Step 3: Verified recovery: target chunk size expands back up
+        recovered_size = self.manager._calculate_worker_target_chunk_size(p)
+        self.assertGreaterEqual(recovered_size, min_cs)
+
 
 if __name__ == "__main__":
     unittest.main()
