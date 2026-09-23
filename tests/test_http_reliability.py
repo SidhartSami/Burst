@@ -55,10 +55,19 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     stall_endpoints = set()
     no_range_endpoints = set()
     truncate_endpoints = set()
+    oversized_endpoints = set()
+    wrong_range_endpoints = set()
+    mid_200_endpoints = set()
+    trickle_stall_endpoints = set()
+    mid_fail_endpoints = set()
     request_counts = {}
 
     def log_message(self, format, *args):
         # Silence standard HTTP access logging in tests
+        pass
+
+    def handle_error(self, request, client_address):
+        # Silence connection abort logging in tests
         pass
 
     def do_HEAD(self):
@@ -87,7 +96,6 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", str(len(TEST_DATA)))
             self.end_headers()
-            # Sleep longer than the stall timeout to trigger watchdog
             time.sleep(2.5)
             return
 
@@ -104,6 +112,25 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(TEST_DATA)
             return
 
+        # Mid-download HTTP 200: probe range (bytes=0-0) returns 206, but worker requests get 200 OK
+        if endpoint in self.mid_200_endpoints:
+            if range_header == "bytes=0-0":
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Range", f"bytes 0-0/{len(TEST_DATA)}")
+                self.send_header("Content-Length", "1")
+                self.send_header("ETag", f'"{self.etag}"')
+                self.end_headers()
+                self.wfile.write(TEST_DATA[0:1])
+                return
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(TEST_DATA)))
+                self.send_header("Content-Type", "application/octet-stream")
+                self.end_headers()
+                self.wfile.write(TEST_DATA)
+                return
+
         # Handle Range request
         m = re.match(r"^bytes=(\d+)-(\d+)?$", range_header)
         if not m:
@@ -115,6 +142,60 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
         end = int(m.group(2)) if m.group(2) else len(TEST_DATA) - 1
         end = min(end, len(TEST_DATA) - 1)
         length = end - start + 1
+
+        # Wrong Content-Range simulation
+        if endpoint in self.wrong_range_endpoints and range_header != "bytes=0-0":
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes 0-10/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("ETag", f'"{self.etag}"')
+            self.end_headers()
+            self.wfile.write(TEST_DATA[start : end + 1])
+            return
+
+        # Oversized data simulation
+        if endpoint in self.oversized_endpoints and range_header != "bytes=0-0":
+            oversized_len = length + 500
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(oversized_len))
+            self.send_header("ETag", f'"{self.etag}"')
+            self.end_headers()
+            self.wfile.write(TEST_DATA[start : end + 1] + b"Z" * 500)
+            return
+
+        # Trickle stall simulation
+        if endpoint in self.trickle_stall_endpoints and count == 1:
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("ETag", f'"{self.etag}"')
+            self.end_headers()
+            # Send 50 bytes, then stall
+            self.wfile.write(TEST_DATA[start : start + 50])
+            self.wfile.flush()
+            time.sleep(2.5)
+            return
+
+        # Mid-download socket severance simulation
+        if endpoint in self.mid_fail_endpoints and count == 1:
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
+            self.send_header("Content-Length", str(length))
+            self.send_header("ETag", f'"{self.etag}"')
+            self.end_headers()
+            self.wfile.write(TEST_DATA[start : start + 512])
+            self.wfile.flush()
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+            except Exception:
+                pass
+            return
 
         self.send_response(206)
         self.send_header("Content-Type", "application/octet-stream")
@@ -431,6 +512,105 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         for c in job.chunks.values():
             self.assertEqual(c.status, ChunkStatus.COMPLETE)
             self.assertIsNotNone(c.completed_at)
+
+    # -----------------------------------------------------------------------
+    # Test K — Mid-download interface failure & rollback
+    # -----------------------------------------------------------------------
+    async def test_k_mid_download_interface_failure(self):
+        url = f"{self.base_url}/mid_fail.bin"
+        dest = self.out_dir / "test_k.bin"
+        MockHttpHandler.mid_fail_endpoints.add("/mid_fail.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "completed")
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(TEST_DATA))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
+    # -----------------------------------------------------------------------
+    # Test L — Too-many-bytes rejection (oversized payload)
+    # -----------------------------------------------------------------------
+    async def test_l_too_many_bytes_rejection(self):
+        url = f"{self.base_url}/oversized.bin"
+        dest = self.out_dir / "test_l.bin"
+        MockHttpHandler.oversized_endpoints.add("/oversized.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "failed")
+        self.assertIn("too many bytes", job.error.lower())
+        self.assertFalse(dest.exists())
+
+    # -----------------------------------------------------------------------
+    # Test M — Wrong-Content-Range rejection
+    # -----------------------------------------------------------------------
+    async def test_m_wrong_content_range(self):
+        url = f"{self.base_url}/wrong_range.bin"
+        dest = self.out_dir / "test_m.bin"
+        MockHttpHandler.wrong_range_endpoints.add("/wrong_range.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "failed")
+        self.assertIn("content-range mismatch", job.error.lower())
+        self.assertFalse(dest.exists())
+
+    # -----------------------------------------------------------------------
+    # Test N — Trickle-stall watchdog trigger and recovery
+    # -----------------------------------------------------------------------
+    async def test_n_trickle_stall(self):
+        url = f"{self.base_url}/trickle_stall.bin"
+        dest = self.out_dir / "test_n.bin"
+        MockHttpHandler.trickle_stall_endpoints.add("/trickle_stall.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "completed")
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(TEST_DATA))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+
+    # -----------------------------------------------------------------------
+    # Test O — Mid-download HTTP 200 response rejection for Range request
+    # -----------------------------------------------------------------------
+    async def test_o_mid_download_200(self):
+        url = f"{self.base_url}/mid_200.bin"
+        dest = self.out_dir / "test_o.bin"
+        MockHttpHandler.mid_200_endpoints.add("/mid_200.bin")
+
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "failed")
+        self.assertIn("expected 206", job.error.lower())
+        self.assertFalse(dest.exists())
+
+    # -----------------------------------------------------------------------
+    # Test P — Interface health state exposure (healthy, degraded, excluded)
+    # -----------------------------------------------------------------------
+    def test_p_interface_health_state(self):
+        from downloader import InterfaceProgress
+        prog = InterfaceProgress(name="eth0", ip_address="192.168.1.10", chunk_start=0, chunk_end=1000)
+        self.assertEqual(prog.health, "healthy")
+
+        prog.consecutive_failures = 1
+        self.assertEqual(prog.health, "degraded")
+
+        prog.consecutive_failures = 3
+        self.assertEqual(prog.health, "excluded")
+
+        prog.status = "excluded"
+        self.assertEqual(prog.health, "excluded")
 
 
 if __name__ == "__main__":
