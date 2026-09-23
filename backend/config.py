@@ -36,6 +36,11 @@ CHUNK_IO_SIZE: int = 64 * 1024                   # 64 KB — read buffer per ite
 REQUEST_TIMEOUT_SECONDS: int = 60
 RETRY_ATTEMPTS: int = 3
 RETRY_DELAY_SECONDS: int = 2
+RETRY_BACKOFF_BASE: float = 1.0                   # Base delay in seconds for exponential backoff
+RETRY_BACKOFF_MAX: float = 10.0                   # Maximum backoff delay in seconds
+RETRY_JITTER_MAX: float = 0.5                     # Random jitter range (0 to N seconds)
+STALL_TIMEOUT_SECONDS: float = 10.0               # Seconds without received bytes before considered stalled
+
 
 # ---------------------------------------------------------------------------
 # Bandwidth management
@@ -85,6 +90,10 @@ _DEFAULTS: Dict[str, Any] = {
     "REQUEST_TIMEOUT_SECONDS": REQUEST_TIMEOUT_SECONDS,
     "RETRY_ATTEMPTS": RETRY_ATTEMPTS,
     "RETRY_DELAY_SECONDS": RETRY_DELAY_SECONDS,
+    "RETRY_BACKOFF_BASE": RETRY_BACKOFF_BASE,
+    "RETRY_BACKOFF_MAX": RETRY_BACKOFF_MAX,
+    "RETRY_JITTER_MAX": RETRY_JITTER_MAX,
+    "STALL_TIMEOUT_SECONDS": STALL_TIMEOUT_SECONDS,
     "WEIGHT_REBALANCE_INTERVAL_SECONDS": WEIGHT_REBALANCE_INTERVAL_SECONDS,
     "MIN_INTERFACE_SPEED_THRESHOLD": MIN_INTERFACE_SPEED_THRESHOLD,
     "SLOW_INTERFACE_GRACE_PERIOD": SLOW_INTERFACE_GRACE_PERIOD,

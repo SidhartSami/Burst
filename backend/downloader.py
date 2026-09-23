@@ -8,8 +8,11 @@ and cross-interface retry routing.
 from __future__ import annotations
 
 import asyncio
-import ssl
+import os
+import random
+import re
 import socket
+import ssl
 import threading
 import time
 import uuid
@@ -34,6 +37,111 @@ BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Connection": "keep-alive"
 }
+
+CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", re.IGNORECASE)
+
+
+class StalledDownloadError(Exception):
+    """Raised when an active download connection receives no bytes within the stall timeout."""
+    pass
+
+
+def calculate_backoff(attempt: int) -> float:
+    """Calculate exponential backoff with jitter."""
+    base = float(config.get("RETRY_BACKOFF_BASE") or 1.0)
+    max_delay = float(config.get("RETRY_BACKOFF_MAX") or 10.0)
+    jitter = float(config.get("RETRY_JITTER_MAX") or 0.5)
+    delay = min(base * (2 ** max(0, attempt - 1)), max_delay)
+    delay += random.uniform(0, jitter)
+    return delay
+
+
+def is_non_retryable_error(exc: Exception) -> bool:
+    """Identify permanent non-retryable errors that should fail immediately."""
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return True
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if exc.response.status_code in (400, 401, 403, 404, 405, 410, 416):
+            return True
+    if isinstance(exc, ValueError) and "Range download rejected" in str(exc):
+        return True
+    return False
+
+
+class ChunkStatus:
+    PENDING = "PENDING"
+    ASSIGNED = "ASSIGNED"
+    DOWNLOADING = "DOWNLOADING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
+@dataclass
+class Chunk:
+    chunk_id: int
+    start: int
+    end: int
+    status: str = ChunkStatus.PENDING
+    attempts: int = 0
+    assigned_interface: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    last_error: Optional[str] = None
+
+    @property
+    def expected_bytes(self) -> int:
+        return max(0, self.end - self.start + 1)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "start": self.start,
+            "end": self.end,
+            "status": self.status,
+            "attempts": self.attempts,
+            "assigned_interface": self.assigned_interface,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "last_error": self.last_error,
+        }
+
+    def __iter__(self):
+        # Backward-compatibility with tuple unpacking: chunk_idx, start, end = item
+        yield self.chunk_id
+        yield self.start
+        yield self.end
+
+
+@dataclass
+class URLAnalysis:
+    url: str
+    final_url: str
+    content_length: int
+    supports_ranges: bool
+    content_type: str
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
+    range_error_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "url": self.url,
+            "final_url": self.final_url,
+            "content_length": self.content_length,
+            "supports_ranges": self.supports_ranges,
+            "content_type": self.content_type,
+            "etag": self.etag,
+            "last_modified": self.last_modified,
+            "range_error_reason": self.range_error_reason,
+        }
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
 
 
 @dataclass
@@ -96,6 +204,11 @@ class DownloadJob:
     retry_events: List[RetryEvent] = field(default_factory=list)
     bandwidth_limits: Dict[str, float] = field(default_factory=dict)
     boosted: bool = False
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
+    final_url: Optional[str] = None
+    range_error_reason: Optional[str] = None
+    chunks: Dict[int, Chunk] = field(default_factory=dict)
     _queue: Any = field(default=None, repr=False)
     _chunk_files: Any = field(default=None, repr=False)
     _workers: Any = field(default_factory=dict, repr=False)   # ip -> Task (or list of Tasks when boosted)
@@ -132,6 +245,11 @@ class DownloadJob:
             "_ranges": self._ranges,
             "bandwidth_limits": self.bandwidth_limits,
             "boosted": self.boosted,
+            "etag": self.etag,
+            "last_modified": self.last_modified,
+            "final_url": self.final_url,
+            "range_error_reason": self.range_error_reason,
+            "chunks": {k: c.to_dict() for k, c in self.chunks.items()},
         }
 
 
@@ -140,64 +258,101 @@ def _build_connector(local_ip: str) -> aiohttp.TCPConnector:
     return aiohttp.TCPConnector(family=family, local_addr=(local_ip, 0))
 
 
-async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> Dict[str, Any]:
+async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalysis:
     connector = _build_connector(preferred_ip) if preferred_ip else None
     timeout = aiohttp.ClientTimeout(total=config.get("REQUEST_TIMEOUT_SECONDS"))
     
     async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=BROWSER_HEADERS) as session:
-        # Try Stage 1: HEAD (Fastest)
-        try:
-            async with session.head(url, allow_redirects=True, ssl=False) as resp:
-                if resp.status < 400:
-                    total_size = int(resp.headers.get("Content-Length", "0"))
-                    if total_size > 0:
-                        supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
-                        content_type = resp.headers.get("Content-Type", "application/octet-stream")
-                        return {
-                            "url": str(resp.url),
-                            "content_length": total_size,
-                            "supports_ranges": supports_ranges,
-                            "content_type": content_type,
-                        }
-        except:
-            pass
- 
-        # Try Stage 2: GET with Range (To check resume support)
+        # Step 1: Probe Range capability directly with Range: bytes=0-0
         try:
             headers = dict(BROWSER_HEADERS)
             headers["Range"] = "bytes=0-0"
             async with session.get(url, allow_redirects=True, headers=headers, ssl=False) as resp:
-                if resp.status < 400:
-                    content_range = resp.headers.get("Content-Range", "")
-                    if "/" in content_range:
-                        total_size = int(content_range.split("/")[-1])
-                    else:
-                        total_size = int(resp.headers.get("Content-Length", "0"))
-                    
-                    if total_size > 0:
-                        supports_ranges = resp.status == 206 or "bytes" in resp.headers.get("Accept-Ranges", "").lower()
-                        content_type = resp.headers.get("Content-Type", "application/octet-stream")
-                        return {
-                            "url": str(resp.url),
-                            "content_length": total_size,
-                            "supports_ranges": supports_ranges,
-                            "content_type": content_type,
-                        }
-        except:
+                final_url = str(resp.url)
+                content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                etag = resp.headers.get("ETag", "").strip('"') or None
+                last_modified = resp.headers.get("Last-Modified") or None
+
+                if resp.status == 206:
+                    content_range = resp.headers.get("Content-Range", "").strip()
+                    m = CONTENT_RANGE_RE.match(content_range)
+                    if m:
+                        r_start, r_end, total_str = int(m.group(1)), int(m.group(2)), m.group(3)
+                        total_size = int(total_str) if total_str != "*" else int(resp.headers.get("Content-Length", 0))
+                        if total_size > 0 and r_start == 0 and r_end == 0:
+                            return URLAnalysis(
+                                url=url,
+                                final_url=final_url,
+                                content_length=total_size,
+                                supports_ranges=True,
+                                content_type=content_type,
+                                etag=etag,
+                                last_modified=last_modified,
+                            )
+                    # 206 but missing/malformed Content-Range
+                    total_size = int(resp.headers.get("Content-Length", "0"))
+                    return URLAnalysis(
+                        url=url,
+                        final_url=final_url,
+                        content_length=total_size,
+                        supports_ranges=False,
+                        content_type=content_type,
+                        etag=etag,
+                        last_modified=last_modified,
+                        range_error_reason="Malformed or missing Content-Range in HTTP 206 response",
+                    )
+                elif resp.status == 200:
+                    # Server ignored Range header and returned full content
+                    total_size = int(resp.headers.get("Content-Length", "0"))
+                    return URLAnalysis(
+                        url=url,
+                        final_url=final_url,
+                        content_length=total_size,
+                        supports_ranges=False,
+                        content_type=content_type,
+                        etag=etag,
+                        last_modified=last_modified,
+                        range_error_reason="Server returned HTTP 200 OK to Range request (ranges not supported)",
+                    )
+        except Exception:
             pass
- 
-        # Try Stage 3: Super-Basic GET (Final Fallback)
+
+        # Step 2: Fallback to HEAD request
+        try:
+            async with session.head(url, allow_redirects=True, ssl=False) as resp:
+                final_url = str(resp.url)
+                if resp.status < 400:
+                    total_size = int(resp.headers.get("Content-Length", "0"))
+                    etag = resp.headers.get("ETag", "").strip('"') or None
+                    last_modified = resp.headers.get("Last-Modified") or None
+                    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+                    return URLAnalysis(
+                        url=url,
+                        final_url=final_url,
+                        content_length=total_size,
+                        supports_ranges=False,
+                        content_type=content_type,
+                        etag=etag,
+                        last_modified=last_modified,
+                        range_error_reason="Range probe failed; falling back to single-stream",
+                    )
+        except Exception:
+            pass
+
+        # Step 3: Final fallback basic GET (stream headers/metadata)
         async with session.get(url, allow_redirects=True, ssl=False) as resp:
             resp.raise_for_status()
             total_size = int(resp.headers.get("Content-Length", "0"))
-            supports_ranges = "bytes" in resp.headers.get("Accept-Ranges", "").lower()
-            content_type = resp.headers.get("Content-Type", "application/octet-stream")
-            return {
-                "url": str(resp.url),
-                "content_length": total_size,
-                "supports_ranges": supports_ranges,
-                "content_type": content_type,
-            }
+            return URLAnalysis(
+                url=url,
+                final_url=str(resp.url),
+                content_length=total_size,
+                supports_ranges=False,
+                content_type=resp.headers.get("Content-Type", "application/octet-stream"),
+                etag=resp.headers.get("ETag", "").strip('"') or None,
+                last_modified=resp.headers.get("Last-Modified") or None,
+                range_error_reason="Fallback to basic GET; ranges disabled",
+            )
 
 
 class DownloadManager:
@@ -254,8 +409,22 @@ class DownloadManager:
             supports_ranges=data.get("supports_ranges", False),
             total_downloaded=data.get("total_downloaded", 0),
             boosted=data.get("boosted", False),
+            etag=data.get("etag"),
+            last_modified=data.get("last_modified"),
+            final_url=data.get("final_url"),
+            range_error_reason=data.get("range_error_reason"),
         )
         job._ranges = data.get("_ranges", [])
+        for r in job._ranges:
+            c_idx, c_start, c_end = r
+            c_data = (data.get("chunks") or {}).get(str(c_idx), {})
+            job.chunks[c_idx] = Chunk(
+                chunk_id=c_idx,
+                start=c_start,
+                end=c_end,
+                status=c_data.get("status", ChunkStatus.PENDING),
+                attempts=c_data.get("attempts", 0),
+            )
         
         # Restore interfaces progress if present to avoid UI flashing 0
         for ip, iface_data in data.get("interfaces", {}).items():
@@ -280,6 +449,55 @@ class DownloadManager:
     async def _resume_job_wrapper(self, job: DownloadJob, interfaces: List[Dict[str, str]]) -> None:
         job.started_at = time.time()
         try:
+            # Safe Resume Validation: verify remote server validators before combining partial data
+            iface_ip = interfaces[0]["ip_address"] if interfaces else None
+            current_info = None
+            try:
+                current_info = await analyze_url(job.url, iface_ip)
+            except Exception as e:
+                print(f"[RESUME] Warning: Could not re-probe server validators: {e}")
+
+            if current_info:
+                mismatch = False
+                reason = ""
+                if job.expected_size > 0 and current_info.content_length > 0 and current_info.content_length != job.expected_size:
+                    mismatch = True
+                    reason = f"File size changed from {job.expected_size} to {current_info.content_length}"
+                elif job.etag and current_info.etag and job.etag != current_info.etag:
+                    mismatch = True
+                    reason = f"ETag changed from {job.etag} to {current_info.etag}"
+                elif job.last_modified and current_info.last_modified and job.last_modified != current_info.last_modified:
+                    mismatch = True
+                    reason = f"Last-Modified changed from {job.last_modified} to {current_info.last_modified}"
+
+                if mismatch:
+                    print(f"[RESUME] Remote resource modified ({reason}). Restarting download safely to prevent corruption.")
+                    temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
+                    if temp_dir.exists():
+                        for f in temp_dir.glob("chunk_*.*"):
+                            try:
+                                f.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                    job.total_downloaded = 0
+                    job.expected_size = current_info.content_length
+                    job.supports_ranges = current_info.supports_ranges
+                    job.etag = current_info.etag
+                    job.last_modified = current_info.last_modified
+                    job.final_url = current_info.final_url
+                    job.range_error_reason = current_info.range_error_reason
+                    job._ranges = []
+                    job.chunks = {}
+                    await self._run_job(job, interfaces)
+                    return
+                else:
+                    if current_info.etag:
+                        job.etag = current_info.etag
+                    if current_info.last_modified:
+                        job.last_modified = current_info.last_modified
+                    if current_info.final_url:
+                        job.final_url = current_info.final_url
+
             if job.expected_size > 0 and job.supports_ranges and job._ranges:
                 job.status = "downloading"
                 await self._parallel_download(job, interfaces)
@@ -346,9 +564,29 @@ class DownloadManager:
         job.status = "analyzing"
 
         try:
-            analysis = await analyze_url(job.url, interfaces[0]["ip_address"])
-            job.expected_size = int(analysis["content_length"])
-            job.supports_ranges = bool(analysis["supports_ranges"])
+            analysis = None
+            last_analysis_err = None
+            for iface in interfaces:
+                try:
+                    analysis = await analyze_url(job.url, iface["ip_address"])
+                    break
+                except Exception as e:
+                    last_analysis_err = e
+            if not analysis:
+                try:
+                    analysis = await analyze_url(job.url, None)
+                except Exception as e:
+                    raise last_analysis_err or e
+
+            job.expected_size = int(analysis.content_length)
+            job.supports_ranges = bool(analysis.supports_ranges)
+            job.etag = analysis.etag
+            job.last_modified = analysis.last_modified
+            job.final_url = analysis.final_url
+            job.range_error_reason = analysis.range_error_reason
+            
+            if not job.supports_ranges and analysis.range_error_reason:
+                print(f"[HTTP] Multi-range disabled for job {job.job_id}: {analysis.range_error_reason}")
             
             if job.expected_size <= 0:
                 # Size is unknown (e.g. dynamic page / chunked encoding). Fall back to single connection.
@@ -356,7 +594,8 @@ class DownloadManager:
 
             if not job.supports_ranges:
                 job.status = "downloading"
-                await self._single_download(job, interfaces[0])
+                active_iface = interfaces[0]
+                await self._single_download(job, active_iface)
             else:
                 job.status = "downloading"
                 await self._parallel_download(job, interfaces)
@@ -376,6 +615,7 @@ class DownloadManager:
     async def _single_download(self, job: DownloadJob, interface: Dict[str, str]) -> None:
         out_path = Path(job.output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_out = out_path.with_suffix(out_path.suffix + f".tmp_{job.job_id}")
         progress = InterfaceProgress(
             name=interface["name"],
             ip_address=interface["ip_address"],
@@ -394,14 +634,25 @@ class DownloadManager:
         job._active_threads.add(worker_id)
         
         try:
+            temp_out.unlink(missing_ok=True)
             await asyncio.to_thread(
                 self._download_with_requests, job, interface["ip_address"],
-                job.url, out_path, "wb", None, progress, started,
-                worker_id
+                job.url, temp_out, "wb", None, progress, started,
+                worker_id, 0, job.expected_size if job.expected_size > 0 else None
             )
+            if not job.is_cancelled and temp_out.exists():
+                if job.expected_size > 0 and temp_out.stat().st_size != job.expected_size:
+                    temp_out.unlink(missing_ok=True)
+                    raise ValueError(f"Single download size mismatch: expected {job.expected_size}, got {temp_out.stat().st_size}")
+                os.replace(temp_out, out_path)
         finally:
             if hasattr(job, "_active_threads"):
                 job._active_threads.discard(worker_id)
+            if temp_out.exists() and (job.is_cancelled or job.status == "failed"):
+                try:
+                    temp_out.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 
         if job.is_cancelled:
             progress.status = "cancelled"
@@ -430,12 +681,10 @@ class DownloadManager:
                 break
 
             # --- Check slow-speed gating ---
-            # If paused, exit the worker so the monitor loop can restart us later
             if prog.status == "paused_slow":
                 if paused_since is None:
                     paused_since = time.time()
                 if time.time() - paused_since > 5.0:
-                    # Exit worker — monitor loop will restart if conditions improve
                     break
                 await asyncio.sleep(1)
                 continue
@@ -444,7 +693,6 @@ class DownloadManager:
 
             # --- Check cooldown (from cross-interface retry) ---
             if time.time() < prog._cooldown_until:
-                # Exit and let monitor restart after cooldown
                 break
 
             # --- Grab next chunk ---
@@ -453,7 +701,23 @@ class DownloadManager:
             except asyncio.QueueEmpty:
                 break
 
-            chunk_idx, start, end = item
+            chunk = item if isinstance(item, Chunk) else job.chunks.get(item[0])
+            if chunk is None:
+                chunk = Chunk(chunk_id=item[0], start=item[1], end=item[2])
+                job.chunks[chunk.chunk_id] = chunk
+
+            # Skip if already completed
+            if chunk.status == ChunkStatus.COMPLETE:
+                queue.task_done()
+                continue
+
+            chunk_idx = chunk.chunk_id
+            start, end = chunk.start, chunk.end
+            chunk.status = ChunkStatus.DOWNLOADING
+            chunk.assigned_interface = ip
+            chunk.started_at = time.time()
+            chunk.attempts += 1
+
             prog.chunk_start = start
             prog.chunk_end = end
             prog.current_chunk_idx = chunk_idx
@@ -467,46 +731,59 @@ class DownloadManager:
             job._active_threads.add(worker_id)
 
             try:
-                await self._download_range(job, iface, (start, end), output_file, worker_id)
+                await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
                 prog.error = None
                 prog.consecutive_failures = 0
                 prog.chunks_completed += 1
                 prog._last_progress_time = time.time()
+                chunk.status = ChunkStatus.COMPLETE
+                chunk.completed_at = time.time()
+                chunk.last_error = None
                 queue.task_done()
             except asyncio.CancelledError:
                 if not job.is_cancelled:
-                    # Put it back so another interface picks it up
-                    queue.put_nowait(item)
+                    if chunk.status != ChunkStatus.COMPLETE:
+                        chunk.status = ChunkStatus.PENDING
+                        chunk.assigned_interface = None
+                    queue.put_nowait(chunk)
                 raise
             except Exception as e:
+                is_stall = isinstance(e, (StalledDownloadError, requests.exceptions.ReadTimeout))
+                chunk.last_error = str(e)
+                if chunk.status != ChunkStatus.COMPLETE:
+                    chunk.status = ChunkStatus.PENDING
+                    chunk.assigned_interface = None
+
                 prog.consecutive_failures += 1
                 job._chunk_failures[chunk_idx] = job._chunk_failures.get(chunk_idx, 0) + 1
 
-                if job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2:
+                if is_non_retryable_error(e) or job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2:
                     job.status = "failed"
                     job.error = f"Chunk {chunk_idx} failed permanently: {e}"
+                    chunk.status = ChunkStatus.FAILED
                     job.is_cancelled = True
                     break
 
-                # Cross-interface retry: route to another interface
+                backoff_delay = calculate_backoff(chunk.attempts)
                 best_alt = self._find_best_alternate(job, ip)
+                reason = "Stalled watchdog timeout" if is_stall else str(e)[:100]
+
                 if best_alt:
                     job.retry_events.append(RetryEvent(
                         timestamp=time.time(), chunk_index=chunk_idx,
                         from_interface=ip, to_interface=best_alt,
-                        reason=str(e)[:100],
+                        reason=reason,
                     ))
-                    queue.put_nowait(item)
+                    queue.put_nowait(chunk)
                     prog._cooldown_until = time.time() + cooldown_secs
                     prog.error = str(e)
                     prog.status = "paused_slow"
                     prog.speed_mb_s = 0.0
                 else:
-                    # No alternative — retry on self after delay
-                    queue.put_nowait(item)
+                    queue.put_nowait(chunk)
                     prog.error = str(e)
                     prog.speed_mb_s = 0.0
-                    await asyncio.sleep(config.get("RETRY_DELAY_SECONDS"))
+                    await asyncio.sleep(backoff_delay)
             finally:
                 if hasattr(job, "_active_threads"):
                     job._active_threads.discard(worker_id)
@@ -522,7 +799,9 @@ class DownloadManager:
                 prog._slow_since = None
 
         if prog.status == "downloading" and not job.is_cancelled:
-            prog.status = "completed"
+            all_chunks_done = all(c.status == ChunkStatus.COMPLETE for c in job.chunks.values())
+            prog.status = "completed" if all_chunks_done else "idle"
+            prog.speed_mb_s = 0.0
 
     async def remove_interface(self, job_id: str, ip: str) -> Dict[str, Any]:
         job = self.get_job(job_id)
@@ -661,11 +940,14 @@ class DownloadManager:
                     job._ranges.insert(range_idx + 1, range_b)
                     
                     temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
-                    job._chunk_files[new_idx] = temp_dir / f"chunk_{new_idx:05d}.part"
+                    chunk_a = Chunk(chunk_id=chunk_idx, start=r_start, end=mid, status=ChunkStatus.PENDING)
+                    chunk_b = Chunk(chunk_id=new_idx, start=mid + 1, end=r_end, status=ChunkStatus.PENDING)
+                    job.chunks[chunk_idx] = chunk_a
+                    job.chunks[new_idx] = chunk_b
                     
                     # Put both back in queue
-                    job._queue.put_nowait(range_a)
-                    job._queue.put_nowait(range_b)
+                    job._queue.put_nowait(chunk_a)
+                    job._queue.put_nowait(chunk_b)
                     
                     # Reset both interface progresses to pending so workers restart
                     other_prog.status = "pending"
@@ -719,15 +1001,18 @@ class DownloadManager:
         
         # If it was middle of a chunk, return chunk to queue
         if prog.current_chunk_idx is not None and job._queue:
-            for r in job._ranges:
-                if r[0] == prog.current_chunk_idx:
-                    print(f"[REMOVE_IFACE] Returning chunk {prog.current_chunk_idx} to queue")
-                    job._queue.put_nowait(r)
-                    downloaded_this_chunk = prog.downloaded - prog._bytes_at_start_of_chunk
-                    with self._thread_locks[job.job_id]:
-                        job.total_downloaded -= downloaded_this_chunk
-                    prog.downloaded = prog._bytes_at_start_of_chunk
-                    break
+            c = job.chunks.get(prog.current_chunk_idx)
+            if c and c.status != ChunkStatus.COMPLETE:
+                print(f"[REMOVE_IFACE] Returning chunk {prog.current_chunk_idx} to queue")
+                c.status = ChunkStatus.PENDING
+                c.assigned_interface = None
+                job._queue.put_nowait(c)
+            downloaded_this_chunk = prog.downloaded - prog._bytes_at_start_of_chunk
+            if downloaded_this_chunk > 0:
+                with self._thread_locks[job.job_id]:
+                    job.total_downloaded -= downloaded_this_chunk
+                prog.downloaded = prog._bytes_at_start_of_chunk
+            prog.current_chunk_idx = None
 
         prog.status = "excluded"
         prog.current_chunk_idx = None
@@ -754,15 +1039,17 @@ class DownloadManager:
             # Re-queue active chunks
             prog = job.progress.get(ip)
             if prog and prog.current_chunk_idx is not None and job._queue:
-                for r in job._ranges:
-                    if r[0] == prog.current_chunk_idx:
-                        print(f"[PAUSE] Returning chunk {prog.current_chunk_idx} to queue")
-                        job._queue.put_nowait(r)
-                        downloaded_this_chunk = prog.downloaded - prog._bytes_at_start_of_chunk
-                        with self._thread_locks[job.job_id]:
-                            job.total_downloaded -= downloaded_this_chunk
-                        prog.downloaded = prog._bytes_at_start_of_chunk
-                        break
+                c = job.chunks.get(prog.current_chunk_idx)
+                if c and c.status != ChunkStatus.COMPLETE:
+                    print(f"[PAUSE] Returning chunk {prog.current_chunk_idx} to queue")
+                    c.status = ChunkStatus.PENDING
+                    c.assigned_interface = None
+                    job._queue.put_nowait(c)
+                downloaded_this_chunk = prog.downloaded - prog._bytes_at_start_of_chunk
+                if downloaded_this_chunk > 0:
+                    with self._thread_locks[job.job_id]:
+                        job.total_downloaded -= downloaded_this_chunk
+                    prog.downloaded = prog._bytes_at_start_of_chunk
                 prog.current_chunk_idx = None
                 prog.speed_mb_s = 0
             if prog:
@@ -868,23 +1155,19 @@ class DownloadManager:
         temp_dir.mkdir(parents=True, exist_ok=True)
         
         if job._ranges:
-            # Resuming from a loaded job
             ranges = job._ranges
         else:
-            # Compute per-interface chunk size based on latency
             min_lat = max(min(latencies.values()), 1.0)
             base = config.get("BASE_CHUNK_SIZE")
             min_cs = config.get("MIN_CHUNK_SIZE")
             max_cs = config.get("MAX_CHUNK_SIZE")
 
-            # Use the average chunk size for queue generation
             avg_chunk = base
             if latencies:
                 normalized = [min_lat / max(lat, 1.0) for lat in latencies.values()]
                 sizes = [max(min_cs, min(max_cs, int(base * n))) for n in normalized]
                 avg_chunk = max(min_cs, sum(sizes) // len(sizes))
 
-            # Build chunk ranges
             ranges = []
             cursor = 0
             idx = 0
@@ -895,26 +1178,37 @@ class DownloadManager:
                 idx += 1
             job._ranges = ranges
             
+        # Authoritative Chunk dictionary
+        for r in ranges:
+            idx, r_start, r_end = r
+            if idx not in job.chunks:
+                job.chunks[idx] = Chunk(chunk_id=idx, start=r_start, end=r_end)
+            else:
+                job.chunks[idx].start = r_start
+                job.chunks[idx].end = r_end
+
         job._total_chunks = len(ranges)
         chunk_files: Dict[int, Path] = {
             r[0]: temp_dir / f"chunk_{r[0]:05d}.part" for r in ranges
         }
+        job._chunk_files = chunk_files
 
         job._queue = asyncio.Queue()
-        job._chunk_files = chunk_files
-        
-        # Reset total_downloaded to 0 and recalculate to avoid double counting
         job.total_downloaded = 0
         
         # Only queue chunks that are not completely finished
         for r in ranges:
             chunk_idx, r_start, r_end = r
+            chunk = job.chunks[chunk_idx]
             part_file = chunk_files[chunk_idx]
-            if part_file.exists() and part_file.stat().st_size >= (r_end - r_start + 1):
-                # Already complete, don't queue
-                job.total_downloaded += (r_end - r_start + 1)
+            expected = r_end - r_start + 1
+            if part_file.exists() and part_file.stat().st_size == expected:
+                chunk.status = ChunkStatus.COMPLETE
+                chunk.completed_at = chunk.completed_at or time.time()
+                job.total_downloaded += expected
                 continue
-            job._queue.put_nowait(r)
+            chunk.status = ChunkStatus.PENDING
+            job._queue.put_nowait(chunk)
 
         # Initialize progress and spawn workers
         for iface in interfaces:
@@ -956,15 +1250,20 @@ class DownloadManager:
                         prog.status = "disconnected"
                         prog.speed_mb_s = 0.0
 
-            # Proactively restart dead workers in recoverable states
+            # Proactively restart dead workers when work remains in queue
+            max_failures = config.get("MAX_CONSECUTIVE_FAILURES")
             if not job._queue.empty():
                 for ip, prog in job.progress.items():
                     active_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
-                    if not active_tasks and prog.status in ("paused_slow", "disconnected", "pending"):
+                    if not active_tasks and prog.status not in ("excluded", "cancelled"):
+                        if prog.consecutive_failures >= max_failures:
+                            prog.status = "excluded"
+                            continue
+                        if now < prog._cooldown_until:
+                            continue
+
                         prog.status = "pending"
-                        prog.consecutive_failures = 0
                         prog._slow_since = None
-                        prog._cooldown_until = 0.0
                         iface_dict = {"ip_address": ip, "name": prog.name}
                         num_workers = 3 if getattr(job, "boosted", False) else 1
                         for idx in range(num_workers):
@@ -978,11 +1277,20 @@ class DownloadManager:
             all_done = all(w.done() for w in job._workers.values())
 
             if job._queue.empty() and all_done:
-                break
+                incomplete = [
+                    c for c in job.chunks.values()
+                    if c.status != ChunkStatus.COMPLETE or not chunk_files[c.chunk_id].exists() or chunk_files[c.chunk_id].stat().st_size != c.expected_bytes
+                ]
+                if not incomplete:
+                    break
+                else:
+                    for c in incomplete:
+                        c.status = ChunkStatus.PENDING
+                        job._queue.put_nowait(c)
 
             if not job._queue.empty() and all_done:
                 any_recoverable = any(
-                    p.status not in ("cancelled", "completed")
+                    p.status not in ("cancelled", "excluded") and p.consecutive_failures < max_failures
                     for p in job.progress.values()
                 )
                 if any_recoverable:
@@ -998,50 +1306,81 @@ class DownloadManager:
             await asyncio.sleep(0.5)
 
         if not job.is_cancelled:
+            # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge
+            for c in job.chunks.values():
+                part_f = job._chunk_files[c.chunk_id]
+                if not part_f.exists() or part_f.stat().st_size != c.expected_bytes:
+                    raise ValueError(f"Chunk {c.chunk_id} missing or incomplete before merge")
+                c.status = ChunkStatus.COMPLETE
+
             sorted_files = [job._chunk_files[r[0]] for r in job._ranges]
             await merge_chunks(sorted_files, Path(job.output_path), job.expected_size)
+            out_file = Path(job.output_path)
+            if not out_file.exists() or out_file.stat().st_size != job.expected_size:
+                raise ValueError(f"Final file size verification failed: expected {job.expected_size}, got {out_file.stat().st_size if out_file.exists() else 0}")
+
         await cleanup_chunks(list(chunk_files.values()))
-        # Clean up temp directory
+        # Clean up any leftover temporary files
+        for tmp_f in temp_dir.glob("chunk_*.*"):
+            try:
+                tmp_f.unlink(missing_ok=True)
+            except Exception:
+                pass
         try:
             temp_dir.rmdir()
         except OSError:
             pass
 
     async def _download_range(self, job: DownloadJob, interface: Dict[str, str],
-                              byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID) -> None:
+                              byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID,
+                              chunk: Optional[Chunk] = None) -> None:
         start, end = byte_range
         if start > end:
             return
-            
-        mode = "wb"
-        downloaded_so_far = 0
-        if output_file.exists():
-            downloaded_so_far = output_file.stat().st_size
-            if downloaded_so_far >= (end - start + 1):
-                # Chunk already fully downloaded
-                job.total_downloaded += (end - start + 1)
-                progress = job.progress[interface["ip_address"]]
-                progress.downloaded += (end - start + 1)
-                return
-            if downloaded_so_far > 0:
-                mode = "ab"
-                start += downloaded_so_far
-                # Pre-fill progress for what's already downloaded
-                progress = job.progress[interface["ip_address"]]
-                progress.downloaded += downloaded_so_far
-                with self._thread_locks[job.job_id]:
-                    job.total_downloaded += downloaded_so_far
-                
+
+        expected_bytes = end - start + 1
+        part_file = output_file
+        tmp_file = part_file.with_suffix(f".tmp_{worker_id.hex[:8]}")
+
+        # Check if already complete
+        if part_file.exists() and part_file.stat().st_size == expected_bytes:
+            if chunk:
+                chunk.status = ChunkStatus.COMPLETE
+                chunk.completed_at = time.time()
+            return
+
+        tmp_file.unlink(missing_ok=True)
+
         progress = job.progress[interface["ip_address"]]
         progress.status = "downloading"
         progress.error = None
         started = time.perf_counter()
         headers = {"Range": f"bytes={start}-{end}"}
-        await asyncio.to_thread(
-            self._download_with_requests, job, interface["ip_address"],
-            job.url, output_file, mode, headers, progress, started,
-            worker_id, downloaded_so_far
-        )
+
+        try:
+            await asyncio.to_thread(
+                self._download_with_requests, job, interface["ip_address"],
+                job.url, tmp_file, "wb", headers, progress, started,
+                worker_id, 0, expected_bytes
+            )
+
+            # Atomic Chunk Completion:
+            if not tmp_file.exists() or tmp_file.stat().st_size != expected_bytes:
+                actual = tmp_file.stat().st_size if tmp_file.exists() else 0
+                tmp_file.unlink(missing_ok=True)
+                raise ValueError(f"Chunk byte count mismatch: expected {expected_bytes} bytes, got {actual} bytes")
+
+            os.replace(tmp_file, part_file)
+            if chunk:
+                chunk.status = ChunkStatus.COMPLETE
+                chunk.completed_at = time.time()
+                chunk.last_error = None
+        finally:
+            if tmp_file.exists():
+                try:
+                    tmp_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # HTTP session bound to a specific source IP
@@ -1072,18 +1411,18 @@ class DownloadManager:
                                 url: str, output_file: Path, mode: str,
                                 headers: Optional[Dict[str, str]],
                                 progress: InterfaceProgress, started: float,
-                                worker_id: uuid.UUID, downloaded_so_far: int = 0) -> None:
+                                worker_id: uuid.UUID, downloaded_so_far: int = 0,
+                                expected_bytes: Optional[int] = None) -> None:
         last_error: Optional[Exception] = None
-        retry_attempts = config.get("RETRY_ATTEMPTS")
-        retry_delay = config.get("RETRY_DELAY_SECONDS")
-        io_size = config.get("CHUNK_IO_SIZE")
-        sample_interval = config.get("SPEED_SAMPLE_INTERVAL")
-        window = config.get("SPEED_WINDOW_SECONDS")
+        retry_attempts = int(config.get("RETRY_ATTEMPTS") or 3)
+        io_size = int(config.get("CHUNK_IO_SIZE") or 64 * 1024)
+        sample_interval = float(config.get("SPEED_SAMPLE_INTERVAL") or 0.1)
+        window = float(config.get("SPEED_WINDOW_SECONDS") or 2.0)
+        stall_timeout = float(config.get("STALL_TIMEOUT_SECONDS") or 10.0)
+        request_timeout = float(config.get("REQUEST_TIMEOUT_SECONDS") or 30.0)
         limit = job.bandwidth_limits.get(interface_ip)
         if limit:
             print(f"[THROTTLE] interface {interface_ip} max_speed={limit} bytes/s")
-        start_time = time.time()
-        bytes_read = 0
 
         for attempt in range(1, retry_attempts + 1):
             chunk_downloaded = 0
@@ -1097,14 +1436,14 @@ class DownloadManager:
                 response = None
                 for candidate_url in request_urls:
                     try:
-                        # Merge range headers with browser headers
                         merged_headers = dict(BROWSER_HEADERS)
                         if headers:
                             merged_headers.update(headers)
-                            
+
+                        # Timeout is (connect_timeout, read_timeout)
                         response = session.get(
                             candidate_url, headers=merged_headers,
-                            stream=True, timeout=30,
+                            stream=True, timeout=(request_timeout, stall_timeout),
                             allow_redirects=True, verify=False,
                         )
                         break
@@ -1124,6 +1463,8 @@ class DownloadManager:
                     throttle_window_start = time.monotonic()
                     throttle_window_bytes = 0
 
+                    last_progress_time = time.time()
+
                     with output_file.open(mode) as handle:
                         for data in response.iter_content(chunk_size=io_size):
                             if job.is_cancelled:
@@ -1132,8 +1473,17 @@ class DownloadManager:
                                 raise ValueError("Job paused")
                             if worker_id not in getattr(job, "_active_threads", set()):
                                 raise ValueError("Worker thread cancelled/orphaned")
+
+                            now = time.time()
+                            if now - last_progress_time > stall_timeout:
+                                raise StalledDownloadError(
+                                    f"Worker on {interface_ip} stalled: no bytes received for {now - last_progress_time:.1f}s"
+                                )
+
                             if not data:
                                 continue
+
+                            last_progress_time = now
                             handle.write(data)
                             size = len(data)
                             chunk_downloaded += size
@@ -1162,10 +1512,22 @@ class DownloadManager:
                                 expected_time = throttle_window_bytes / limit
                                 if expected_time > elapsed:
                                     time.sleep(expected_time - elapsed)
-                                # Reset window periodically to avoid float drift
                                 if throttle_window_bytes >= limit:
                                     throttle_window_start = time.monotonic()
                                     throttle_window_bytes = 0
+
+                        handle.flush()
+                        try:
+                            os.fsync(handle.fileno())
+                        except Exception:
+                            pass
+
+                    # Byte count validation
+                    if expected_bytes is not None and chunk_downloaded != expected_bytes:
+                        raise ValueError(
+                            f"Byte count mismatch: expected {expected_bytes} bytes, received {chunk_downloaded} bytes"
+                        )
+
                 return
             except (requests.RequestException, ValueError, Exception) as exc:
                 last_error = exc
@@ -1175,8 +1537,13 @@ class DownloadManager:
                     with self._thread_locks[job.job_id]:
                         job.total_downloaded -= total_to_subtract
                 progress._speed_samples.clear()
-                if attempt < retry_attempts and not job.is_cancelled and job.status != "paused":
-                    time.sleep(retry_delay)
+
+                if is_non_retryable_error(exc) or job.is_cancelled or job.status == "paused":
+                    raise
+
+                if attempt < retry_attempts:
+                    delay = calculate_backoff(attempt)
+                    time.sleep(delay)
                 else:
                     raise
             finally:
