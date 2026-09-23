@@ -35,6 +35,8 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 # Add backend to path
@@ -74,6 +76,7 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
     slow_endpoints = set()
     mid_mutation_endpoints = set()
     mutation_abort_endpoints = set()
+    all_fail_endpoints = set()
     request_counts = {}
     recorded_requests = []
 
@@ -117,6 +120,27 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+
+        # All-fail simulation: probe (0-0) succeeds, but all chunk requests fail with 500
+        if endpoint in self.all_fail_endpoints:
+            if range_header == "bytes=0-0":
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Range", f"bytes 0-0/{len(TEST_DATA)}")
+                self.send_header("Content-Length", "1")
+                et = self._format_etag()
+                if et:
+                    self.send_header("ETag", et)
+                if self.last_modified:
+                    self.send_header("Last-Modified", self.last_modified)
+                self.end_headers()
+                self.wfile.write(TEST_DATA[0:1])
+                return
+            else:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
 
         # Immediate stall simulation (sleep longer than STALL_TIMEOUT_SECONDS)
         if endpoint in self.stall_endpoints:
@@ -348,6 +372,7 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
         MockHttpHandler.slow_endpoints.clear()
         MockHttpHandler.mid_mutation_endpoints.clear()
         MockHttpHandler.mutation_abort_endpoints.clear()
+        MockHttpHandler.all_fail_endpoints.clear()
         MockHttpHandler.request_counts.clear()
         MockHttpHandler.recorded_requests.clear()
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -858,6 +883,96 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
         # 4. Destination file must not be committed/created
         self.assertFalse(dest.exists(), "Corrupted output file must not be committed")
+
+    # -----------------------------------------------------------------------
+    # Test V — All interfaces excluded terminates cleanly with informative error
+    # -----------------------------------------------------------------------
+    async def test_v_all_interfaces_excluded(self):
+        # Configure max consecutive failures to 2 for deterministic interface exclusion
+        config.save_settings({"MAX_CONSECUTIVE_FAILURES": 2})
+        try:
+            MockHttpHandler.all_fail_endpoints.add("/all_fail.bin")
+            url = f"{self.base_url}/all_fail.bin"
+            dest = self.out_dir / "test_v.bin"
+
+            job = await self.manager.create_job(url, str(dest), self.iface)
+            task = self.manager._job_tasks[job.job_id]
+            await task
+
+            self.assertEqual(job.status, "failed")
+            self.assertIn("all interfaces failed", (job.error or "").lower())
+            for prog in job.progress.values():
+                self.assertEqual(prog.status, "excluded")
+                self.assertEqual(prog.health, "excluded")
+            self.assertFalse(dest.exists(), "No file must be committed when all interfaces fail")
+        finally:
+            config.save_settings({"MAX_CONSECUTIVE_FAILURES": 5})
+
+    # -----------------------------------------------------------------------
+    # Test W — Deterministic exponential backoff progression with mocked jitter
+    # -----------------------------------------------------------------------
+    def test_w_backoff_progression_deterministic(self):
+        # With zero jitter, backoff follows exact min(base * 2^(attempt-1), max_delay)
+        with patch("random.uniform", return_value=0.0):
+            def mock_config_get(key, default=None):
+                settings = {"RETRY_BACKOFF_BASE": 1.0, "RETRY_BACKOFF_MAX": 10.0, "RETRY_JITTER_MAX": 0.5}
+                return settings.get(key, default)
+
+            with patch.object(config, "get", side_effect=mock_config_get):
+                d1 = calculate_backoff(1)
+                d2 = calculate_backoff(2)
+                d3 = calculate_backoff(3)
+                d4 = calculate_backoff(4)
+                d10 = calculate_backoff(10)
+
+                self.assertEqual(d1, 1.0)
+                self.assertEqual(d2, 2.0)
+                self.assertEqual(d3, 4.0)
+                self.assertEqual(d4, 8.0)
+                self.assertEqual(d10, 10.0)  # Clamped to max_delay
+
+    # -----------------------------------------------------------------------
+    # Test X — Stall watchdog triggers with fake injected clock
+    # -----------------------------------------------------------------------
+    def test_x_stall_watchdog_clock_injection(self):
+        job = DownloadJob(
+            job_id="test-stall-job",
+            url=f"{self.base_url}/dummy.bin",
+            output_path=str(self.out_dir / "stall_test.bin"),
+            expected_size=1024,
+        )
+        prog = InterfaceProgress(name="eth0", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+        job.progress["127.0.0.1"] = prog
+        self.manager._thread_locks[job.job_id] = threading.Lock()
+        worker_id = uuid.uuid4()
+        job._active_threads = {worker_id}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 206
+        mock_resp.headers = {"Content-Range": "bytes 0-1023/1024", "Content-Length": "1024"}
+
+        def mock_iter(chunk_size=64 * 1024):
+            return iter([b"x" * 10, b"x" * 10])
+
+        mock_resp.iter_content.side_effect = mock_iter
+
+        # Fake clock: advances by 20s on every call, consistently exceeding stall_timeout
+        fake_time_now = [100.0]
+        def fake_time():
+            fake_time_now[0] += 20.0
+            return fake_time_now[0]
+
+        with patch("time.time", side_effect=fake_time):
+            with patch.object(self.manager, "_make_bound_session") as mock_sess:
+                sess_inst = MagicMock()
+                sess_inst.get.return_value = mock_resp
+                mock_sess.return_value = sess_inst
+
+                with self.assertRaises(StalledDownloadError):
+                    self.manager._download_with_requests(
+                        job, "127.0.0.1", job.url, self.out_dir / "stall_chunk.tmp", "wb",
+                        {"Range": "bytes=0-1023"}, prog, time.perf_counter(), worker_id, 0, 1024
+                    )
 
 
 if __name__ == "__main__":

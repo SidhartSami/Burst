@@ -18,6 +18,7 @@ async def merge_chunks(
     atomic merge via temporary file, fsync, and atomic rename.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # ponytail: ceiling: requires 2x file size free disk space during assembly; upgrade: Milestone 4 preflight disk space check
     temp_output = output_path.with_suffix(output_path.suffix + f".merge_tmp_{uuid.uuid4().hex[:8]}")
 
     def _merge() -> int:

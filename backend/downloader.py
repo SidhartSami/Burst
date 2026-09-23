@@ -107,7 +107,7 @@ def is_non_retryable_error(exc: Exception) -> bool:
 
 class ChunkStatus:
     PENDING = "PENDING"
-    ASSIGNED = "ASSIGNED"
+    ASSIGNED = "ASSIGNED"  # ponytail: ceiling: in-memory queue pops chunk directly into DOWNLOADING without intermediate ASSIGNED phase; upgrade: explicit ASSIGNED state if worker reservation is split from download start
     DOWNLOADING = "DOWNLOADING"
     COMPLETE = "COMPLETE"
     FAILED = "FAILED"
@@ -121,7 +121,7 @@ class Chunk:
     status: str = ChunkStatus.PENDING
     attempts: int = 0
     assigned_interface: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.time)  # ponytail: ceiling: in-memory field only; upgrade: serialize to burst_active_jobs.json if chunk history needs persistence across restarts
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     last_error: Optional[str] = None
@@ -226,7 +226,7 @@ class InterfaceProgress:
     def health(self) -> str:
         max_failures = config.get("MAX_CONSECUTIVE_FAILURES") or 3
         now = time.time()
-        if (self.status == "excluded" or self.consecutive_failures >= max_failures) and now < self._cooldown_until:
+        if (self.status == "excluded" or self.consecutive_failures >= max_failures) and (self._cooldown_until == 0.0 or now < self._cooldown_until):
             return "excluded"
         if (
             self.consecutive_failures > 0
@@ -267,6 +267,7 @@ class DownloadJob:
     _chunk_failures: Any = field(default_factory=dict, repr=False)
     _total_chunks: int = field(default=0, repr=False)
     _ranges: List[Tuple[int, int, int]] = field(default_factory=list, repr=False)
+    _completion_event: Any = field(default=None, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         iface_dict = {}
@@ -553,6 +554,7 @@ class DownloadManager:
                     elif current_info.last_modified and job.last_modified and current_info.last_modified == job.last_modified:
                         job.resume_confidence = "medium"
                     elif job.expected_size > 0 and current_info.content_length == job.expected_size:
+                        # ponytail: ceiling: 'low' confidence resumes without prompting user; upgrade: prompt or warn user in UI before resuming with 'low' confidence
                         job.resume_confidence = "low"
                     else:
                         job.resume_confidence = "none"
@@ -744,6 +746,8 @@ class DownloadManager:
             if prog.consecutive_failures >= max_failures:
                 prog.status = "excluded"
                 prog.speed_mb_s = 0.0
+                cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
+                prog._cooldown_until = time.time() + cooldown
                 break
 
             # --- Check slow-speed gating ---
@@ -806,6 +810,8 @@ class DownloadManager:
                 chunk.completed_at = time.time()
                 chunk.last_error = None
                 queue.task_done()
+                if getattr(job, "_completion_event", None):
+                    job._completion_event.set()
             except asyncio.CancelledError:
                 if not job.is_cancelled:
                     if chunk.status != ChunkStatus.COMPLETE:
@@ -899,6 +905,9 @@ class DownloadManager:
             all_chunks_done = all(c.status == ChunkStatus.COMPLETE for c in job.chunks.values())
             prog.status = "completed" if all_chunks_done else "idle"
             prog.speed_mb_s = 0.0
+
+        if getattr(job, "_completion_event", None):
+            job._completion_event.set()
 
     async def remove_interface(self, job_id: str, ip: str) -> Dict[str, Any]:
         job = self.get_job(job_id)
@@ -1154,6 +1163,8 @@ class DownloadManager:
         
         job._workers.clear()
         job.status = "paused"
+        if getattr(job, "_completion_event", None):
+            job._completion_event.set()
         return {"status": "paused"}
 
     async def resume_job(self, job_id: str) -> Dict[str, Any]:
@@ -1196,6 +1207,8 @@ class DownloadManager:
                 task.cancel()
         
         job.finished_at = time.time()
+        if getattr(job, "_completion_event", None):
+            job._completion_event.set()
         return {"status": "cancelled", "job_id": job_id}
 
     async def toggle_boost(self, job_id: str, active_interfaces: List[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -1250,6 +1263,7 @@ class DownloadManager:
 
         temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
         temp_dir.mkdir(parents=True, exist_ok=True)
+        job._completion_event = asyncio.Event()
 
         # Cleanup leftover uncommitted .tmp files from prior interrupted sessions
         for tmp_f in temp_dir.glob("chunk_*.tmp*"):
@@ -1425,8 +1439,16 @@ class DownloadManager:
                         raise Exception(f"All interfaces failed to download the remaining chunks. Last error: {last_chunk_err}")
                     raise Exception("All interfaces failed to download the remaining chunks.")
 
-            sleep_time = 0.05 if job._queue.empty() or all(w.done() for w in job._workers.values()) else 0.25
-            await asyncio.sleep(sleep_time)
+            # Event-based completion wakeup: unblock immediately when a chunk completes or worker finishes
+            if getattr(job, "_completion_event", None):
+                try:
+                    await asyncio.wait_for(job._completion_event.wait(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    job._completion_event.clear()
+            else:
+                await asyncio.sleep(0.05)
 
         if not job.is_cancelled and job.status != "failed":
             # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge

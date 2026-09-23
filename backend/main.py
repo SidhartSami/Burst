@@ -283,6 +283,7 @@ async def lifespan(app: FastAPI):
     Thread(target=startup_setup, daemon=True).start()
 
     # Load state
+    # ponytail: ceiling: orphaned .merge_tmp_* files remain on ungraceful kill; upgrade: purge stale .merge_tmp_* on application startup
     await load_state()
 
     # Start clipboard monitor (enabled by setting)
@@ -1145,6 +1146,7 @@ async def load_state():
         print(f"Failed to load state: {e}")
 
 def save_state():
+    # ponytail: ceiling: save_state() dumps state without holding per-job locks during mutation; upgrade: add asyncio/thread locking across job mutations and state save
     try:
         downloads = [
             j.to_dict() for j in manager.jobs.values()
