@@ -53,6 +53,7 @@ from downloader import (
     URLAnalysis,
     analyze_url,
     calculate_backoff,
+    plan_adaptive_chunks,
 )
 
 # Test payload: 256 KB deterministic data
@@ -973,6 +974,127 @@ class HttpReliabilityTests(unittest.IsolatedAsyncioTestCase):
                         job, "127.0.0.1", job.url, self.out_dir / "stall_chunk.tmp", "wb",
                         {"Range": "bytes=0-1023"}, prog, time.perf_counter(), worker_id, 0, 1024
                     )
+
+    # -----------------------------------------------------------------------
+    # Test Y — Production config constants and defaults assertion
+    # -----------------------------------------------------------------------
+    def test_y_production_config_constants(self):
+        # Assert module-level production constants are untouched
+        self.assertEqual(config.STALL_TIMEOUT_SECONDS, 10.0)
+        self.assertEqual(config.RETRY_BACKOFF_BASE, 1.0)
+        self.assertEqual(config.RETRY_BACKOFF_MAX, 10.0)
+        self.assertEqual(config.RETRY_JITTER_MAX, 0.5)
+        self.assertEqual(config.EXCLUDED_INTERFACE_COOLDOWN, 60.0)
+        self.assertEqual(config.MAX_CONSECUTIVE_FAILURES, 3)
+        self.assertEqual(config.BASE_CHUNK_SIZE, 2 * 1024 * 1024)
+        self.assertEqual(config.MIN_CHUNK_SIZE, 256 * 1024)
+        self.assertEqual(config.MAX_CHUNK_SIZE, 8 * 1024 * 1024)
+        self.assertEqual(config.CHUNK_IO_SIZE, 64 * 1024)
+        self.assertEqual(config.REQUEST_TIMEOUT_SECONDS, 60)
+        self.assertEqual(config.WEIGHT_REBALANCE_INTERVAL_SECONDS, 5.0)
+
+        # Assert default dictionary matches production values
+        self.assertEqual(config._DEFAULTS["STALL_TIMEOUT_SECONDS"], 10.0)
+        self.assertEqual(config._DEFAULTS["RETRY_BACKOFF_BASE"], 1.0)
+        self.assertEqual(config._DEFAULTS["RETRY_BACKOFF_MAX"], 10.0)
+        self.assertEqual(config._DEFAULTS["RETRY_JITTER_MAX"], 0.5)
+        self.assertEqual(config._DEFAULTS["EXCLUDED_INTERFACE_COOLDOWN"], 60.0)
+        self.assertEqual(config._DEFAULTS["MAX_CONSECUTIVE_FAILURES"], 3)
+
+    # -----------------------------------------------------------------------
+    # Test Z — Milestone 3 Adaptive chunk planning (warmup, steady, tail, conservation)
+    # -----------------------------------------------------------------------
+    def test_z_adaptive_chunk_planning(self):
+        size = 64 * 1024 * 1024  # 64 MB
+        base_cs = 2 * 1024 * 1024
+        min_cs = 256 * 1024
+        max_cs = 8 * 1024 * 1024
+
+        ranges = plan_adaptive_chunks(
+            expected_size=size,
+            latencies={"192.168.1.1": 20.0, "10.0.0.1": 80.0},
+            base_chunk_size=base_cs,
+            min_chunk_size=min_cs,
+            max_chunk_size=max_cs,
+            num_interfaces=2,
+        )
+
+        # 1. Byte conservation & contiguous range assertion
+        self.assertGreater(len(ranges), 0)
+        self.assertEqual(ranges[0][1], 0, "First chunk must start at 0")
+        self.assertEqual(ranges[-1][2], size - 1, "Last chunk must end at expected_size - 1")
+
+        total_bytes = 0
+        for i, (cid, start, end) in enumerate(ranges):
+            self.assertEqual(cid, i)
+            self.assertLessEqual(start, end)
+            total_bytes += (end - start + 1)
+            if i > 0:
+                self.assertEqual(start, ranges[i - 1][2] + 1, f"Gap or overlap at chunk {i}")
+
+        self.assertEqual(total_bytes, size, "Total planned bytes must strictly equal expected_size")
+
+        # 2. Warm-up verification: initial chunks use min_cs
+        warmup_size = ranges[0][2] - ranges[0][1] + 1
+        self.assertEqual(warmup_size, min_cs, "Warm-up chunk must start at min_chunk_size")
+
+        # 3. Steady-state verification: middle chunks are larger than warmup
+        mid_chunk = ranges[len(ranges) // 2]
+        mid_size = mid_chunk[2] - mid_chunk[1] + 1
+        self.assertGreater(mid_size, warmup_size, "Steady-state chunk must be larger than warmup chunk")
+
+        # 4. Tail-end ramp-down verification: final chunks taper back down to min_cs
+        tail_chunk = ranges[-1]
+        tail_size = tail_chunk[2] - tail_chunk[1] + 1
+        self.assertEqual(tail_size, min_cs, "Tail chunk must taper to min_chunk_size to eliminate stragglers")
+
+        # 5. Small payload boundary: <= min_cs produces exactly 1 chunk
+        single = plan_adaptive_chunks(100 * 1024, base_chunk_size=base_cs, min_chunk_size=min_cs)
+        self.assertEqual(len(single), 1)
+        self.assertEqual(single[0], (0, 0, 100 * 1024 - 1))
+
+    # -----------------------------------------------------------------------
+    # Test ZA — Milestone 3 Work-stealing queue with asymmetric worker speeds
+    # -----------------------------------------------------------------------
+    async def test_za_work_stealing_differential_throughput(self):
+        queue = asyncio.Queue()
+        chunks = [Chunk(chunk_id=i, start=i*1000, end=(i+1)*1000 - 1) for i in range(12)]
+        for c in chunks:
+            queue.put_nowait(c)
+
+        fast_completed = []
+        slow_completed = []
+
+        async def fast_worker():
+            while not queue.empty():
+                try:
+                    c = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                await asyncio.sleep(0)  # Yields immediately
+                c.status = ChunkStatus.COMPLETE
+                fast_completed.append(c.chunk_id)
+                queue.task_done()
+
+        async def slow_worker():
+            while not queue.empty():
+                try:
+                    c = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                await asyncio.sleep(0.05)   # 50ms delay
+                c.status = ChunkStatus.COMPLETE
+                slow_completed.append(c.chunk_id)
+                queue.task_done()
+
+        await asyncio.gather(fast_worker(), slow_worker())
+
+        # All 12 chunks completed
+        self.assertEqual(len(fast_completed) + len(slow_completed), 12)
+        # No duplicate chunk processing
+        self.assertEqual(set(fast_completed) & set(slow_completed), set())
+        # Fast worker stole significantly more chunks than slow worker (at least 2x)
+        self.assertGreaterEqual(len(fast_completed), len(slow_completed) * 2, "Fast worker must steal at least 2x chunks")
 
 
 if __name__ == "__main__":

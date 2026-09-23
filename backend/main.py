@@ -280,10 +280,24 @@ async def lifespan(app: FastAPI):
         apply_firewall_rules()
         setup_native_host()
 
-    Thread(target=startup_setup, daemon=True).start()
+    # Clean up any stale orphaned .merge_tmp_* files from prior interrupted merges
+    try:
+        dirs_to_check = set()
+        configured_dir = config.get("DOWNLOAD_PATH")
+        if configured_dir:
+            dirs_to_check.add(Path(configured_dir))
+        dirs_to_check.add(Path.home() / "Downloads")
+        for d in dirs_to_check:
+            if d.exists() and d.is_dir():
+                for f in d.glob("*.merge_tmp_*"):
+                    try:
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
     # Load state
-    # ponytail: ceiling: orphaned .merge_tmp_* files remain on ungraceful kill; upgrade: purge stale .merge_tmp_* on application startup
     await load_state()
 
     # Start clipboard monitor (enabled by setting)
@@ -1146,16 +1160,23 @@ async def load_state():
         print(f"Failed to load state: {e}")
 
 def save_state():
-    # ponytail: ceiling: save_state() dumps state without holding per-job locks during mutation; upgrade: add asyncio/thread locking across job mutations and state save
     try:
-        downloads = [
-            j.to_dict() for j in manager.jobs.values()
-            if j.status not in ("completed", "failed", "cancelled")
-            and not getattr(j, "is_cancelled", False)
-            and "BURST_INTERNAL_CHECK" not in j.url
-        ]
+        downloads = []
+        for j in list(manager.jobs.values()):
+            if (
+                j.status not in ("completed", "failed", "cancelled")
+                and not getattr(j, "is_cancelled", False)
+                and "BURST_INTERNAL_CHECK" not in j.url
+            ):
+                lock = manager._thread_locks.get(j.job_id)
+                if lock:
+                    with lock:
+                        downloads.append(j.to_dict())
+                else:
+                    downloads.append(j.to_dict())
+
         torrents = [
-            j.to_dict() for j in active_torrents.values()
+            j.to_dict() for j in list(active_torrents.values())
             if j.status not in ("completed", "failed", "cancelled")
             and not getattr(j, "is_cancelled", False)
         ]

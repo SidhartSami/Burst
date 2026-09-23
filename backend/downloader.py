@@ -411,6 +411,87 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
             )
 
 
+def plan_adaptive_chunks(
+    expected_size: int,
+    latencies: Optional[Dict[str, float]] = None,
+    base_chunk_size: Optional[int] = None,
+    min_chunk_size: Optional[int] = None,
+    max_chunk_size: Optional[int] = None,
+    num_interfaces: int = 1,
+) -> List[Tuple[int, int, int]]:
+    """
+    Adaptive chunk planner (Milestone 3):
+    - Small payloads (<= 4 * base_cs): partitioned uniformly by base_cs.
+    - Large payloads:
+      1. Warm-up phase: Initial chunks are small (min_cs) for fast RTT/speed probing.
+      2. Steady-state phase: Chunks expand based on interface latencies/bandwidth up to max_cs.
+      3. Tail-end ramp-down: Final chunks taper back to min_cs to eliminate straggler workers.
+    """
+    if expected_size <= 0:
+        return []
+
+    base_cs = base_chunk_size or config.get("BASE_CHUNK_SIZE") or (2 * 1024 * 1024)
+    min_cs = min_chunk_size or config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+    max_cs = max_chunk_size or config.get("MAX_CHUNK_SIZE") or (8 * 1024 * 1024)
+
+    # For files smaller than or equal to min_cs, return a single chunk
+    if expected_size <= min_cs:
+        return [(0, 0, expected_size - 1)]
+
+    # For smaller files (<= 4 chunks), use uniform base_cs chunks
+    if expected_size <= base_cs * 4:
+        ranges = []
+        cursor = 0
+        idx = 0
+        while cursor < expected_size:
+            end = min(cursor + base_cs - 1, expected_size - 1)
+            ranges.append((idx, cursor, end))
+            cursor = end + 1
+            idx += 1
+        return ranges
+
+    # Steady-state sizing based on interface latency normalization
+    steady_cs = base_cs
+    if latencies:
+        min_lat = max(min(latencies.values()), 1.0)
+        normalized = [min_lat / max(lat, 1.0) for lat in latencies.values()]
+        sizes = [max(min_cs, min(max_cs, int(base_cs * n))) for n in normalized]
+        steady_cs = max(min_cs, min(max_cs, sum(sizes) // len(sizes)))
+
+    # Warmup covers first 2 chunks per interface (min 2, max 6)
+    warmup_chunks = max(2, min(2 * max(1, num_interfaces), 6))
+    warmup_size = min_cs
+
+    # Tail zone threshold: last 10% of total bytes or 3 * steady_cs
+    tail_threshold = max(steady_cs * 3, int(expected_size * 0.10))
+
+    ranges = []
+    cursor = 0
+    idx = 0
+
+    while cursor < expected_size:
+        remaining = expected_size - cursor
+
+        # Tail-end ramp-down: small chunks to eliminate stragglers
+        # ponytail: ceiling: tail-end small chunks mitigate stragglers; upgrade: in-flight chunk splitting if extreme stragglers occur
+        if remaining <= tail_threshold and idx >= warmup_chunks:
+            chunk_size = min_cs
+        # Warmup phase: small chunks for immediate speed feedback
+        elif idx < warmup_chunks:
+            chunk_size = warmup_size
+        # Steady-state phase
+        else:
+            chunk_size = steady_cs
+
+        chunk_size = max(min_cs, min(chunk_size, remaining))
+        end = cursor + chunk_size - 1
+        ranges.append((idx, cursor, end))
+        cursor = end + 1
+        idx += 1
+
+    return ranges
+
+
 class DownloadManager:
     def __init__(self) -> None:
         self.jobs: Dict[str, DownloadJob] = {}
@@ -1252,7 +1333,7 @@ class DownloadManager:
         return {"status": "success", "boosted": job.boosted}
 
     # ------------------------------------------------------------------
-    # Parallel download with latency-aware chunking
+    # Parallel download with adaptive latency-aware chunking (Milestone 3)
     # ------------------------------------------------------------------
     async def _parallel_download(self, job: DownloadJob, interfaces: List[Dict[str, str]]) -> None:
         # Measure latency per interface
@@ -1275,25 +1356,11 @@ class DownloadManager:
         if job._ranges:
             ranges = job._ranges
         else:
-            min_lat = max(min(latencies.values()), 1.0)
-            base = config.get("BASE_CHUNK_SIZE")
-            min_cs = config.get("MIN_CHUNK_SIZE")
-            max_cs = config.get("MAX_CHUNK_SIZE")
-
-            avg_chunk = base
-            if latencies:
-                normalized = [min_lat / max(lat, 1.0) for lat in latencies.values()]
-                sizes = [max(min_cs, min(max_cs, int(base * n))) for n in normalized]
-                avg_chunk = max(min_cs, sum(sizes) // len(sizes))
-
-            ranges = []
-            cursor = 0
-            idx = 0
-            while cursor < job.expected_size:
-                end = min(cursor + avg_chunk - 1, job.expected_size - 1)
-                ranges.append((idx, cursor, end))
-                cursor = end + 1
-                idx += 1
+            ranges = plan_adaptive_chunks(
+                expected_size=job.expected_size,
+                latencies=latencies,
+                num_interfaces=len(interfaces),
+            )
             job._ranges = ranges
             
         # Authoritative Chunk dictionary
