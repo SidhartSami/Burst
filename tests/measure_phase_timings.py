@@ -1,15 +1,13 @@
 """
-Burst — Measure Exact Phase Timings on 64 MB payload.
-Measures real microsecond-accurate timings across 5 iterations:
+Burst — Measure Exact Phase Timings on 64 MB payload (10 runs).
+Measures real microsecond-accurate timings for all I/O phases:
 1. URL analysis & probe (HEAD/Range bytes=0-0)
-2. Per-chunk network streaming & buffer write
-3. Per-chunk handle.flush()
-4. Per-chunk os.fsync() across 32 chunks
-5. Per-chunk os.replace() across 32 chunks
-6. Merger read/write across 32 chunks (64 MB)
-7. Merger fsync()
-8. Merger atomic os.replace()
-9. Thread dispatch / asyncio.to_thread round-trip overhead
+2. Thread pool dispatch / asyncio.to_thread overhead
+3. Per-chunk os.fsync() (32 chunks)
+4. Per-chunk os.replace() (32 chunks)
+5. Per-chunk os.stat() calls during chunk validation
+6. Merger os.fsync() on the merged file
+7. Merger final atomic os.replace()
 """
 from __future__ import annotations
 
@@ -28,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 import config
-from downloader import DownloadManager, analyze_url, is_strong_etag
+from downloader import DownloadManager, analyze_url
 
 BENCHMARK_64MB_SIZE = 64 * 1024 * 1024
 BLOCK_1MB = bytes([(i * 41 + 17) % 256 for i in range(1024 * 1024)])
@@ -39,98 +37,90 @@ BENCHMARK_HASH = hashlib.sha256(BENCHMARK_DATA).hexdigest()
 class TimedBenchmarkHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format, *args):
-        pass
-
-    def handle_error(self, request, client_address):
-        pass
+    def log_message(self, fmt, *args): pass
+    def handle_error(self, req, addr): pass
 
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-Length", str(len(BENCHMARK_DATA)))
-        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("ETag", '"bench-64mb-etag"')
         self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
         self.end_headers()
 
     def do_GET(self):
-        range_header = self.headers.get("Range")
-        if not range_header:
+        rh = self.headers.get("Range")
+        if not rh:
             self.send_response(200)
             self.send_header("Content-Length", str(len(BENCHMARK_DATA)))
-            self.send_header("Content-Type", "application/octet-stream")
             self.send_header("ETag", '"bench-64mb-etag"')
-            self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
             self.end_headers()
             self.wfile.write(BENCHMARK_DATA)
             return
-
-        m = re.match(r"^bytes=(\d+)-(\d+)?$", range_header)
+        m = re.match(r"^bytes=(\d+)-(\d+)?$", rh)
         start = int(m.group(1))
         end = int(m.group(2)) if m.group(2) else len(BENCHMARK_DATA) - 1
         end = min(end, len(BENCHMARK_DATA) - 1)
-        length = end - start + 1
-
         self.send_response(206)
-        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Range", f"bytes {start}-{end}/{len(BENCHMARK_DATA)}")
-        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Length", str(end - start + 1))
         self.send_header("ETag", '"bench-64mb-etag"')
-        self.send_header("Last-Modified", "Wed, 23 Sep 2026 12:00:00 GMT")
         self.end_headers()
-        self.wfile.write(BENCHMARK_DATA[start : end + 1])
+        self.wfile.write(BENCHMARK_DATA[start:end + 1])
 
 
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
-    def handle_error(self, request, client_address):
-        pass
+    def handle_error(self, req, addr): pass
 
 
-async def profile_phases(url: str, dest: Path, ifaces: list):
-    # Instrumented metrics dictionary
-    metrics = {
+async def profile_phases(url: str, dest: Path, ifaces: list) -> dict:
+    metrics: dict = {
         "probe_time": 0.0,
-        "chunk_fsync_total": 0.0,
         "chunk_fsync_times": [],
-        "chunk_replace_total": 0.0,
         "chunk_replace_times": [],
-        "chunk_flush_total": 0.0,
-        "merger_write_total": 0.0,
+        "chunk_stat_times": [],
         "merger_fsync": 0.0,
         "merger_replace": 0.0,
         "thread_dispatch_overhead": 0.0,
         "total_elapsed": 0.0,
     }
 
-    # 1. Measure Probe time
     t0 = time.perf_counter()
-    analysis = await analyze_url(url, ifaces[0]["ip_address"])
+    await analyze_url(url, ifaces[0]["ip_address"])
     metrics["probe_time"] = time.perf_counter() - t0
 
-    # Patch os.fsync, os.replace, handle.flush to record individual phase timings
     orig_fsync = os.fsync
     orig_replace = os.replace
+    orig_stat = os.stat
 
     def timed_fsync(fd):
-        t_start = time.perf_counter()
+        t = time.perf_counter()
         orig_fsync(fd)
-        dur = time.perf_counter() - t_start
-        metrics["chunk_fsync_times"].append(dur)
-        metrics["chunk_fsync_total"] += dur
+        dur = time.perf_counter() - t
+        # Merger fsyncs come in the merge step (after all 32 chunk replaces)
+        if len(metrics["chunk_replace_times"]) >= 32:
+            metrics["merger_fsync"] += dur
+        else:
+            metrics["chunk_fsync_times"].append(dur)
 
     def timed_replace(src, dst):
-        t_start = time.perf_counter()
+        t = time.perf_counter()
         orig_replace(src, dst)
-        dur = time.perf_counter() - t_start
-        if "merge_tmp" in str(src):
+        dur = time.perf_counter() - t
+        src_s = str(src)
+        if "merge_tmp" in src_s or ".merge_tmp" in src_s:
             metrics["merger_replace"] = dur
         else:
             metrics["chunk_replace_times"].append(dur)
-            metrics["chunk_replace_total"] += dur
 
-    # Measure thread hop
+    def timed_stat(path, *a, **kw):
+        t = time.perf_counter()
+        r = orig_stat(path, *a, **kw)
+        metrics["chunk_stat_times"].append(time.perf_counter() - t)
+        return r
+
+    # Thread hop overhead baseline
     t_hop = time.perf_counter()
     for _ in range(32):
         await asyncio.to_thread(lambda: None)
@@ -139,7 +129,9 @@ async def profile_phases(url: str, dest: Path, ifaces: list):
     mgr = DownloadManager()
 
     from unittest.mock import patch
-    with patch("os.fsync", side_effect=timed_fsync), patch("os.replace", side_effect=timed_replace):
+    with patch("os.fsync", side_effect=timed_fsync), \
+         patch("os.replace", side_effect=timed_replace), \
+         patch("os.stat", side_effect=timed_stat):
         t_all = time.perf_counter()
         job = await mgr.create_job(url, str(dest), ifaces)
         task = mgr._job_tasks[job.job_id]
@@ -149,7 +141,6 @@ async def profile_phases(url: str, dest: Path, ifaces: list):
     assert dest.exists()
     assert dest.stat().st_size == BENCHMARK_64MB_SIZE
     assert hashlib.sha256(dest.read_bytes()).hexdigest() == BENCHMARK_HASH
-
     return metrics
 
 
@@ -160,44 +151,61 @@ async def main():
 
     url = f"http://127.0.0.1:{port}/bench64.bin"
     ifaces = [{"name": "Loopback", "ip_address": "127.0.0.1"}]
+    N = 10
 
     temp_dir = tempfile.TemporaryDirectory()
     out_dir = Path(temp_dir.name)
 
-    print("=" * 80)
-    print("BURST 64 MB BENCHMARK: MEASURED PHASE TIMINGS ACROSS 5 RUNS")
-    print("=" * 80)
+    print("=" * 82)
+    print(f"BURST 64 MB PHASE TIMINGS — {N} RUNS, SINGLE-INTERFACE LOOPBACK")
+    print("=" * 82)
 
     all_runs = []
-    for i in range(5):
+    for i in range(N):
         dest = out_dir / f"profile_{i}.bin"
         m = await profile_phases(url, dest, ifaces)
         all_runs.append(m)
         dest.unlink(missing_ok=True)
-        print(f"Run {i+1}: Total={m['total_elapsed']:.3f}s | Fsync={m['chunk_fsync_total']*1000:.1f}ms | "
-              f"Replace={m['chunk_replace_total']*1000:.1f}ms | Probe={m['probe_time']*1000:.1f}ms | "
-              f"MergerReplace={m['merger_replace']*1000:.1f}ms")
+        nf = len(m["chunk_fsync_times"])
+        nr = len(m["chunk_replace_times"])
+        ns = len(m["chunk_stat_times"])
+        print(f"  Run {i+1:2d}: total={m['total_elapsed']:.3f}s "
+              f"fsync={sum(m['chunk_fsync_times'])*1000:.1f}ms({nf}) "
+              f"replace={sum(m['chunk_replace_times'])*1000:.1f}ms({nr}) "
+              f"stat={sum(m['chunk_stat_times'])*1000:.1f}ms({ns}) "
+              f"mrg_fsync={m['merger_fsync']*1000:.1f}ms "
+              f"mrg_replace={m['merger_replace']*1000:.1f}ms", flush=True)
 
-    # Medians
+    def med_ms(key):
+        return statistics.median(r[key] for r in all_runs) * 1000
+
     med_total = statistics.median(r["total_elapsed"] for r in all_runs)
-    med_fsync = statistics.median(r["chunk_fsync_total"] for r in all_runs)
-    med_replace = statistics.median(r["chunk_replace_total"] for r in all_runs)
-    med_probe = statistics.median(r["probe_time"] for r in all_runs)
-    med_merger_replace = statistics.median(r["merger_replace"] for r in all_runs)
-    med_thread_hop = statistics.median(r["thread_dispatch_overhead"] for r in all_runs)
+    n_chunk = len(all_runs[0]["chunk_fsync_times"])
 
-    print("\n" + "=" * 80)
-    print(f"{'Measured Phase':<45} | {'Median Duration':<18}")
-    print("-" * 80)
-    print(f"{'1. Range Probe & Validator Extraction (HEAD+206)':<45} | {med_probe*1000:>10.2f} ms")
-    print(f"{'2. Thread Pool Dispatch Across 32 Chunks (to_thread)':<45} | {med_thread_hop*1000:>10.2f} ms")
-    print(f"{'3. Per-Chunk os.fsync() Total (32 chunks)':<45} | {med_fsync*1000:>10.2f} ms")
-    print(f"{'   - Average fsync() per chunk':<45} | {(med_fsync/32)*1000:>10.2f} ms/chunk")
-    print(f"{'4. Per-Chunk os.replace() Total (32 chunks)':<45} | {med_replace*1000:>10.2f} ms")
-    print(f"{'   - Average replace() per chunk':<45} | {(med_replace/32)*1000:>10.2f} ms/chunk")
-    print(f"{'5. Merger Destination Atomic Rename (os.replace)':<45} | {med_merger_replace*1000:>10.2f} ms")
-    print(f"{'6. Total Download Wall-Clock Duration':<45} | {med_total*1000:>10.2f} ms ({med_total:.3f} s)")
-    print("=" * 80)
+    med_fsync_total   = statistics.median(sum(r["chunk_fsync_times"])   for r in all_runs) * 1000
+    med_replace_total = statistics.median(sum(r["chunk_replace_times"]) for r in all_runs) * 1000
+    med_stat_total    = statistics.median(sum(r["chunk_stat_times"])     for r in all_runs) * 1000
+
+    avg_fsync   = med_fsync_total   / max(n_chunk, 1)
+    avg_replace = med_replace_total / max(n_chunk, 1)
+    avg_stat    = med_stat_total    / max(len(all_runs[0]["chunk_stat_times"]), 1)
+
+    print("\n" + "=" * 82)
+    print(f"{'Phase':<50} | {'Median':>10}")
+    print("-" * 82)
+    print(f"{'1. Range Probe & Validator (HEAD+206)':<50} | {med_ms('probe_time'):>8.2f} ms")
+    print(f"{'2. Thread Dispatch Overhead (32 to_thread hops)':<50} | {med_ms('thread_dispatch_overhead'):>8.2f} ms")
+    print(f"{'3. Per-chunk os.fsync() total ({n_chunk} chunks)':<50} | {med_fsync_total:>8.2f} ms")
+    print(f"{'   └─ per chunk average':<50} | {avg_fsync:>8.2f} ms")
+    print(f"{'4. Per-chunk os.replace() total ({n_chunk} chunks)':<50} | {med_replace_total:>8.2f} ms")
+    print(f"{'   └─ per chunk average':<50} | {avg_replace:>8.2f} ms")
+    n_stat = len(all_runs[0]["chunk_stat_times"])
+    print(f"{'5. os.stat() calls total ({n_stat} calls)':<50} | {med_stat_total:>8.2f} ms")
+    print(f"{'   └─ per call average':<50} | {avg_stat:>8.4f} ms")
+    print(f"{'6. Merger os.fsync()':<50} | {med_ms('merger_fsync'):>8.2f} ms")
+    print(f"{'7. Merger os.replace()':<50} | {med_ms('merger_replace'):>8.2f} ms")
+    print(f"{'8. Total wall-clock':<50} | {med_total*1000:>8.1f} ms ({med_total:.3f} s)")
+    print("=" * 82)
 
     server.shutdown()
     temp_dir.cleanup()

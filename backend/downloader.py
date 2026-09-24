@@ -447,6 +447,7 @@ def plan_adaptive_chunks(
     min_chunk_size: Optional[int] = None,
     max_chunk_size: Optional[int] = None,
     num_interfaces: int = 1,
+    enable_warmup_tail: Optional[bool] = None,
 ) -> List[Tuple[int, int, int]]:
     """
     Adaptive chunk planner (Milestone 3):
@@ -492,6 +493,26 @@ def plan_adaptive_chunks(
     # Therefore, single-interface downloads use uniform steady-state chunks.
     # ponytail: ceiling: single-interface uses uniform chunks; upgrade: dynamic mid-flight chunk sizing on single interface if bandwidth is volatile
     if num_interfaces <= 1:
+        ranges = []
+        cursor = 0
+        idx = 0
+        while cursor < expected_size:
+            end = min(cursor + steady_cs - 1, expected_size - 1)
+            ranges.append((idx, cursor, end))
+            cursor = end + 1
+            idx += 1
+        return ranges
+
+    # Warm-up and tail tapering: gated by parameter or config flag.
+    # Default OFF: uniform steady-state chunks showed equal or better performance on both
+    # loopback and synthetic 20/2 MB/s asymmetric benchmarks (5-run medians).
+    # Enable when a real asymmetric benchmark demonstrates a measurable win.
+    # ponytail: ceiling: uniform is correct default; upgrade: enable ENABLE_ADAPTIVE_WARMUP_TAIL
+    # when benchmarks on real cellular/Wi-Fi asymmetry show improvement.
+    if enable_warmup_tail is None:
+        enable_warmup_tail = bool(config.get("ENABLE_ADAPTIVE_WARMUP_TAIL", False))
+
+    if not enable_warmup_tail:
         ranges = []
         cursor = 0
         idx = 0

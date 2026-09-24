@@ -159,7 +159,7 @@ def main():
         ("M3-head      (single-iface)",   "C:/Coding/Burst/backend"),
     ]
 
-    N_RUNS = 5
+    N_RUNS = 10
     all_times: dict[str, list[float]] = {name: [] for name, _ in engines}
 
     td = tempfile.TemporaryDirectory()

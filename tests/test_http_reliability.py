@@ -1010,6 +1010,8 @@ assert config._DEFAULTS["EXCLUDED_INTERFACE_COOLDOWN"] == 60.0
 assert config._DEFAULTS["MAX_CONSECUTIVE_FAILURES"] == 3
 assert config._DEFAULTS["SINGLE_INTERFACE_RECONNECT_TIMEOUT"] == 10.0
 assert config._DEFAULTS["ENABLE_CHUNK_FSYNC"] is True
+assert config._DEFAULTS["ENABLE_ADAPTIVE_WARMUP_TAIL"] is False
+assert config.ENABLE_ADAPTIVE_WARMUP_TAIL is False
 print("OK")
 """
         import subprocess
@@ -1026,6 +1028,26 @@ print("OK")
         min_cs = 256 * 1024
         max_cs = 8 * 1024 * 1024
 
+        # --- Default (ENABLE_ADAPTIVE_WARMUP_TAIL=False): uniform chunks ---
+        uniform_ranges = plan_adaptive_chunks(
+            expected_size=size,
+            latencies={"192.168.1.1": 20.0, "10.0.0.1": 80.0},
+            base_chunk_size=base_cs,
+            min_chunk_size=min_cs,
+            max_chunk_size=max_cs,
+            num_interfaces=2,
+        )
+        # Byte conservation must hold regardless of mode
+        self.assertGreater(len(uniform_ranges), 0)
+        self.assertEqual(uniform_ranges[0][1], 0)
+        self.assertEqual(uniform_ranges[-1][2], size - 1)
+        total_u = sum(r[2] - r[1] + 1 for r in uniform_ranges)
+        self.assertEqual(total_u, size, "Uniform mode: total bytes must equal expected_size")
+        # All uniform chunks should be base_cs (last may be smaller)
+        for i, (_, s, e) in enumerate(uniform_ranges[:-1]):
+            self.assertLessEqual(e - s + 1, base_cs)
+
+        # --- Warm-up/tail mode (ENABLE_ADAPTIVE_WARMUP_TAIL=True) ---
         ranges = plan_adaptive_chunks(
             expected_size=size,
             latencies={"192.168.1.1": 20.0, "10.0.0.1": 80.0},
@@ -1033,6 +1055,7 @@ print("OK")
             min_chunk_size=min_cs,
             max_chunk_size=max_cs,
             num_interfaces=2,
+            enable_warmup_tail=True,
         )
 
         # 1. Byte conservation & contiguous range assertion
@@ -1312,6 +1335,7 @@ print("OK")
                 min_chunk_size=256 * 1024,
                 max_chunk_size=8 * 1024 * 1024,
                 num_interfaces=2,
+                enable_warmup_tail=True,
             )
             self.assertEqual(ranges[0][1], 0, "Chunk plan must start at byte 0")
             self.assertEqual(ranges[-1][2], test_size - 1, "Chunk plan must end at expected_size - 1")
@@ -1369,9 +1393,11 @@ print("OK")
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
     # -----------------------------------------------------------------------
-    # Test ZF — Mid-download chunk slicing, kill, resume with exact boundaries (Item 4)
+    # Test ZF — Mid-download chunk slicing, kill, resume with exact boundaries,
+    #           exactly-once commits, SHA256, and burst_active_jobs.json persistence
     # -----------------------------------------------------------------------
     async def test_zf_mid_download_chunk_slice_kill_resume_exact_boundaries(self):
+        import json as _json
         url = f"{self.base_url}/slice_test.bin"
         dest = self.out_dir / "test_zf_sliced.bin"
         temp_dir = dest.parent / ".burst_test_zf"
@@ -1408,23 +1434,38 @@ print("OK")
         )
         job.progress["127.0.0.1"] = prog
 
+        # Count os.replace calls to verify exactly-once atomic commits
+        replace_counts: dict = {}
+        real_replace = os.replace
+        def counted_replace(src, dst):
+            dst_key = str(dst)
+            replace_counts[dst_key] = replace_counts.get(dst_key, 0) + 1
+            return real_replace(src, dst)
+
         with patch.dict(config._DEFAULTS, {"MIN_CHUNK_SIZE": 64 * 1024, "BASE_CHUNK_SIZE": 64 * 1024}):
-            worker_task = asyncio.create_task(self.manager._worker(job, self.iface[0], queue, chunk_files))
+            with patch("os.replace", side_effect=counted_replace):
+                worker_task = asyncio.create_task(self.manager._worker(job, self.iface[0], queue, chunk_files))
 
-            for _ in range(50):
-                if 0 in job.chunks and job.chunks[0].status == ChunkStatus.COMPLETE:
-                    break
-                await asyncio.sleep(0.05)
+                for _ in range(50):
+                    if 0 in job.chunks and job.chunks[0].status == ChunkStatus.COMPLETE:
+                        break
+                    await asyncio.sleep(0.05)
 
-            worker_task.cancel()
-            try:
-                await worker_task
-            except (asyncio.CancelledError, Exception):
-                pass
+                worker_task.cancel()
+                try:
+                    await worker_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             self.assertGreater(len(job._ranges), 1, "Chunk must have been sliced into multiple ranges")
+
+            # Exactly-once commit: each completed .part file written at most once
+            for dst_path, count in replace_counts.items():
+                self.assertEqual(count, 1, f"os.replace called {count} times for {dst_path} (expected 1)")
+
             persisted_state = job.to_dict()
 
+            # Boundary correctness
             ranges = persisted_state["_ranges"]
             self.assertEqual(ranges[0][1], 0)
             self.assertEqual(ranges[-1][2], total_size - 1)
@@ -1439,7 +1480,18 @@ print("OK")
             self.assertTrue(chunk_files[0].exists())
             self.assertEqual(chunk_files[0].stat().st_size, slice0_len)
 
-            # Resume job from persisted state
+            # JSON persistence: simulate burst_active_jobs.json disk persistence
+            # save_state() calls j.to_dict() and writes JSON; verify _ranges survives serialization
+            active_jobs_file = self.out_dir / "burst_active_jobs.json"
+            active_jobs_file.write_text(_json.dumps({"downloads": [persisted_state]}), encoding="utf-8")
+            self.assertTrue(active_jobs_file.exists())
+            loaded = _json.loads(active_jobs_file.read_text(encoding="utf-8"))
+            loaded_ranges = loaded["downloads"][0]["_ranges"]
+            self.assertEqual(len(loaded_ranges), len(ranges), "Range count must persist in burst_active_jobs.json")
+            for orig, loaded_r in zip(ranges, loaded_ranges):
+                self.assertEqual(list(orig), list(loaded_r), "Sliced boundary must persist to burst_active_jobs.json")
+
+            # Resume from persisted state and verify SHA256
             resumed_job = await self.manager.resume_job_from_state(persisted_state, self.iface)
             resumed_task = self.manager._job_tasks[resumed_job.job_id]
             await resumed_task
@@ -1447,7 +1499,8 @@ print("OK")
             self.assertEqual(resumed_job.status, "completed")
             self.assertTrue(dest.exists())
             self.assertEqual(dest.stat().st_size, total_size)
-            self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
+            self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH,
+                             "SHA256 of resumed file must match original payload")
 
     # -----------------------------------------------------------------------
     # Test ZG — Single interface bounded wait and failed, resumable transition (Item 11)
