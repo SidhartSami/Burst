@@ -61,8 +61,11 @@ ENABLE_CHUNK_FSYNC: bool = True                    # Per-chunk fsync before atom
 # ponytail: warm-up and tail tapering add chunk-split overhead with no measured win on loopback;
 # enable only when a benchmark on real asymmetric interfaces shows improvement over uniform.
 ENABLE_ADAPTIVE_WARMUP_TAIL: bool = False          # Warm-up + tail tapering for multi-interface downloads
-# ponytail: tail racing launches speculative duplicate chunk on idle interface; default off until benchmarked
-ENABLE_TAIL_RACING: bool = False                   # Speculative tail racing for straggler chunks
+# ponytail: tail racing launches speculative duplicate chunk on idle interface.
+# EXPERIMENTAL: Benchmarking on asymmetric (20 vs 2 MB/s) links showed no demonstrated benefit
+# (0.067 s median difference is within noise margin) and ON mode suffered a worse tail
+# (max 8.104 s vs 5.602 s) due to CPU/socket contention. Kept default False.
+ENABLE_TAIL_RACING: bool = False                   # Speculative tail racing for straggler chunks (experimental)
 
 # ---------------------------------------------------------------------------
 # Sliding-window speed measurement

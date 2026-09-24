@@ -853,6 +853,13 @@ class DownloadManager:
                     if current_info.final_url:
                         job.final_url = current_info.final_url
 
+                    orig_host = urllib.parse.urlsplit(job.url).netloc
+                    final_host = urllib.parse.urlsplit(job.final_url or "").netloc
+                    if orig_host and final_host and orig_host.lower() != final_host.lower():
+                        # ponytail: cross-host redirect lowers resume confidence as tokens or validators may expire
+                        if job.resume_confidence in ("high", "medium"):
+                            job.resume_confidence = "low"
+
             # Milestone 4: Preflight disk space check on resume
             check_disk_space_preflight(
                 Path(job.output_path),
@@ -947,6 +954,12 @@ class DownloadManager:
             job.last_modified = analysis.last_modified
             job.final_url = analysis.final_url
             job.range_error_reason = analysis.range_error_reason
+
+            orig_host = urllib.parse.urlsplit(job.url).netloc
+            final_host = urllib.parse.urlsplit(job.final_url or "").netloc
+            if orig_host and final_host and orig_host.lower() != final_host.lower():
+                # ponytail: cross-host redirect lowers resume confidence as CDN tokens or validators may expire
+                job.resume_confidence = "low"
             
             if not job.supports_ranges and analysis.range_error_reason:
                 print(f"[HTTP] Multi-range disabled for job {job.job_id}: {analysis.range_error_reason}")
