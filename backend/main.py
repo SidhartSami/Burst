@@ -670,7 +670,10 @@ async def batch_download(payload: BatchDownloadRequest) -> Dict[str, Any]:
 @app.post("/analyze")
 async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
     try:
+        import dataclasses
         result = await analyze_url(payload.url, payload.interface_ip)
+        if dataclasses.is_dataclass(result):
+            return dataclasses.asdict(result)
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1108,9 +1108,9 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: targetUrl, interface_ip: selectedIps[0] || null })
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => ({}));
         setDownloadBtnState("idle");
-        if (!resp.ok) { setToast(data.detail || "URL unreachable"); return; }
+        if (!resp.ok) { setToast(data.detail || data.error || `HTTP ${resp.status}: URL analysis failed`); return; }
       } catch (err) {
         setDownloadBtnState("idle");
         setToast("Connection error");
