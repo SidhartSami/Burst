@@ -53,6 +53,8 @@ class DownloadRequest(BaseModel):
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
     file_priorities: Optional[Dict[int, int]] = None
+    wait_for_selection: Optional[bool] = False
+    paused: Optional[bool] = False
 
 
 class AnalyzeRequest(BaseModel):
@@ -75,10 +77,25 @@ class TorrentStartRequest(BaseModel):
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
     file_priorities: Optional[Dict[int, int]] = None
+    wait_for_selection: Optional[bool] = False
+    paused: Optional[bool] = False
 
 
 class FilePrioritiesRequest(BaseModel):
     priorities: Dict[int, int]
+
+
+class DirSelectionRequest(BaseModel):
+    dir_path: str
+    priority: Optional[int] = 4
+
+
+class DirDeselectionRequest(BaseModel):
+    dir_path: str
+
+
+class BulkSelectionRequest(BaseModel):
+    priority: Optional[int] = 4
 
 
 class TorrentInspectRequest(BaseModel):
@@ -678,6 +695,8 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
             job = await start_torrent_download(
                 payload.url, payload.output_path, payload.interface_ips,
                 payload.bandwidth_limits, file_priorities=payload.file_priorities,
+                wait_for_selection=bool(payload.wait_for_selection),
+                paused=bool(payload.paused),
             )
             # Only broadcast if it's not an internal check (though pings usually aren't magnets)
             if "BURST_INTERNAL_CHECK" not in payload.url:
@@ -1145,7 +1164,9 @@ async def load_state():
                         interface_ips=t_job["interface_ips"],
                         bandwidth_limits=t_job.get("bandwidth_limits", {}),
                         job_id=t_job["job_id"],
-                        resume_data=t_job
+                        resume_data=t_job,
+                        file_priorities=t_job.get("file_priorities"),
+                        paused=(t_job.get("status") == "paused"),
                     )
                 except Exception as e:
                     print(f"Error resuming torrent job: {e}")
@@ -1365,6 +1386,8 @@ async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
         job = await start_torrent_download(
             req.magnet_uri, req.output_path, req.interface_ips,
             req.bandwidth_limits, file_priorities=req.file_priorities,
+            wait_for_selection=bool(req.wait_for_selection),
+            paused=bool(req.paused),
         )
         await broadcast_event("new_job", {"job_id": job.job_id})
         save_state()
@@ -1379,6 +1402,24 @@ async def get_torrent_status(job_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
 
+@app.post("/torrent/{job_id}/resume")
+async def resume_torrent_api(job_id: str) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    res = await job.resume()
+    save_state()
+    return res
+
+@app.post("/torrent/{job_id}/pause")
+async def pause_torrent_api(job_id: str) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    res = await job.pause()
+    save_state()
+    return res
+
 @app.get("/torrent/{job_id}/files")
 async def get_torrent_files(job_id: str) -> Dict[str, Any]:
     job = active_torrents.get(job_id)
@@ -1391,9 +1432,62 @@ async def set_torrent_file_priorities(job_id: str, req: FilePrioritiesRequest) -
     job = active_torrents.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    res = await job.set_file_priorities(req.priorities)
-    save_state()
-    return res
+    try:
+        res = await job.set_file_priorities(req.priorities)
+        save_state()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/torrent/{job_id}/files/select-all")
+async def select_all_files_api(job_id: str, req: Optional[BulkSelectionRequest] = None) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    prio = req.priority if req and req.priority is not None else 4
+    try:
+        res = await job.select_all(prio)
+        save_state()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/torrent/{job_id}/files/deselect-all")
+async def deselect_all_files_api(job_id: str) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        res = await job.deselect_all()
+        save_state()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/torrent/{job_id}/files/select-dir")
+async def select_dir_api(job_id: str, req: DirSelectionRequest) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    prio = req.priority if req.priority is not None else 4
+    try:
+        res = await job.select_directory(req.dir_path, prio)
+        save_state()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/torrent/{job_id}/files/deselect-dir")
+async def deselect_dir_api(job_id: str, req: DirDeselectionRequest) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        res = await job.deselect_directory(req.dir_path)
+        save_state()
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/torrent/inspect")
 async def inspect_torrent_api(req: TorrentInspectRequest) -> Dict[str, Any]:
@@ -1401,6 +1495,11 @@ async def inspect_torrent_api(req: TorrentInspectRequest) -> Dict[str, Any]:
     target = req.torrent_path or req.magnet_uri
     if not target:
         raise HTTPException(status_code=400, detail="Missing torrent_path or magnet_uri")
+    if req.torrent_path:
+        if not req.torrent_path.lower().endswith(".torrent"):
+            raise HTTPException(status_code=400, detail="Only .torrent files are allowed")
+        if not os.path.exists(req.torrent_path):
+            raise HTTPException(status_code=400, detail="Torrent file not found")
     try:
         return inspect_torrent(target)
     except Exception as e:
