@@ -140,22 +140,30 @@ def _bootstrap_dht(ses: lt.session):
 
 
 def _save_dht_state(ses: lt.session):
-    """Persist DHT routing table so next session bootstraps instantly."""
+    """Persist DHT routing table so next session bootstraps instantly without polluting interface settings."""
     _init_lt()
     try:
         state = ses.save_state()
+        if isinstance(state, dict):
+            state.pop(b"settings", None)
+            state.pop("settings", None)
         DHT_STATE_FILE.write_bytes(lt.bencode(state))
     except Exception as e:
         print(f"[TORRENT] DHT state save error: {e}")
 
 
-def _load_dht_state(ses: lt.session):
-    """Load persisted DHT routing table if available."""
+def _load_dht_state(ses: lt.session, settings: Optional[dict] = None):
+    """Load persisted DHT routing table if available, preserving explicitly configured interface settings."""
     _init_lt()
     try:
         if DHT_STATE_FILE.exists():
             state = lt.bdecode(DHT_STATE_FILE.read_bytes())
+            if isinstance(state, dict):
+                state.pop(b"settings", None)
+                state.pop("settings", None)
             ses.load_state(state)
+            if settings:
+                ses.apply_settings(settings)
             print("[TORRENT] DHT state loaded from disk — fast bootstrap!")
     except Exception as e:
         print(f"[TORRENT] DHT state load error (harmless): {e}")
@@ -849,7 +857,7 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
             meta_settings = _make_settings(ip=None)
 
         meta_ses = lt.session(meta_settings)
-        _load_dht_state(meta_ses)  # warm DHT routing table before bootstrap calls
+        _load_dht_state(meta_ses, meta_settings)  # warm DHT routing table before bootstrap calls
         if not is_loopback:
             _bootstrap_dht(meta_ses)   # explicitly ping each router so routing table populates fast
 
