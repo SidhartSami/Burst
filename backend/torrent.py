@@ -97,7 +97,7 @@ def _make_settings(ip: Optional[str] = None) -> dict:
 
 def _bootstrap_dht(ses: lt.session):
     _init_lt()
-    # ponytail: Verified DHT bootstrap settings with active DNS nodes and loopback test. ceiling: loopback and unit tests verify DHT node table initialization. upgrade: execute manual live public-magnet test against live Ubuntu ISO on release qualification.
+    # ponytail: DHT bootstrap uses static DNS routers and loopback test seeder. ceiling: automated tests avoid external network flakiness. upgrade: execute manual live public-magnet test against live Ubuntu ISO during release qualification.
     # In libtorrent 2.0, dht_bootstrap_nodes in settings handles router discovery.
     # Legacy ses.add_dht_router() is only called if dht_bootstrap_nodes is not available.
     if not hasattr(ses, "get_settings") or "dht_bootstrap_nodes" not in ses.get_settings():
@@ -236,6 +236,8 @@ class TorrentJob:
                 self.file_priorities = {int(k): int(v) for k, v in resume_data["file_priorities"].items()}
 
         self.speed_combined = 0
+        self.upload_speed = 0
+        self.total_uploaded = 0
         self.speeds: Dict[str, int] = {ip: 0 for ip in interface_ips}
         self.bytes_per_interface: Dict[str, int] = {ip: 0 for ip in interface_ips}
         self.peers_per_interface: Dict[str, int] = {ip: 0 for ip in interface_ips}
@@ -411,14 +413,25 @@ class TorrentJob:
         return await self.set_file_priorities(matching)
 
     def to_dict(self) -> dict:
+        rem_bytes = max(0, (self.selected_size if self.selected_size > 0 else self.total_size) - self.selected_downloaded)
+        eta_sec = (
+            round(rem_bytes / self.speed_combined, 1)
+            if (self.speed_combined > 0 and rem_bytes > 0)
+            else (0.0 if self.status == "completed" else None)
+        )
+        ratio = round(self.total_uploaded / max(1, self.selected_downloaded), 2) if self.selected_downloaded > 0 else 0.0
+
         return {
             "job_id": self.job_id,
             "filename": self.filename,
             "type": "torrent",
             "progress": self.progress,
             "speed_combined": self.speed_combined,
+            "upload_speed": self.upload_speed,
+            "upload_speed_mb_s": round(self.upload_speed / (1024 * 1024), 2),
             "speeds": self.speeds,
             "bytes_per_interface": self.bytes_per_interface,
+            "bytes_per_interface_session": self.bytes_per_interface,
             "peers_per_interface": self.peers_per_interface,
             "interfaces": {
                 ip: {
@@ -435,6 +448,7 @@ class TorrentJob:
                 for ip in self.interface_ips
             },
             "seeders": self.seeders,
+            "seeds": self.seeders,
             "leechers": self.leechers,
             "status": self.status,
             "expected_size": self.selected_size if self.selected_size > 0 else self.total_size,
@@ -445,6 +459,9 @@ class TorrentJob:
             "selected_downloaded": self.selected_downloaded,
             "downloaded_selected": self.selected_downloaded,
             "downloaded": self.downloaded,
+            "remaining_bytes": rem_bytes,
+            "eta_s": eta_sec,
+            "ratio": ratio,
             "output_path": self.output_path,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -952,6 +969,8 @@ async def _monitor_download(job: TorrentJob):
                     job.interface_ips.remove(ip)
 
         total_speed = 0
+        total_upload_rate = 0
+        total_upload_done = 0
         # Seed from last-known values so a transient error or empty poll cycle
         # can never zero-out previously reported progress/downloaded bytes.
         max_progress = job.progress
@@ -975,6 +994,8 @@ async def _monitor_download(job: TorrentJob):
 
             job.speeds[ip] = s.download_rate
             total_speed += s.download_rate
+            total_upload_rate += getattr(s, "upload_rate", 0)
+            total_upload_done += getattr(s, "total_upload", 0)
             job.peers_per_interface[ip] = s.num_peers
             total_peers += s.num_peers
             total_seeders = max(total_seeders, s.num_seeds)
@@ -1027,6 +1048,8 @@ async def _monitor_download(job: TorrentJob):
             max_progress = max(max_progress, s.progress)
 
         job.speed_combined = total_speed
+        job.upload_speed = total_upload_rate
+        job.total_uploaded = total_upload_done
         job.progress = max_progress
         job.selected_downloaded = max_selected_downloaded
         job.downloaded = max_downloaded

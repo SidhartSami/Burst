@@ -408,6 +408,192 @@ class TestObservability(unittest.TestCase):
                 self.assertIn("ceiling:", line, f"{name}:{line_no} marker missing ceiling: tag")
                 self.assertIn("upgrade:", line, f"{name}:{line_no} marker missing upgrade: tag")
 
+    # -----------------------------------------------------------------------
+    # 11. Missing HTTP and Torrent fields verification
+    # -----------------------------------------------------------------------
+    def test_http_and_torrent_missing_telemetry_fields(self):
+        # 1. HTTP Fields
+        hjob = DownloadJob(
+            job_id="job_fields_http",
+            url="http://example.com/payload.bin",
+            output_path=str(self.dir_path / "payload.bin"),
+            expected_size=10_000_000,
+            total_downloaded=4_000_000,
+        )
+        hjob.progress["192.168.1.10"] = InterfaceProgress(
+            name="Wi-Fi", ip_address="192.168.1.10",
+            chunk_start=0, chunk_end=5_000_000, downloaded=2_000_000, speed_mb_s=2.5,
+        )
+        hjob.progress["192.168.1.20"] = InterfaceProgress(
+            name="LTE", ip_address="192.168.1.20",
+            chunk_start=5_000_001, chunk_end=10_000_000, downloaded=2_000_000, speed_mb_s=2.5,
+        )
+        hjob.chunks[0] = Chunk(chunk_id=0, start=0, end=2_499_999, status=ChunkStatus.COMPLETE)
+        hjob.chunks[1] = Chunk(chunk_id=1, start=2_500_000, end=4_999_999, status=ChunkStatus.COMPLETE)
+        hjob.chunks[2] = Chunk(chunk_id=2, start=5_000_000, end=7_499_999, status=ChunkStatus.PENDING)
+        hjob.chunks[3] = Chunk(chunk_id=3, start=7_500_000, end=9_999_999, status=ChunkStatus.FAILED)
+
+        hd = hjob.to_dict()
+        self.assertEqual(hd["speed_combined_mb_s"], 5.0)
+        self.assertEqual(hd["speed_combined"], int(5.0 * 1024 * 1024))
+        self.assertEqual(hd["remaining_bytes"], 6_000_000)
+        self.assertAlmostEqual(hd["eta_s"], 6_000_000 / (5.0 * 1024 * 1024), places=1)
+        self.assertEqual(hd["completed_chunks"], 2)
+        self.assertEqual(hd["pending_chunks"], 1)
+        self.assertEqual(hd["failed_chunks"], 1)
+
+        # 2. Torrent Fields
+        tjob = TorrentJob(
+            magnet_uri="magnet:?xt=urn:btih:fedcba9876543210fedcba9876543210fedcba98&dn=FieldsTorrent",
+            output_path=str(self.dir_path),
+            interface_ips=["192.168.1.10"],
+        )
+        tjob.total_size = 20_000_000
+        tjob.selected_size = 20_000_000
+        tjob.selected_downloaded = 8_000_000
+        tjob.speed_combined = 1_048_576  # 1 MB/s
+        tjob.upload_speed = 524_288     # 0.5 MB/s
+        tjob.total_uploaded = 4_000_000
+        tjob.seeders = 7
+        tjob.bytes_per_interface = {"192.168.1.10": 8_000_000}
+
+        td = tjob.to_dict()
+        self.assertEqual(td["seeds"], 7)
+        self.assertEqual(td["seeders"], 7)
+        self.assertEqual(td["upload_speed"], 524_288)
+        self.assertEqual(td["upload_speed_mb_s"], 0.5)
+        self.assertEqual(td["remaining_bytes"], 12_000_000)
+        self.assertAlmostEqual(td["eta_s"], 12_000_000 / 1_048_576, places=1)
+        self.assertEqual(td["ratio"], 0.5)
+        self.assertEqual(td["bytes_per_interface_session"], {"192.168.1.10": 8_000_000})
+
+    # -----------------------------------------------------------------------
+    # 12. Rate-based rolling window consistency
+    # -----------------------------------------------------------------------
+    def test_rate_based_rolling_window_consistency(self):
+        p = InterfaceProgress(
+            name="Wi-Fi",
+            ip_address="192.168.1.10",
+            chunk_start=0,
+            chunk_end=1_000_000,
+        )
+        # Populate 10 recent outcomes: 6 success, 3 failure, 1 stall
+        outcomes = ["success", "success", "failure", "success", "failure", "stall", "success", "success", "failure", "success"]
+        for o in outcomes:
+            p.record_outcome(o)
+
+        self.assertEqual(len(p._recent_outcomes[-10:]), 10)
+        self.assertEqual(p.rolling_failure_rate, 0.3)
+        self.assertEqual(p.rolling_stall_rate, 0.1)
+
+        job = DownloadJob(
+            job_id="job_obs_rolling",
+            url="http://example.com/test.bin",
+            output_path=str(self.dir_path / "test.bin"),
+        )
+        job.progress["192.168.1.10"] = p
+        d = job.to_dict()
+        self.assertEqual(d["interfaces"]["192.168.1.10"]["failure_rate"], 0.3)
+        self.assertEqual(d["interfaces"]["192.168.1.10"]["stall_rate"], 0.1)
+
+        # Append 10 consecutive successes - older failures should decay out of the 10-window
+        for _ in range(10):
+            p.record_outcome("success")
+        self.assertEqual(p.rolling_failure_rate, 0.0)
+        self.assertEqual(p.rolling_stall_rate, 0.0)
+        d2 = job.to_dict()
+        self.assertEqual(d2["interfaces"]["192.168.1.10"]["failure_rate"], 0.0)
+        self.assertEqual(d2["interfaces"]["192.168.1.10"]["stall_rate"], 0.0)
+
+    # -----------------------------------------------------------------------
+    # 13. Chunk map after resume and with dynamically sliced chunks
+    # -----------------------------------------------------------------------
+    def test_chunk_map_after_resume_and_with_dynamically_sliced_chunks(self):
+        job = DownloadJob(
+            job_id="job_resume_slice",
+            url="http://example.com/resume.bin",
+            output_path=str(self.dir_path / "resume.bin"),
+            expected_size=8_000_000,
+        )
+        # 4 initial chunks
+        c0 = Chunk(chunk_id=0, start=0, end=1_999_999)
+        c1 = Chunk(chunk_id=1, start=2_000_000, end=3_999_999)
+        c2 = Chunk(chunk_id=2, start=4_000_000, end=5_999_999)
+        c3 = Chunk(chunk_id=3, start=6_000_000, end=7_999_999)
+        job.chunks = {0: c0, 1: c1, 2: c2, 3: c3}
+
+        # Chunk 0 was already on disk from previous session: marked as resume
+        c0.status = ChunkStatus.COMPLETE
+        c0.committed_interface = "resume"
+        job.committed_chunk_map[0] = "resume"
+
+        # Chunk 1 is dynamically sliced into chunk 1 (2.0M..2.5M) and remainder chunk 4 (2.5M..4.0M)
+        c1.end = 2_499_999
+        c4 = Chunk(chunk_id=4, start=2_500_000, end=3_999_999)
+        job.chunks[4] = c4
+
+        # Workers complete chunk 1 on 192.168.1.10 and chunk 4 on 192.168.1.20
+        c1.status = ChunkStatus.COMPLETE
+        c1.committed_interface = "192.168.1.10"
+        job.committed_chunk_map[1] = "192.168.1.10"
+
+        c4.status = ChunkStatus.COMPLETE
+        c4.committed_interface = "192.168.1.20"
+        job.committed_chunk_map[4] = "192.168.1.20"
+
+        # Chunks 2 and 3 remain in-flight
+        c2.status = ChunkStatus.DOWNLOADING
+        c3.status = ChunkStatus.PENDING
+
+        chunk_map = job.get_chunk_map(threshold=200)
+        self.assertFalse(chunk_map["is_aggregated"])
+        self.assertEqual(chunk_map["total_chunks"], 5)
+        self.assertEqual(chunk_map["committed_count"], 3)
+
+        # Verify earlier-session chunk shows as 'resume'
+        self.assertEqual(chunk_map["chunks"][0]["committed_interface"], "resume")
+        # Verify sliced chunk and remainder show their respective committed interfaces
+        self.assertEqual(chunk_map["chunks"][1]["committed_interface"], "192.168.1.10")
+        self.assertEqual(chunk_map["chunks"][4]["committed_interface"], "192.168.1.20")
+        self.assertIsNone(chunk_map["chunks"][2]["committed_interface"])
+        self.assertIsNone(chunk_map["chunks"][3]["committed_interface"])
+
+    # -----------------------------------------------------------------------
+    # 14. Measured JSON size at 1,000 chunks (strictly < 15 KB)
+    # -----------------------------------------------------------------------
+    def test_measured_json_size_at_1000_chunks(self):
+        job = DownloadJob(
+            job_id="job_obs_1000_chunks",
+            url="http://example.com/movie_2gb.mkv",
+            output_path=str(self.dir_path / "movie_2gb.mkv"),
+            expected_size=2 * 1024 * 1024 * 1024,
+        )
+        # Create 1,000 chunks (2 MB each)
+        NUM_CHUNKS = 1000
+        for i in range(NUM_CHUNKS):
+            chk = Chunk(chunk_id=i, start=i * 2097152, end=(i + 1) * 2097152 - 1)
+            # Commit half of them
+            if i < 500:
+                comm_ip = "192.168.1.10" if i % 2 == 0 else "192.168.1.20"
+                chk.status = ChunkStatus.COMPLETE
+                chk.committed_interface = comm_ip
+                job.committed_chunk_map[i] = comm_ip
+            job.chunks[i] = chk
+        job._total_chunks = NUM_CHUNKS
+
+        payload = job.to_dict()
+        # Since total_chunks=1000 > threshold (200), raw chunks dictionary MUST be empty
+        self.assertEqual(payload["chunks"], {})
+        # Chunk map must be aggregated into 50 buckets
+        self.assertTrue(payload["chunk_map"]["is_aggregated"])
+        self.assertEqual(len(payload["chunk_map"]["buckets"]), 50)
+
+        # Measure exact JSON byte size
+        json_bytes = len(json.dumps(payload).encode("utf-8"))
+        # Must be well below 15 KB (measured ~9 KB)
+        self.assertLess(json_bytes, 15_000, f"JSON payload {json_bytes} exceeds 15 KB limit!")
+
 
 if __name__ == "__main__":
     unittest.main()
+

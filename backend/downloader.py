@@ -371,6 +371,26 @@ class InterfaceProgress:
                 return "degraded"
         return "healthy"
 
+    @property
+    def rolling_failure_rate(self) -> float:
+        """Failure rate using same rolling window (last 10 requests, min 4) as health."""
+        window = self._recent_outcomes[-10:] if self._recent_outcomes else []
+        if len(window) >= 4:
+            return round(sum(1 for o in window if o == "failure") / len(window), 3)
+        if self.request_count >= 4:
+            return round(self.failure_count / self.request_count, 3)
+        return 0.0
+
+    @property
+    def rolling_stall_rate(self) -> float:
+        """Stall rate using same rolling window (last 10 requests, min 4) as health."""
+        window = self._recent_outcomes[-10:] if self._recent_outcomes else []
+        if len(window) >= 4:
+            return round(sum(1 for o in window if o == "stall") / len(window), 3)
+        if self.request_count >= 4:
+            return round(self.stall_count / self.request_count, 3)
+        return 0.0
+
 
 @dataclass
 class DownloadJob:
@@ -406,7 +426,7 @@ class DownloadJob:
     _ranges: List[Tuple[int, int, int]] = field(default_factory=list, repr=False)
     _completion_event: Any = field(default=None, repr=False)
 
-    def get_chunk_map(self, max_buckets: int = 100, threshold: int = 1000) -> Dict[str, Any]:
+    def get_chunk_map(self, max_buckets: int = 50, threshold: int = 200) -> Dict[str, Any]:
         """Return chunk-by-interface map built from actual commit events, bounded into buckets for large downloads."""
         total = len(self.chunks) if self.chunks else self._total_chunks
         if total == 0:
@@ -504,8 +524,8 @@ class DownloadJob:
                 "failure_count": v.failure_count,
                 "retry_count": v.retry_count,
                 "stall_count": v.stall_count,
-                "failure_rate": round(v.failure_count / max(1, v.request_count), 3) if v.request_count > 0 else 0.0,
-                "stall_rate": round(v.stall_count / max(1, v.request_count), 3) if v.request_count > 0 else 0.0,
+                "failure_rate": v.rolling_failure_rate,
+                "stall_rate": v.rolling_stall_rate,
                 "cooldown_remaining_s": max(0.0, round(v._cooldown_until - now, 1)),
                 "last_success_time": v.last_success_time,
                 "active_workers": active_cnt,
@@ -517,8 +537,8 @@ class DownloadJob:
             iface_dict[k] = d
 
         total_chunks = len(self.chunks) if self.chunks else self._total_chunks
-        chunk_map = self.get_chunk_map()
-        bounded_chunks = {k: c.to_dict() for k, c in self.chunks.items()} if total_chunks <= 1000 else {}
+        chunk_map = self.get_chunk_map(max_buckets=50, threshold=200)
+        bounded_chunks = {k: c.to_dict() for k, c in self.chunks.items()} if total_chunks <= 200 else {}
 
         waiting_remaining = 0.0
         if self.status in ("waiting", "waiting_reconnect"):
@@ -527,12 +547,32 @@ class DownloadJob:
             if wait_start:
                 waiting_remaining = max(0.0, round(wait_max - (now - wait_start), 1))
 
+        speed_comb_mb = round(sum(p.speed_mb_s for p in self.progress.values()), 2)
+        speed_comb_bytes = int(speed_comb_mb * 1024 * 1024)
+        rem_bytes = max(0, self.expected_size - self.total_downloaded) if self.expected_size > 0 else 0
+        eta_sec = (
+            round(rem_bytes / (speed_comb_mb * 1024 * 1024), 1)
+            if (speed_comb_mb > 0 and rem_bytes > 0)
+            else (0.0 if self.status == "completed" else None)
+        )
+
+        pending_c = sum(1 for c in self.chunks.values() if (c.status.value if hasattr(c.status, "value") else str(c.status)) == ChunkStatus.PENDING)
+        failed_c = sum(1 for c in self.chunks.values() if (c.status.value if hasattr(c.status, "value") else str(c.status)) == ChunkStatus.FAILED)
+        complete_c = sum(1 for c in self.chunks.values() if (c.status.value if hasattr(c.status, "value") else str(c.status)) == ChunkStatus.COMPLETE)
+
         return {
             "job_id": self.job_id, "url": self.url,
             "output_path": self.output_path,
             "expected_size": self.expected_size,
+            "remaining_bytes": rem_bytes,
             "supports_ranges": self.supports_ranges,
             "status": self.status,
+            "speed_combined": speed_comb_bytes,
+            "speed_combined_mb_s": speed_comb_mb,
+            "eta_s": eta_sec,
+            "pending_chunks": pending_c,
+            "failed_chunks": failed_c,
+            "completed_chunks": complete_c,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -1864,8 +1904,8 @@ class DownloadManager:
                 if part_file.stat().st_size == expected:
                     chunk.status = ChunkStatus.COMPLETE
                     chunk.completed_at = chunk.completed_at or time.time()
-                    chunk.committed_interface = chunk.assigned_interface or "resume"
-                    job.committed_chunk_map[chunk_idx] = chunk.committed_interface
+                    chunk.committed_interface = "resume"
+                    job.committed_chunk_map[chunk_idx] = "resume"
                     job.total_downloaded += expected
                     continue
                 else:
