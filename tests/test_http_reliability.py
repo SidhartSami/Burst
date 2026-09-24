@@ -25,6 +25,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import http.server
 import os
@@ -49,11 +50,15 @@ from downloader import (
     DownloadJob,
     DownloadManager,
     InterfaceProgress,
+    InsufficientDiskSpaceError,
     StalledDownloadError,
     URLAnalysis,
     analyze_url,
     calculate_backoff,
+    check_disk_space_preflight,
+    is_non_retryable_error,
     plan_adaptive_chunks,
+    redact_url,
 )
 
 # Test payload: 256 KB deterministic data
@@ -999,8 +1004,9 @@ assert config.MAX_CHUNK_SIZE == 8 * 1024 * 1024
 assert config.CHUNK_IO_SIZE == 64 * 1024
 assert config.REQUEST_TIMEOUT_SECONDS == 60
 assert config.WEIGHT_REBALANCE_INTERVAL_SECONDS == 5.0
-assert config.SINGLE_INTERFACE_RECONNECT_TIMEOUT == 10.0
+assert config.SINGLE_INTERFACE_RECONNECT_TIMEOUT == 180.0
 assert config.ENABLE_CHUNK_FSYNC is True
+assert config.ENABLE_TAIL_RACING is False
 
 assert config._DEFAULTS["STALL_TIMEOUT_SECONDS"] == 10.0
 assert config._DEFAULTS["RETRY_BACKOFF_BASE"] == 1.0
@@ -1008,10 +1014,11 @@ assert config._DEFAULTS["RETRY_BACKOFF_MAX"] == 10.0
 assert config._DEFAULTS["RETRY_JITTER_MAX"] == 0.5
 assert config._DEFAULTS["EXCLUDED_INTERFACE_COOLDOWN"] == 60.0
 assert config._DEFAULTS["MAX_CONSECUTIVE_FAILURES"] == 3
-assert config._DEFAULTS["SINGLE_INTERFACE_RECONNECT_TIMEOUT"] == 10.0
+assert config._DEFAULTS["SINGLE_INTERFACE_RECONNECT_TIMEOUT"] == 180.0
 assert config._DEFAULTS["ENABLE_CHUNK_FSYNC"] is True
 assert config._DEFAULTS["ENABLE_ADAPTIVE_WARMUP_TAIL"] is False
 assert config.ENABLE_ADAPTIVE_WARMUP_TAIL is False
+assert config._DEFAULTS["ENABLE_TAIL_RACING"] is False
 print("OK")
 """
         import subprocess
@@ -1522,16 +1529,123 @@ print("OK")
             self.assertEqual(job.status, "failed")
             self.assertIn("failed, resumable", job.error)
 
-            # Assert save_state logic identifies this job as resumable
-            is_resumable = (job.status == "failed" and "resumable" in (job.error or "").lower())
-            self.assertTrue(is_resumable)
+            # Assert structured resumable state
+            self.assertTrue(job.is_resumable)
+            self.assertTrue(job.to_dict()["is_resumable"])
 
             # Verify resume_job accepts this failed job
             res = await self.manager.resume_job(job.job_id)
             self.assertEqual(res["status"], "resumed")
             await self.manager.cancel_job(job.job_id)
 
+    # -----------------------------------------------------------------------
+    # Test ZH — Milestone 4: Preflight disk space check per volume
+    # -----------------------------------------------------------------------
+    def test_zh_disk_space_preflight(self):
+        dest = self.out_dir / "test_zh_preflight.bin"
+        chunk_files = {
+            0: self.out_dir / "chunk_00000.part",
+            1: self.out_dir / "chunk_00001.part",
+        }
+        # Simulate chunk 0 already downloaded (10 MB)
+        chunk_files[0].write_bytes(b"A" * (10 * 1024 * 1024))
+
+        expected_size = 20 * 1024 * 1024  # 20 MB total
+
+        # Mock disk usage: 100 MB free (sufficient: remaining 10 MB + 20 MB merge = 30 MB needed)
+        with patch("shutil.disk_usage", return_value=type("Usage", (), {"total": 500*1024*1024, "used": 400*1024*1024, "free": 100*1024*1024})()):
+            # Must pass without error
+            check_disk_space_preflight(dest, expected_size, chunk_files=chunk_files, supports_ranges=True)
+
+        # Mock disk usage: 15 MB free (insufficient: 30 MB needed)
+        with patch("shutil.disk_usage", return_value=type("Usage", (), {"total": 500*1024*1024, "used": 485*1024*1024, "free": 15*1024*1024})()):
+            with self.assertRaises(InsufficientDiskSpaceError) as ctx:
+                check_disk_space_preflight(dest, expected_size, chunk_files=chunk_files, supports_ranges=True)
+            self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+            self.assertTrue(is_non_retryable_error(ctx.exception))
+            self.assertIn("Insufficient disk space", str(ctx.exception))
+
+        # Cleanup
+        chunk_files[0].unlink(missing_ok=True)
+
+    # -----------------------------------------------------------------------
+    # Test ZI — Milestone 4: Redirect handling, cross-host credentials, downgrades & redaction
+    # -----------------------------------------------------------------------
+    def test_zi_redirect_handling_security_and_redaction(self):
+        # 1. URL redaction of query strings and credentials
+        url_with_secret = "https://cdn.example.com/download.zip?token=SUPERSECRET123&expire=99999"
+        redacted = redact_url(url_with_secret)
+        self.assertEqual(redacted, "https://cdn.example.com/download.zip?[REDACTED]")
+        self.assertNotIn("SUPERSECRET123", redacted)
+
+        url_with_creds = "https://user:password@cdn.example.com/file.iso"
+        redacted_creds = redact_url(url_with_creds)
+        self.assertNotIn("user", redacted_creds)
+        self.assertNotIn("password", redacted_creds)
+
+        # 2. Refuse HTTPS to HTTP downgrade
+        job = DownloadJob(
+            job_id="test_zi",
+            url="https://secure.example.com/file.bin",
+            output_path=str(self.out_dir / "zi.bin")
+        )
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.url = "http://insecure.example.com/file.bin"
+        hist_entry = MagicMock()
+        hist_entry.url = "https://secure.example.com/file.bin"
+        fake_response.history = [hist_entry]
+
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            sess_inst.get.return_value = fake_response
+            mock_sess.return_value = sess_inst
+
+            prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=1024)
+            with self.assertRaises(ValueError) as ctx:
+                self.manager._download_with_requests(
+                    job, "127.0.0.1", job.url, self.out_dir / "zi.tmp", "wb",
+                    {"Authorization": "Bearer secret"}, prog, time.perf_counter(), uuid.uuid4()
+                )
+            self.assertIn("protocol downgrade", str(ctx.exception).lower())
+
+    # -----------------------------------------------------------------------
+    # Test ZJ — Milestone 4: Tail racing with per-racer tmp files and cancel flag
+    # -----------------------------------------------------------------------
+    async def test_zj_tail_racing_racer_claim_and_thread_cancel(self):
+        dest = self.out_dir / "test_zj_tail.bin"
+        part_file = self.out_dir / "chunk_00000.part"
+        chunk_files = {0: part_file}
+        chunk = Chunk(chunk_id=0, start=0, end=1023)
+        job = DownloadJob(
+            job_id="test_zj",
+            url=f"{self.base_url}/test_zj.bin",
+            output_path=str(dest),
+            expected_size=1024,
+            supports_ranges=True,
+        )
+        job.chunks[0] = chunk
+        job.progress["127.0.0.1"] = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+
+        chunk._racing_cancel = threading.Event()
+
+        # Simulate losing racer where competitor already claimed chunk completion
+        chunk._racing_claimed = True
+
+        worker_id_loser = uuid.uuid4()
+        won = await self.manager._download_range(
+            job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, worker_id_loser, chunk=chunk
+        )
+
+        # Loser must cleanly return False without committing or degrading interface health
+        self.assertFalse(won, "Losing racer must return False")
+        p = job.progress["127.0.0.1"]
+        self.assertEqual(p.failure_count, 0, "Losing racer must not increment failure_count")
+        self.assertEqual(p.stall_count, 0, "Losing racer must not increment stall_count")
+        self.assertEqual(p.health, "healthy", "Losing racer must not degrade interface health")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

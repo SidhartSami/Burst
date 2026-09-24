@@ -8,13 +8,16 @@ and cross-interface retry routing.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import random
 import re
+import shutil
 import socket
 import ssl
 import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +52,88 @@ class StalledDownloadError(Exception):
 class OriginResourceModifiedError(ValueError):
     """Raised when the remote resource has been modified mid-flight (ETag/Last-Modified mismatch or 200 OK to Range)."""
     pass
+
+
+class InsufficientDiskSpaceError(OSError):
+    """Raised when destination filesystem lacks required disk space for download and merge."""
+    def __init__(self, message: str, required_bytes: int = 0, available_bytes: int = 0):
+        super().__init__(errno.ENOSPC, message)
+        self.required_bytes = required_bytes
+        self.available_bytes = available_bytes
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """Best-effort flush of directory entry to disk to ensure rename durability across power loss (POSIX)."""
+    if hasattr(os, "O_DIRECTORY"):
+        try:
+            fd = os.open(str(dir_path), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+
+def check_disk_space_preflight(
+    output_path: Path,
+    expected_size: int,
+    chunk_files: Optional[Dict[int, Path]] = None,
+    supports_ranges: bool = True
+) -> None:
+    """Preflight check on destination volume before starting or resuming downloads."""
+    if expected_size <= 0:
+        return
+    out_dir = output_path.parent
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(out_dir)
+        free_bytes = usage.free
+    except OSError:
+        return  # virtual fs or path without disk_usage support, proceed
+
+    # Resume-aware accounting: sum size of existing .part chunks
+    existing_bytes = 0
+    if supports_ranges and chunk_files:
+        for p in chunk_files.values():
+            if p.exists():
+                try:
+                    existing_bytes += p.stat().st_size
+                except OSError:
+                    pass
+    elif output_path.exists():
+        try:
+            existing_bytes = output_path.stat().st_size
+        except OSError:
+            pass
+
+    remaining_download = max(0, expected_size - existing_bytes)
+    # Merge requires space for final file alongside existing chunks
+    required_bytes = remaining_download + (expected_size if supports_ranges else 0)
+
+    if free_bytes < required_bytes:
+        req_mb = required_bytes / (1024 * 1024)
+        avail_mb = free_bytes / (1024 * 1024)
+        raise InsufficientDiskSpaceError(
+            f"Insufficient disk space on {out_dir}: required {req_mb:.1f} MB (including merge buffer), available {avail_mb:.1f} MB",
+            required_bytes=required_bytes,
+            available_bytes=free_bytes,
+        )
+
+
+def redact_url(url: Optional[str]) -> str:
+    """Redact query strings and sensitive credentials from URLs in log outputs."""
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = netloc.split("@", 1)[1]
+        query = "[REDACTED]" if parsed.query else ""
+        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    except Exception:
+        return url
 
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
@@ -87,7 +172,9 @@ def calculate_backoff(attempt: int) -> float:
 
 def is_non_retryable_error(exc: Exception) -> bool:
     """Identify permanent non-retryable errors that should fail immediately."""
-    if isinstance(exc, (FileNotFoundError, PermissionError, OriginResourceModifiedError)):
+    if isinstance(exc, (FileNotFoundError, PermissionError, OriginResourceModifiedError, InsufficientDiskSpaceError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
         return True
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         if exc.response.status_code in (400, 401, 403, 404, 405, 410, 416):
@@ -100,6 +187,8 @@ def is_non_retryable_error(exc: Exception) -> bool:
             or "content-range mismatch" in msg
             or "too many bytes" in msg
             or "remote resource modified mid-flight" in msg
+            or "protocol downgrade" in msg
+            or "insufficient disk space" in msg
         ):
             return True
     return False
@@ -125,6 +214,8 @@ class Chunk:
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     last_error: Optional[str] = None
+    _racing_claimed: bool = field(default=False, repr=False)
+    _racing_cancel: Any = field(default=None, repr=False)
 
     @property
     def expected_bytes(self) -> int:
@@ -229,6 +320,13 @@ class InterfaceProgress:
     _slow_since: Optional[float] = field(default=None, repr=False)
     _last_progress_time: float = field(default_factory=time.time, repr=False)
     _cooldown_until: float = field(default=0.0, repr=False)
+    _recent_outcomes: List[str] = field(default_factory=list, repr=False)
+
+    def record_outcome(self, outcome: str) -> None:
+        """Record request outcome in rolling window (last 20 requests) for decaying rate-based health."""
+        self._recent_outcomes.append(outcome)
+        if len(self._recent_outcomes) > 20:
+            self._recent_outcomes.pop(0)
 
     @property
     def health(self) -> str:
@@ -242,9 +340,15 @@ class InterfaceProgress:
             or self.status in ("paused_slow", "disconnected")
         ):
             return "degraded"
-        # ponytail: latency is one-shot startup probe; upgrade: continuous RTT EWMA across chunk requests
-        # ponytail: health failure/stall rate threshold uses 4-request window; upgrade: time-decayed rolling window if long downloads experience sporadic errors
-        if self.request_count >= 4:
+        # Rolling window rate evaluation (last 10 requests, min 4):
+        window = self._recent_outcomes[-10:] if self._recent_outcomes else []
+        if len(window) >= 4:
+            fails = sum(1 for o in window if o == "failure")
+            stalls = sum(1 for o in window if o == "stall")
+            if (fails / len(window) >= 0.5) or (stalls / len(window) >= 0.25):
+                return "degraded"
+        elif self.request_count >= 4:
+            # Fallback for legacy / pre-populated counters
             failure_rate = self.failure_count / self.request_count
             stall_rate = self.stall_count / self.request_count
             if failure_rate >= 0.5 or stall_rate >= 0.25:
@@ -333,8 +437,19 @@ class DownloadJob:
             "final_url": self.final_url,
             "range_error_reason": self.range_error_reason,
             "resume_confidence": self.resume_confidence,
+            "is_resumable": self.is_resumable,
             "chunks": {k: c.to_dict() for k, c in self.chunks.items()},
         }
+
+    @property
+    def is_resumable(self) -> bool:
+        """Structured resumable state: True if job can be resumed from existing partial state."""
+        return (
+            self.supports_ranges
+            and self.status in ("paused", "waiting", "waiting_reconnect", "failed")
+            and not self.is_cancelled
+            and (self.status != "failed" or "resumable" in (self.error or "").lower())
+        )
 
 
 def _build_connector(local_ip: str) -> aiohttp.TCPConnector:
@@ -354,6 +469,9 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
             headers["Accept-Encoding"] = "identity"
             async with session.get(url, allow_redirects=True, headers=headers, ssl=False) as resp:
                 final_url = str(resp.url)
+                if url.lower().startswith("https://") and final_url.lower().startswith("http://"):
+                    raise ValueError(f"Insecure redirect rejected: protocol downgrade from HTTPS to HTTP ({redact_url(final_url)})")
+
                 content_type = resp.headers.get("Content-Type", "application/octet-stream")
                 etag = normalize_etag(resp.headers.get("ETag"))
                 last_modified = resp.headers.get("Last-Modified") or None
@@ -399,6 +517,8 @@ async def analyze_url(url: str, preferred_ip: Optional[str] = None) -> URLAnalys
                         last_modified=last_modified,
                         range_error_reason="Server returned HTTP 200 OK to Range request (ranges not supported)",
                     )
+        except ValueError:
+            raise
         except Exception:
             pass
 
@@ -718,6 +838,14 @@ class DownloadManager:
                     if current_info.final_url:
                         job.final_url = current_info.final_url
 
+            # Milestone 4: Preflight disk space check on resume
+            check_disk_space_preflight(
+                Path(job.output_path),
+                job.expected_size,
+                chunk_files=job._chunk_files,
+                supports_ranges=job.supports_ranges,
+            )
+
             if job.expected_size > 0 and job.supports_ranges and job._ranges:
                 job.status = "downloading"
                 await self._parallel_download(job, interfaces)
@@ -811,6 +939,14 @@ class DownloadManager:
             if job.expected_size <= 0:
                 # Size is unknown (e.g. dynamic page / chunked encoding). Fall back to single connection.
                 job.supports_ranges = False
+
+            # Milestone 4: Preflight disk space check per volume
+            check_disk_space_preflight(
+                Path(job.output_path),
+                job.expected_size,
+                chunk_files=job._chunk_files,
+                supports_ranges=job.supports_ranges,
+            )
 
             if not job.supports_ranges:
                 job.status = "downloading"
@@ -964,6 +1100,9 @@ class DownloadManager:
                 queue.task_done()
                 continue
 
+            chunk.status = ChunkStatus.ASSIGNED
+            chunk.assigned_interface = ip
+
             chunk_idx = chunk.chunk_id
             start, end = chunk.start, chunk.end
             output_file = chunk_files[chunk_idx]
@@ -1014,11 +1153,18 @@ class DownloadManager:
             prog.request_count += 1
 
             try:
-                await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
+                won = await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
+                if not won:
+                    # Tail racer lost or was cancelled by winning competitor:
+                    # Clean exit with zero penalty to health, stall, or EWMA.
+                    queue.task_done()
+                    continue
+
                 prog.error = None
                 prog.consecutive_failures = 0
                 prog.chunks_completed += 1
                 prog.success_count += 1
+                prog.record_outcome("success")
                 prog.last_success_time = time.time()
                 prog._last_progress_time = time.time()
 
@@ -1052,6 +1198,7 @@ class DownloadManager:
 
                 prog.consecutive_failures += 1
                 prog.failure_count += 1
+                prog.record_outcome("stall" if is_stall else "failure")
                 if is_stall:
                     prog.stall_count += 1
                 job._chunk_failures[chunk_idx] = job._chunk_failures.get(chunk_idx, 0) + 1
@@ -1625,6 +1772,23 @@ class DownloadManager:
                             )
                             job._workers[task_key] = new_task
 
+            # Tail racing: launch duplicate racer on idle healthy interface for straggler chunks
+            if config.get("ENABLE_TAIL_RACING", False) and job._queue.empty():
+                incomplete_chunks = [c for c in job.chunks.values() if c.status in (ChunkStatus.DOWNLOADING, ChunkStatus.ASSIGNED)]
+                if 0 < len(incomplete_chunks) <= int(config.get("TAIL_RACING_REMAINING_CHUNKS") or 2):
+                    idle_healthy_ifaces = [
+                        ip for ip, prog in job.progress.items()
+                        if prog.health == "healthy" and prog.status in ("idle", "pending")
+                    ]
+                    for target_chunk in incomplete_chunks:
+                        if not idle_healthy_ifaces:
+                            break
+                        if target_chunk.started_at and (now - target_chunk.started_at) > 2.0:
+                            if not getattr(target_chunk, "_racing_cancel", None):
+                                target_chunk._racing_cancel = threading.Event()
+                            job._queue.put_nowait(target_chunk)
+                            break
+
             # Check completion
             all_done = all(w.done() for w in job._workers.values())
 
@@ -1649,19 +1813,20 @@ class DownloadManager:
                 if getattr(job, "_reconnect_wait_start", None) is None:
                     job._reconnect_wait_start = now
 
-                reconnect_timeout = float(config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT") or 10.0)
+                reconnect_timeout = float(config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT") or 180.0)
                 elapsed_wait = now - job._reconnect_wait_start
 
                 if elapsed_wait < reconnect_timeout:
-                    job.status = "waiting_reconnect"
-                    job.error = "All connections paused or lost — waiting to resume"
+                    job.status = "waiting"
+                    remaining_secs = int(reconnect_timeout - elapsed_wait)
+                    job.error = f"All interfaces unavailable — waiting to reconnect ({remaining_secs}s remaining, resumable)"
                     await asyncio.sleep(0.2)
                     continue
                 else:
                     job.status = "failed"
                     last_chunk_err = next((c.last_error for c in job.chunks.values() if c.last_error), None)
                     err_detail = f": {last_chunk_err}" if last_chunk_err else ""
-                    job.error = f"All interfaces failed to download remaining chunks (failed, resumable){err_detail}"
+                    job.error = f"All interfaces failed and reconnect timeout expired (failed, resumable){err_detail}"
                     raise Exception(job.error)
 
             # Event-based completion wakeup: unblock immediately when a chunk completes or worker finishes
@@ -1705,10 +1870,10 @@ class DownloadManager:
 
     async def _download_range(self, job: DownloadJob, interface: Dict[str, str],
                               byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID,
-                              chunk: Optional[Chunk] = None) -> None:
+                              chunk: Optional[Chunk] = None) -> bool:
         start, end = byte_range
         if start > end:
-            return
+            return True
 
         expected_bytes = end - start + 1
         part_file = output_file
@@ -1719,7 +1884,9 @@ class DownloadManager:
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
-            return
+            return True
+
+        cancel_event = getattr(chunk, "_racing_cancel", None) if chunk else None
 
         tmp_file.unlink(missing_ok=True)
 
@@ -1737,33 +1904,60 @@ class DownloadManager:
         elif job.last_modified:
             headers["If-Range"] = job.last_modified
 
-        def _do_chunk_download_and_commit():
+        def _do_chunk_download():
             self._download_with_requests(
                 job, interface["ip_address"],
-                job.url, tmp_file, "wb", headers, progress, started,
-                worker_id, 0, expected_bytes
+                job.final_url or job.url, tmp_file, "wb", headers, progress, started,
+                worker_id, 0, expected_bytes, cancel_event=cancel_event
             )
 
-            # Atomic Chunk Completion in worker thread (off event loop):
+            if cancel_event and cancel_event.is_set():
+                tmp_file.unlink(missing_ok=True)
+                return
+
+            # Atomic Chunk Completion in worker thread:
             if not tmp_file.exists() or tmp_file.stat().st_size != expected_bytes:
                 actual = tmp_file.stat().st_size if tmp_file.exists() else 0
                 tmp_file.unlink(missing_ok=True)
                 raise ValueError(f"Chunk byte count mismatch: expected {expected_bytes} bytes, got {actual} bytes")
 
-            os.replace(tmp_file, part_file)
+        if not hasattr(job, "_active_threads"):
+            job._active_threads = set()
+        job._active_threads.add(worker_id)
 
         try:
-            # Thread boundary confirmation:
-            # File I/O, network streaming, handle.flush, fsync, and atomic os.replace occur in worker thread pool above.
-            # Below, execution resumes strictly on the single-threaded asyncio event loop.
-            # All dictionary mutations (job.chunks, chunk.status, completed_at, queue.task_done,
-            # and progress success/stall counters) execute on the event loop, avoiding cross-thread race conditions.
-            await asyncio.to_thread(_do_chunk_download_and_commit)
+            # File I/O and network streaming occur in worker thread pool
+            await asyncio.to_thread(_do_chunk_download)
+
+            if cancel_event and cancel_event.is_set():
+                tmp_file.unlink(missing_ok=True)
+                return False
+
+            # Event-loop atomic claim before rename:
+            # Guarantees exactly-once completion even if multiple racers finish simultaneously
+            if chunk:
+                if getattr(chunk, "_racing_claimed", False):
+                    # Competitor already claimed this chunk; discard losing result
+                    tmp_file.unlink(missing_ok=True)
+                    return False
+                chunk._racing_claimed = True
+                if getattr(chunk, "_racing_cancel", None):
+                    chunk._racing_cancel.set()
+
+            def _do_commit():
+                os.replace(tmp_file, part_file)
+                _fsync_dir(part_file.parent)
+
+            await asyncio.to_thread(_do_commit)
+
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
                 chunk.last_error = None
+            return True
         finally:
+            if hasattr(job, "_active_threads"):
+                job._active_threads.discard(worker_id)
             if tmp_file.exists():
                 try:
                     tmp_file.unlink(missing_ok=True)
@@ -1800,7 +1994,8 @@ class DownloadManager:
                                 headers: Optional[Dict[str, str]],
                                 progress: InterfaceProgress, started: float,
                                 worker_id: uuid.UUID, downloaded_so_far: int = 0,
-                                expected_bytes: Optional[int] = None) -> None:
+                                expected_bytes: Optional[int] = None,
+                                cancel_event: Optional[threading.Event] = None) -> None:
         last_error: Optional[Exception] = None
         retry_attempts = int(config.get("RETRY_ATTEMPTS") or 3)
         io_size = int(config.get("CHUNK_IO_SIZE") or 64 * 1024)
@@ -1817,8 +2012,10 @@ class DownloadManager:
             session = self._make_bound_session(interface_ip)
             try:
                 request_urls = [url]
+                if job.url != url:
+                    request_urls.append(job.url)
                 fallback_url = self._http_fallback_url(url)
-                if fallback_url:
+                if fallback_url and fallback_url not in request_urls:
                     request_urls.append(fallback_url)
 
                 response = None
@@ -1828,12 +2025,31 @@ class DownloadManager:
                         if headers:
                             merged_headers.update(headers)
 
+                        # Strip Authorization on cross-host redirects/requests
+                        if "Authorization" in merged_headers:
+                            orig_host = urllib.parse.urlsplit(job.url).netloc
+                            target_host = urllib.parse.urlsplit(candidate_url).netloc
+                            if orig_host and target_host and orig_host.lower() != target_host.lower():
+                                merged_headers.pop("Authorization", None)
+                                merged_headers.pop("Proxy-Authorization", None)
+
                         # Timeout is (connect_timeout, read_timeout)
                         response = session.get(
                             candidate_url, headers=merged_headers,
                             stream=True, timeout=(request_timeout, stall_timeout),
                             allow_redirects=True, verify=False,
                         )
+
+                        # Refuse protocol downgrades (HTTPS -> HTTP) across redirect history
+                        for hist in response.history:
+                            if hist.url.lower().startswith("https://") and response.url.lower().startswith("http://"):
+                                raise ValueError(f"Insecure redirect rejected: protocol downgrade from HTTPS to HTTP ({redact_url(response.url)})")
+
+                        # Re-resolution fallback on 403 / 410 (e.g. expired presigned CDN tokens)
+                        if response.status_code in (403, 410) and candidate_url != job.url:
+                            print(f"[RE-RESOLVE] Received {response.status_code} on {redact_url(candidate_url)}, falling back to authoritative URL {redact_url(job.url)}")
+                            continue
+
                         break
                     except requests.RequestException as exc:
                         last_error = exc
@@ -1887,6 +2103,10 @@ class DownloadManager:
 
                     with output_file.open(mode) as handle:
                         for data in response.iter_content(chunk_size=io_size):
+                            if cancel_event and cancel_event.is_set():
+                                handle.close()
+                                output_file.unlink(missing_ok=True)
+                                return
                             if job.is_cancelled:
                                 raise ValueError("Job cancelled")
                             if job.status == "paused":
@@ -1913,7 +2133,11 @@ class DownloadManager:
                             handle.write(data)
                             chunk_downloaded += size
                             progress.downloaded += size
-                            with self._thread_locks[job.job_id]:
+                            thread_lock = self._thread_locks.get(job.job_id)
+                            if thread_lock:
+                                with thread_lock:
+                                    job.total_downloaded += size
+                            else:
                                 job.total_downloaded += size
 
                             # Sliding-window speed measurement
@@ -1961,7 +2185,11 @@ class DownloadManager:
                 total_to_subtract = chunk_downloaded + downloaded_so_far
                 if total_to_subtract > 0:
                     progress.downloaded -= total_to_subtract
-                    with self._thread_locks[job.job_id]:
+                    thread_lock = self._thread_locks.get(job.job_id)
+                    if thread_lock:
+                        with thread_lock:
+                            job.total_downloaded -= total_to_subtract
+                    else:
                         job.total_downloaded -= total_to_subtract
                 progress._speed_samples.clear()
 

@@ -56,11 +56,13 @@ DISCONNECT_DETECTION_TIMEOUT: float = 3.0         # Seconds of zero progress bef
 RETRY_SAME_INTERFACE_COOLDOWN: float = 15.0       # Seconds before failed iface is eligible again
 MAX_CONSECUTIVE_FAILURES: int = 3                  # Consecutive chunk failures → exclude interface
 EXCLUDED_INTERFACE_COOLDOWN: float = 60.0          # Seconds an interface remains excluded before re-probing
-SINGLE_INTERFACE_RECONNECT_TIMEOUT: float = 10.0   # Bounded wait in seconds for single interface recovery before failing
+SINGLE_INTERFACE_RECONNECT_TIMEOUT: float = 180.0  # Bounded wait in seconds (3 min) for single interface recovery with visible 'waiting' state
 ENABLE_CHUNK_FSYNC: bool = True                    # Per-chunk fsync before atomic commit (durability vs throughput)
 # ponytail: warm-up and tail tapering add chunk-split overhead with no measured win on loopback;
 # enable only when a benchmark on real asymmetric interfaces shows improvement over uniform.
 ENABLE_ADAPTIVE_WARMUP_TAIL: bool = False          # Warm-up + tail tapering for multi-interface downloads
+# ponytail: tail racing launches speculative duplicate chunk on idle interface; default off until benchmarked
+ENABLE_TAIL_RACING: bool = False                   # Speculative tail racing for straggler chunks
 
 # ---------------------------------------------------------------------------
 # Sliding-window speed measurement
@@ -110,6 +112,7 @@ _DEFAULTS: Dict[str, Any] = {
     "SINGLE_INTERFACE_RECONNECT_TIMEOUT": SINGLE_INTERFACE_RECONNECT_TIMEOUT,
     "ENABLE_CHUNK_FSYNC": ENABLE_CHUNK_FSYNC,
     "ENABLE_ADAPTIVE_WARMUP_TAIL": ENABLE_ADAPTIVE_WARMUP_TAIL,
+    "ENABLE_TAIL_RACING": ENABLE_TAIL_RACING,
     "SPEED_SAMPLE_INTERVAL": SPEED_SAMPLE_INTERVAL,
     "SPEED_WINDOW_SECONDS": SPEED_WINDOW_SECONDS,
     "SPEEDTEST_URL": SPEEDTEST_URL,
