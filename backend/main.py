@@ -1160,6 +1160,9 @@ async def load_state():
             for t_job in state.get("torrents", []):
                 if t_job.get("status") in ("cancelled", "failed"):
                     continue
+                uri = t_job.get("magnet_uri", "")
+                if uri.endswith(".torrent") and not os.path.exists(uri):
+                    continue
                 try:
                     await start_torrent_download(
                         magnet_uri=t_job["magnet_uri"],

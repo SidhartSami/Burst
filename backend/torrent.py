@@ -896,13 +896,15 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
             await asyncio.sleep(0.1)
             elapsed = time.time() - start
 
-            # Pop and log meta session alerts
+            # Pop alerts to drain session alert queue
             try:
                 alerts = meta_ses.pop_alerts()
                 for alert in alerts:
-                    print(f"[TORRENT META ALERT] {alert.message()}")
+                    msg = alert.message()
+                    if "metadata" in msg.lower():
+                        print(f"[TORRENT] {msg}")
             except Exception as e:
-                print(f"[TORRENT] Error popping meta alerts: {e}")
+                pass
 
             try:
                 s = meta_handle.status()
@@ -931,22 +933,12 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 )
                 job._running = False
                 job.finished_at = time.time()
-                print(f"[TORRENT] Metadata timeout. state={s.state} peers={s.num_peers}")
+                print(f"[TORRENT] Metadata timeout after {METADATA_TIMEOUT}s (peers={s.num_peers})")
                 return
 
             if elapsed - last_log >= 10:
                 last_log = elapsed
-                dht_running = getattr(meta_ses, "is_dht_running", lambda: True)()
-                print(
-                    f"[TORRENT] Waiting for metadata… {elapsed:.0f}s "
-                    f"state={s.state} peers={s.num_peers} "
-                    f"dht_running={dht_running}"
-                )
-                for t in meta_handle.trackers():
-                    last_err = getattr(t, 'last_error', None)
-                    err_str = str(last_err) if last_err else "none"
-                    msg = t.get("message", "") or "no response yet"
-                    print(f"  tracker: {t['url']}  msg={msg!r}  last_error={err_str}")
+                print(f"[TORRENT] Waiting for metadata… {elapsed:.0f}s (peers={s.num_peers})")
 
         if not job._running:
             return
