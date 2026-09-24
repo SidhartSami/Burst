@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import math
 import os
 import random
 import re
@@ -223,6 +224,7 @@ class Chunk:
     status: str = ChunkStatus.PENDING
     attempts: int = 0
     assigned_interface: Optional[str] = None
+    committed_interface: Optional[str] = None
     created_at: float = field(default_factory=time.time)  # ponytail: ceiling: in-memory field only; upgrade: serialize to burst_active_jobs.json if chunk history needs persistence across restarts
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -242,6 +244,7 @@ class Chunk:
             "status": self.status,
             "attempts": self.attempts,
             "assigned_interface": self.assigned_interface,
+            "committed_interface": self.committed_interface,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -393,6 +396,8 @@ class DownloadJob:
     range_error_reason: Optional[str] = None
     resume_confidence: str = "high"
     chunks: Dict[int, Chunk] = field(default_factory=dict)
+    committed_chunk_map: Dict[int, str] = field(default_factory=dict)
+    worker_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     _queue: Any = field(default=None, repr=False)
     _chunk_files: Any = field(default=None, repr=False)
     _workers: Any = field(default_factory=dict, repr=False)   # ip -> Task (or list of Tasks when boosted)
@@ -401,7 +406,85 @@ class DownloadJob:
     _ranges: List[Tuple[int, int, int]] = field(default_factory=list, repr=False)
     _completion_event: Any = field(default=None, repr=False)
 
+    def get_chunk_map(self, max_buckets: int = 100, threshold: int = 1000) -> Dict[str, Any]:
+        """Return chunk-by-interface map built from actual commit events, bounded into buckets for large downloads."""
+        total = len(self.chunks) if self.chunks else self._total_chunks
+        if total == 0:
+            return {
+                "total_chunks": 0,
+                "committed_count": 0,
+                "is_aggregated": False,
+                "chunks": {},
+                "buckets": [],
+            }
+
+        committed_count = len(self.committed_chunk_map)
+
+        # Small download: exact per-chunk breakdown
+        if total <= threshold:
+            chunk_dict = {}
+            for cid, chk in sorted(self.chunks.items()):
+                chunk_dict[cid] = {
+                    "status": chk.status.value if hasattr(chk.status, "value") else str(chk.status),
+                    "committed_interface": self.committed_chunk_map.get(cid),
+                    "assigned_interface": chk.assigned_interface,
+                }
+            return {
+                "total_chunks": total,
+                "committed_count": committed_count,
+                "is_aggregated": False,
+                "chunks": chunk_dict,
+                "buckets": [],
+            }
+
+        # Large download: aggregate into bounded number of buckets
+        num_buckets = min(max_buckets, total)
+        bucket_size = math.ceil(total / num_buckets)
+        buckets = []
+        all_cids = sorted(self.chunks.keys()) if self.chunks else list(range(total))
+
+        for b_idx in range(num_buckets):
+            b_start_idx = b_idx * bucket_size
+            b_end_idx = min(b_start_idx + bucket_size, total)
+            if b_start_idx >= total:
+                break
+
+            b_cids = all_cids[b_start_idx:b_end_idx]
+            b_total = len(b_cids)
+            b_committed = 0
+            iface_counts: Dict[str, int] = {}
+
+            for cid in b_cids:
+                comm_ip = self.committed_chunk_map.get(cid)
+                if comm_ip:
+                    b_committed += 1
+                    iface_counts[comm_ip] = iface_counts.get(comm_ip, 0) + 1
+
+            dominant_iface = max(iface_counts.items(), key=lambda x: x[1])[0] if iface_counts else None
+
+            buckets.append({
+                "bucket_index": b_idx,
+                "start_chunk": b_cids[0],
+                "end_chunk": b_cids[-1],
+                "total_chunks": b_total,
+                "committed_count": b_committed,
+                "percent": round((b_committed / b_total) * 100, 1) if b_total > 0 else 0.0,
+                "interfaces": iface_counts,
+                "dominant_interface": dominant_iface,
+            })
+
+        return {
+            "total_chunks": total,
+            "committed_count": committed_count,
+            "is_aggregated": True,
+            "bucket_size": bucket_size,
+            "num_buckets": len(buckets),
+            "buckets": buckets,
+            "chunks": {},
+        }
+
     def to_dict(self) -> Dict[str, Any]:
+        now = time.time()
         iface_dict = {}
         for k, v in self.progress.items():
             active_cnt = sum(
@@ -421,6 +504,9 @@ class DownloadJob:
                 "failure_count": v.failure_count,
                 "retry_count": v.retry_count,
                 "stall_count": v.stall_count,
+                "failure_rate": round(v.failure_count / max(1, v.request_count), 3) if v.request_count > 0 else 0.0,
+                "stall_rate": round(v.stall_count / max(1, v.request_count), 3) if v.request_count > 0 else 0.0,
+                "cooldown_remaining_s": max(0.0, round(v._cooldown_until - now, 1)),
                 "last_success_time": v.last_success_time,
                 "active_workers": active_cnt,
                 "error": v.error,
@@ -429,6 +515,18 @@ class DownloadJob:
                 "consecutive_failures": v.consecutive_failures,
             }
             iface_dict[k] = d
+
+        total_chunks = len(self.chunks) if self.chunks else self._total_chunks
+        chunk_map = self.get_chunk_map()
+        bounded_chunks = {k: c.to_dict() for k, c in self.chunks.items()} if total_chunks <= 1000 else {}
+
+        waiting_remaining = 0.0
+        if self.status in ("waiting", "waiting_reconnect"):
+            wait_start = getattr(self, "_reconnect_wait_start", None)
+            wait_max = getattr(self, "_reconnect_wait_max", 180.0)
+            if wait_start:
+                waiting_remaining = max(0.0, round(wait_max - (now - wait_start), 1))
+
         return {
             "job_id": self.job_id, "url": self.url,
             "output_path": self.output_path,
@@ -441,7 +539,11 @@ class DownloadJob:
             "total_downloaded": self.total_downloaded,
             "error": self.error, "is_cancelled": self.is_cancelled,
             "interfaces": iface_dict,
+            "total_retries": sum(p.retry_count for p in self.progress.values()),
+            "total_stalls": sum(p.stall_count for p in self.progress.values()),
             "retry_events": [e.to_dict() for e in self.retry_events[-20:]],
+            "workers": list(self.worker_states.values()),
+            "chunk_map": chunk_map,
             "_ranges": self._ranges,
             "bandwidth_limits": self.bandwidth_limits,
             "boosted": self.boosted,
@@ -451,7 +553,9 @@ class DownloadJob:
             "range_error_reason": self.range_error_reason,
             "resume_confidence": self.resume_confidence,
             "is_resumable": self.is_resumable,
-            "chunks": {k: c.to_dict() for k, c in self.chunks.items()},
+            "is_waiting": self.status in ("waiting", "waiting_reconnect"),
+            "waiting_remaining_s": waiting_remaining,
+            "chunks": bounded_chunks,
         }
 
     @property
@@ -1078,13 +1182,25 @@ class DownloadManager:
         return base_cs
 
     async def _worker(self, job: DownloadJob, iface: Dict[str, str],
-                      queue: asyncio.Queue, chunk_files: Dict[int, Path]) -> None:
+                      queue: asyncio.Queue, chunk_files: Dict[int, Path],
+                      worker_id: Optional[str] = None) -> None:
         ip = iface["ip_address"]
+        w_key = worker_id or ip
         prog = job.progress[ip]
         min_speed = config.get("MIN_INTERFACE_SPEED_THRESHOLD")
         grace = config.get("SLOW_INTERFACE_GRACE_PERIOD")
         max_failures = config.get("MAX_CONSECUTIVE_FAILURES")
         cooldown_secs = config.get("RETRY_SAME_INTERFACE_COOLDOWN")
+
+        job.worker_states[w_key] = {
+            "worker_id": w_key,
+            "interface_ip": ip,
+            "status": "idle",
+            "current_chunk_idx": None,
+            "current_chunk_bytes": 0,
+            "started_at": None,
+            "elapsed_s": 0.0,
+        }
 
         paused_since = None
 
@@ -1095,10 +1211,12 @@ class DownloadManager:
                 prog.speed_mb_s = 0.0
                 cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
                 prog._cooldown_until = time.time() + cooldown
+                job.worker_states[w_key]["status"] = "excluded"
                 break
 
             # --- Check slow-speed gating ---
             if prog.status == "paused_slow":
+                job.worker_states[w_key]["status"] = "paused_slow"
                 if paused_since is None:
                     paused_since = time.time()
                 if time.time() - paused_since > 5.0:
@@ -1110,10 +1228,12 @@ class DownloadManager:
 
             # --- Check cooldown (from cross-interface retry) ---
             if time.time() < prog._cooldown_until:
+                job.worker_states[w_key]["status"] = "cooling_down"
                 break
 
             # --- Grab next chunk ---
             try:
+                job.worker_states[w_key]["status"] = "idle"
                 item = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
@@ -1131,7 +1251,7 @@ class DownloadManager:
             chunk_idx = chunk.chunk_id
             start, end = chunk.start, chunk.end
             output_file = chunk_files[chunk_idx]
-            worker_id = uuid.uuid4()
+            worker_uuid = uuid.uuid4()
 
             try:
                 chunk.status = ChunkStatus.ASSIGNED
@@ -1176,15 +1296,26 @@ class DownloadManager:
                 prog._bytes_at_start_of_chunk = prog.downloaded
                 prog.status = "downloading"
 
+                job.worker_states[w_key] = {
+                    "worker_id": w_key,
+                    "interface_ip": ip,
+                    "status": "downloading",
+                    "current_chunk_idx": chunk_idx,
+                    "current_chunk_bytes": end - start + 1,
+                    "started_at": time.time(),
+                    "elapsed_s": 0.0,
+                }
+
                 if not hasattr(job, "_active_threads"):
                     job._active_threads = set()
-                job._active_threads.add(worker_id)
+                job._active_threads.add(worker_uuid)
                 prog.request_count += 1
 
-                won = await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
+                won = await self._download_range(job, iface, (start, end), output_file, worker_uuid, chunk=chunk)
                 if not won:
                     # Tail racer lost or was cancelled by winning competitor:
                     # Clean exit with zero penalty to health, stall, or EWMA.
+                    job.worker_states[w_key]["status"] = "idle"
                     queue.task_done()
                     continue
 
@@ -1204,13 +1335,26 @@ class DownloadManager:
                 else:
                     prog.ewma_speed_mb_s = 0.3 * chunk_speed + 0.7 * prog.ewma_speed_mb_s
 
+                # Chunk commit: update status and map to committing interface
                 chunk.status = ChunkStatus.COMPLETE
+                chunk.committed_interface = ip
                 chunk.completed_at = time.time()
                 chunk.last_error = None
+                job.committed_chunk_map[chunk_idx] = ip
+                job.worker_states[w_key] = {
+                    "worker_id": w_key,
+                    "interface_ip": ip,
+                    "status": "idle",
+                    "current_chunk_idx": None,
+                    "current_chunk_bytes": 0,
+                    "started_at": None,
+                    "elapsed_s": 0.0,
+                }
                 queue.task_done()
                 if getattr(job, "_completion_event", None):
                     job._completion_event.set()
             except asyncio.CancelledError:
+                job.worker_states[w_key]["status"] = "cancelled"
                 if not job.is_cancelled:
                     if chunk.status != ChunkStatus.COMPLETE:
                         chunk.status = ChunkStatus.PENDING
@@ -1218,6 +1362,7 @@ class DownloadManager:
                     queue.put_nowait(chunk)
                 raise
             except Exception as e:
+                job.worker_states[w_key]["status"] = "retrying"
                 clean_err_msg = sanitize_exception_text(str(e))
                 is_stall = isinstance(e, (StalledDownloadError, requests.exceptions.ReadTimeout))
                 chunk.last_error = clean_err_msg
@@ -1719,6 +1864,8 @@ class DownloadManager:
                 if part_file.stat().st_size == expected:
                     chunk.status = ChunkStatus.COMPLETE
                     chunk.completed_at = chunk.completed_at or time.time()
+                    chunk.committed_interface = chunk.assigned_interface or "resume"
+                    job.committed_chunk_map[chunk_idx] = chunk.committed_interface
                     job.total_downloaded += expected
                     continue
                 else:
@@ -1947,6 +2094,9 @@ class DownloadManager:
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
+                if not chunk.committed_interface:
+                    chunk.committed_interface = chunk.assigned_interface or interface["ip_address"]
+                job.committed_chunk_map[chunk.chunk_id] = chunk.committed_interface
             return True
 
         cancel_event = getattr(chunk, "_racing_cancel", None) if chunk else None
@@ -2015,8 +2165,10 @@ class DownloadManager:
 
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
+                chunk.committed_interface = interface["ip_address"]
                 chunk.completed_at = time.time()
                 chunk.last_error = None
+                job.committed_chunk_map[chunk.chunk_id] = interface["ip_address"]
             return True
         finally:
             if hasattr(job, "_active_threads"):

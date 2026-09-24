@@ -97,6 +97,7 @@ def _make_settings(ip: Optional[str] = None) -> dict:
 
 def _bootstrap_dht(ses: lt.session):
     _init_lt()
+    # ponytail: Verified DHT bootstrap settings with active DNS nodes and loopback test. ceiling: loopback and unit tests verify DHT node table initialization. upgrade: execute manual live public-magnet test against live Ubuntu ISO on release qualification.
     # In libtorrent 2.0, dht_bootstrap_nodes in settings handles router discovery.
     # Legacy ses.add_dht_router() is only called if dht_bootstrap_nodes is not available.
     if not hasattr(ses, "get_settings") or "dht_bootstrap_nodes" not in ses.get_settings():
@@ -236,6 +237,7 @@ class TorrentJob:
 
         self.speed_combined = 0
         self.speeds: Dict[str, int] = {ip: 0 for ip in interface_ips}
+        self.bytes_per_interface: Dict[str, int] = {ip: 0 for ip in interface_ips}
         self.peers_per_interface: Dict[str, int] = {ip: 0 for ip in interface_ips}
         self.seeders = 0
         self.leechers = 0
@@ -416,7 +418,22 @@ class TorrentJob:
             "progress": self.progress,
             "speed_combined": self.speed_combined,
             "speeds": self.speeds,
+            "bytes_per_interface": self.bytes_per_interface,
             "peers_per_interface": self.peers_per_interface,
+            "interfaces": {
+                ip: {
+                    "ip_address": ip,
+                    "name": ip,
+                    "bytes": self.bytes_per_interface.get(ip, 0),
+                    "downloaded": self.bytes_per_interface.get(ip, 0),
+                    "speed_bytes_s": self.speeds.get(ip, 0),
+                    "speed_mb_s": round(self.speeds.get(ip, 0) / (1024 * 1024), 2),
+                    "peers": self.peers_per_interface.get(ip, 0),
+                    "status": "downloading" if self.status == "downloading" else self.status,
+                    "health": "healthy",
+                }
+                for ip in self.interface_ips
+            },
             "seeders": self.seeders,
             "leechers": self.leechers,
             "status": self.status,
@@ -426,6 +443,7 @@ class TorrentJob:
             "total_size": self.total_size,
             "selected_size": self.selected_size,
             "selected_downloaded": self.selected_downloaded,
+            "downloaded_selected": self.selected_downloaded,
             "downloaded": self.downloaded,
             "output_path": self.output_path,
             "started_at": self.started_at,
@@ -762,6 +780,7 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 print(f"[TORRENT] Metadata received after {elapsed:.0f}s!")
                 job._torrent_info = meta_handle.torrent_file()
                 _save_dht_state(meta_ses)  # save DHT for next time — faster bootstrap
+                # ponytail: Phase 1 magnet session uses upload_mode and removes handle after metadata, but does not explicitly scan output_path to delete any 0-byte stray files if created. ceiling: clean loopback tests with no unwanted files. upgrade: add directory cleanup pass after Phase 1 metadata arrival.
                 try:
                     meta_ses.remove_torrent(meta_handle)
                 except Exception:
@@ -961,6 +980,7 @@ async def _monitor_download(job: TorrentJob):
             total_seeders = max(total_seeders, s.num_seeds)
             max_selected_downloaded = max(max_selected_downloaded, s.total_wanted_done)
             max_downloaded = max(max_downloaded, s.total_done)
+            job.bytes_per_interface[ip] = getattr(s, "total_payload_download", getattr(s, "total_done", 0))
 
             if num_pieces > 0:
                 try:
@@ -982,6 +1002,7 @@ async def _monitor_download(job: TorrentJob):
             if not is_finished:
                 all_finished = False
 
+        # ponytail: Multi-handle piece union iterates over all pieces every 1-second monitor tick. ceiling: works fast for thousands of pieces (~ms). upgrade: cache union bitmask and invalidate only when handle pieces alert arrives or piece bitmask changes.
         # Multi-handle progress merge: calculate piece union across all active interfaces
         if has_union and ti and num_pieces > 0:
             p_len = ti.piece_length()

@@ -781,6 +781,8 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
     # Test 14: Real restart test with resume data (Item 2)
     # -----------------------------------------------------------------------
     async def test_real_restart_resume_data_no_redownload_and_conflict_resolution(self):
+        # ponytail: test_real_restart_resume_data_no_redownload_and_conflict_resolution (~8s) and test_real_libtorrent_deselected_file_never_on_disk_and_reselect (~5s) are slowest due to libtorrent loopback handshake and disk flush. ceiling: runs within CI 60s budget. upgrade: reduce peer poll sleep or mock disk I/O in unit suite.
+        # ponytail: Resume data handles missing/malformed priority dicts gracefully, but explicit test for corrupt/truncated bencoded resume data is deferred. ceiling: valid json and dict fallback tested. upgrade: add test_corrupt_resume_data_recovery asserting graceful fallback to fresh download.
         seeder_dir = os.path.join(self.dir_path, "res_seeder")
         client_dir = os.path.join(self.dir_path, "res_client")
         content_dir = os.path.join(seeder_dir, "restart_torrent")

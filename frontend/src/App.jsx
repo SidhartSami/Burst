@@ -353,8 +353,12 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
   const showSparkline = status.status === 'downloading' && !isPaused && activeIfacesList.length > 0 && chartData.length > 0;
 
-  const statusLabel = isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : status.status);
-  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (isPaused ? 'paused' : 'downloading')));
+  const isWaiting = status.is_waiting || status.status === 'waiting' || status.status === 'waiting_reconnect';
+  const waitingCountdown = status.waiting_remaining_s ? ` (${Math.round(status.waiting_remaining_s)}s)` : '';
+  const statusLabel = isWaiting
+    ? `WAITING${waitingCountdown}${status.is_resumable ? ' [RESUMABLE]' : ''}`
+    : (isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : status.status));
+  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (isPaused || isWaiting ? 'paused' : 'downloading')));
 
   const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
   const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
@@ -449,6 +453,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                   opacity: isPaused ? 0.4 : 1,
                   filter: isPaused ? 'grayscale(60%)' : 'none',
                 }}
+                title={`${iface.name} (${iface.ip_address})${live?.bytes ? ` • ${formatBytes(live.bytes)}` : ''}${live?.health ? ` • Health: ${live.health}` : ''}`}
                 onClick={() => {
                   if (isDone) return;
                   setIsOptimistic({ ip: iface.ip_address, selected: !isSelected });
@@ -458,6 +463,11 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                 <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
                 {shortName(iface.name, iface.interface_type)}
                 {isSelected && speed > 0 && <span style={{ opacity: 0.8 }}>{Number(speed).toFixed(1)} MB/s</span>}
+                {live?.health && live.health !== 'healthy' && (
+                  <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: live.health === 'excluded' ? 'var(--danger)' : 'var(--warning)', color: '#000', fontWeight: 600 }}>
+                    {live.health.toUpperCase()}
+                  </span>
+                )}
                 {isSelected && isShared && status.status === 'downloading' && <AlertTriangle size={12} style={{ color: 'var(--warning)', marginLeft: '2px' }} title="Shared with another download" />}
               </div>
             );
@@ -540,17 +550,64 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
         )}
       </div>
 
+      {isExpanded && status.chunk_map && (status.chunk_map.total_chunks > 0) && (
+        <div style={{ marginTop: '6px', marginBottom: '10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+            <span>Chunk Map ({status.chunk_map.committed_count} / {status.chunk_map.total_chunks} committed{status.chunk_map.is_aggregated ? ` • ${status.chunk_map.num_buckets} buckets` : ''})</span>
+            {status.workers && status.workers.length > 0 && (
+              <span>Workers: {status.workers.filter(w => w.status === 'downloading').length} active / {status.workers.length}</span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: '1px', height: '6px', width: '100%', borderRadius: '3px', overflow: 'hidden', background: 'var(--border)' }}>
+            {status.chunk_map.is_aggregated ? (
+              status.chunk_map.buckets.map((b) => {
+                const ifaceColor = b.dominant_interface ? (toneFor(shortName(b.dominant_interface))?.dot || 'var(--accent)') : 'transparent';
+                const opacity = b.percent > 0 ? Math.max(0.2, b.percent / 100) : 0;
+                return (
+                  <div
+                    key={b.bucket_index}
+                    style={{ flex: 1, height: '100%', backgroundColor: opacity > 0 ? ifaceColor : 'transparent', opacity: opacity || 0.1 }}
+                    title={`Bucket ${b.bucket_index} (chunks ${b.start_chunk}..${b.end_chunk}): ${b.committed_count}/${b.total_chunks} (${b.percent}%) • Dominant: ${b.dominant_interface || 'none'}`}
+                  />
+                );
+              })
+            ) : (
+              Object.entries(status.chunk_map.chunks || {}).map(([cid, chk]) => {
+                const ifaceColor = chk.committed_interface ? (toneFor(shortName(chk.committed_interface))?.dot || 'var(--accent)') : (chk.status === 'DOWNLOADING' ? 'var(--warning)' : 'transparent');
+                return (
+                  <div
+                    key={cid}
+                    style={{ flex: 1, height: '100%', backgroundColor: ifaceColor || 'transparent', opacity: chk.committed_interface ? 1 : (chk.status === 'DOWNLOADING' ? 0.7 : 0.1) }}
+                    title={`Chunk ${cid}: ${chk.status} ${chk.committed_interface ? `by ${chk.committed_interface}` : (chk.assigned_interface ? `assigned to ${chk.assigned_interface}` : '')}`}
+                  />
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="progress-track">
         <div className={`progress-fill ${statusClass}`} style={{ width: `${pct}%` }} />
       </div>
 
       <div className="dl-bottom">
         {isPaused ? (
-          <span>Paused • {safePct.toFixed(1)}%</span>
+          <span>Paused • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
         ) : status.status === 'failed' ? (
-          <span style={{ color: 'var(--danger)', fontWeight: 500 }}>{friendlyError(status.error)}</span>
+          <span style={{ color: 'var(--danger)', fontWeight: 500 }}>
+            {friendlyError(status.error)}{status.is_resumable ? ' • (Resumable)' : ''}
+          </span>
+        ) : status.type === "torrent" ? (
+          <span>
+            {pct.toFixed(1)}% • Selected: {formatBytes(status.selected_size ?? status.expected_size)} / Total: {formatBytes(status.torrent_total_size ?? status.total_size)}
+          </span>
         ) : (
-          <span>{pct.toFixed(1)}% • {formatBytes(safeDownloaded)} / {formatBytes(status.expected_size)}</span>
+          <span>
+            {pct.toFixed(1)}% • {formatBytes(safeDownloaded)} / {formatBytes(status.expected_size)}
+            {status.resume_confidence && status.resume_confidence !== 'high' ? ` • Confidence: ${status.resume_confidence}` : ''}
+            {(status.total_retries > 0 || status.total_stalls > 0) ? ` • Retries: ${status.total_retries || 0} / Stalls: ${status.total_stalls || 0}` : ''}
+          </span>
         )}
         <span>{!isPaused && status.status === 'downloading' ? formatETA(eta) : ''}</span>
       </div>
