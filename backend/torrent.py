@@ -718,11 +718,15 @@ async def start_torrent_download(
             normalized_uri = temp_path
         except Exception as e:
             print(f"[TORRENT] Failed to download remote torrent file: {e}")
+            raise ValueError(f"Failed to download remote torrent file: {e}")
     
     import urllib.parse
     normalized_uri = urllib.parse.unquote(normalized_uri)
     if normalized_uri.endswith(".torrent") or os.path.exists(normalized_uri):
         normalized_uri = os.path.normpath(normalized_uri)
+
+    if not (normalized_uri.startswith("magnet:") or (normalized_uri.endswith(".torrent") and os.path.exists(normalized_uri))):
+        raise ValueError(f"Unsupported torrent source: '{normalized_uri}'. Expected magnet link or valid .torrent file.")
         
     magnet_uri = normalized_uri
 
@@ -837,7 +841,15 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
         job._meta_session = meta_ses
 
-        params = lt.parse_magnet_uri(job.magnet_uri)
+        try:
+            params = lt.parse_magnet_uri(job.magnet_uri)
+        except Exception as e:
+            print(f"[TORRENT] Error parsing magnet URI '{job.magnet_uri}': {e}")
+            job.status = "failed"
+            job.error = f"Invalid magnet URI: {e}"
+            job._running = False
+            return
+
         params.save_path = job.output_path
         params.storage_mode = lt.storage_mode_t.storage_mode_sparse
         # Ensure zero payload bytes download before selection

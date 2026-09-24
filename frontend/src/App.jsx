@@ -1298,7 +1298,7 @@ export default function App() {
 
   const handleReDownload = async (item) => {
     try {
-      const isTorrent = item.type === "torrent" || (item.url && (item.url.startsWith("magnet:?") || item.url.endsWith(".torrent")));
+      const isTorrent = item.type === "torrent" || (item.url && item.url.startsWith("magnet:"));
       const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
       const effectiveIps = selectedIps.length > 0 ? selectedIps : renderedInterfaces.map(i => i.ip_address);
       const body = isTorrent
