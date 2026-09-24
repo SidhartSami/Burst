@@ -28,8 +28,10 @@ import asyncio
 import errno
 import hashlib
 import http.server
+import json as _json
 import os
 import re
+import requests
 import socket
 import sys
 import tempfile
@@ -59,6 +61,7 @@ from downloader import (
     is_non_retryable_error,
     plan_adaptive_chunks,
     redact_url,
+    sanitize_exception_text,
 )
 
 # Test payload: 256 KB deterministic data
@@ -1569,26 +1572,169 @@ print("OK")
         chunk_files[0].unlink(missing_ok=True)
 
     # -----------------------------------------------------------------------
-    # Test ZI — Milestone 4: Redirect handling, cross-host credentials, downgrades & redaction
+    # Test ZH2 — Milestone 4: Mid-download ENOSPC triggers immediate non-retryable failure
     # -----------------------------------------------------------------------
-    def test_zi_redirect_handling_security_and_redaction(self):
-        # 1. URL redaction of query strings and credentials
-        url_with_secret = "https://cdn.example.com/download.zip?token=SUPERSECRET123&expire=99999"
-        redacted = redact_url(url_with_secret)
-        self.assertEqual(redacted, "https://cdn.example.com/download.zip?[REDACTED]")
-        self.assertNotIn("SUPERSECRET123", redacted)
-
-        url_with_creds = "https://user:password@cdn.example.com/file.iso"
-        redacted_creds = redact_url(url_with_creds)
-        self.assertNotIn("user", redacted_creds)
-        self.assertNotIn("password", redacted_creds)
-
-        # 2. Refuse HTTPS to HTTP downgrade
+    def test_zh2_mid_download_enospc(self):
         job = DownloadJob(
-            job_id="test_zi",
-            url="https://secure.example.com/file.bin",
-            output_path=str(self.out_dir / "zi.bin")
+            job_id="test_zh2",
+            url=f"{self.base_url}/test_zh2.bin",
+            output_path=str(self.out_dir / "zh2.bin"),
+            expected_size=1024,
+            supports_ranges=True,
         )
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.url = job.url
+        fake_response.history = []
+        fake_response.iter_content.return_value = [b"A" * 512, b"B" * 512]
+        fake_response.raise_for_status = MagicMock()
+
+        prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+        tmp_target = self.out_dir / "zh2.tmp"
+
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            sess_inst.get.return_value = fake_response
+            mock_sess.return_value = sess_inst
+
+            mock_handle = MagicMock()
+            mock_handle.write.side_effect = OSError(errno.ENOSPC, "No space left on device")
+            mock_handle.__enter__.return_value = mock_handle
+            mock_handle.__exit__.return_value = None
+
+            orig_open = Path.open
+            def selective_open(self_path, *args, **kwargs):
+                if "zh2.tmp" in str(self_path):
+                    return mock_handle
+                return orig_open(self_path, *args, **kwargs)
+
+            with patch.object(Path, "open", selective_open):
+                with self.assertRaises(InsufficientDiskSpaceError) as ctx:
+                    self.manager._download_with_requests(
+                        job, "127.0.0.1", job.url, tmp_target, "wb",
+                        None, prog, time.perf_counter(), uuid.uuid4(), expected_bytes=1024
+                    )
+                self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+                self.assertTrue(is_non_retryable_error(ctx.exception))
+                self.assertIn("Disk full", str(ctx.exception))
+
+    # -----------------------------------------------------------------------
+    # Test ZH3 — Milestone 4: Per-volume preflight disk space checks
+    # -----------------------------------------------------------------------
+    def test_zh3_per_volume_preflight(self):
+        dest_vol1 = Path("V:/volume1/downloads/file.bin")
+        dest_vol2 = Path("W:/volume2/downloads/file.bin")
+
+        def mock_disk_usage(path):
+            p_str = str(path).replace("\\", "/")
+            if "volume1" in p_str or "V:" in p_str:
+                return type("Usage", (), {"total": 1000*1024*1024, "used": 995*1024*1024, "free": 5*1024*1024})()
+            else:
+                return type("Usage", (), {"total": 1000*1024*1024, "used": 500*1024*1024, "free": 500*1024*1024})()
+
+        with patch.object(Path, "mkdir"):
+            with patch("shutil.disk_usage", side_effect=mock_disk_usage):
+                # 20 MB download on Volume 1 (5 MB free) must fail ENOSPC
+                with self.assertRaises(InsufficientDiskSpaceError) as ctx:
+                    check_disk_space_preflight(dest_vol1, expected_size=20*1024*1024, supports_ranges=False)
+                self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+                self.assertIn("Insufficient disk space", str(ctx.exception))
+
+                # 20 MB download on Volume 2 (500 MB free) must pass cleanly
+                check_disk_space_preflight(dest_vol2, expected_size=20*1024*1024, supports_ranges=False)
+
+    # -----------------------------------------------------------------------
+    # Test ZI1 — Milestone 4: Redirect loop and hop cap enforcement
+    # -----------------------------------------------------------------------
+    def test_zi1_redirect_loop_and_hop_cap(self):
+        job = DownloadJob(job_id="zi1", url="https://example.com/loop.bin", output_path=str(self.out_dir / "zi1.bin"))
+        prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=1024)
+
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            sess_inst.get.side_effect = requests.exceptions.TooManyRedirects("Exceeded 30 redirects.")
+            mock_sess.return_value = sess_inst
+
+            with self.assertRaises(requests.exceptions.TooManyRedirects):
+                self.manager._download_with_requests(
+                    job, "127.0.0.1", job.url, self.out_dir / "zi1.tmp", "wb",
+                    None, prog, time.perf_counter(), uuid.uuid4()
+                )
+
+    # -----------------------------------------------------------------------
+    # Test ZI2 — Milestone 4: 301/302/303/307/308 HTTP redirect semantics
+    # -----------------------------------------------------------------------
+    def test_zi2_redirect_http_status_semantics(self):
+        # Assert standard HTTP redirect semantics:
+        # 301 (Moved Permanently), 302 (Found): GET preserved
+        # 303 (See Other): RFC 7231 §6.4.4 converts to GET
+        # 307 (Temporary Redirect), 308 (Permanent Redirect): method and body strictly preserved
+        redirect_semantics = {
+            301: {"method": "GET", "preserves_body": True},
+            302: {"method": "GET", "preserves_body": True},
+            303: {"method": "GET", "preserves_body": False},
+            307: {"method": "PRESERVE", "preserves_body": True},
+            308: {"method": "PRESERVE", "preserves_body": True},
+        }
+        for status_code, sem in redirect_semantics.items():
+            if status_code == 303:
+                self.assertEqual(sem["method"], "GET")
+                self.assertFalse(sem["preserves_body"], "303 See Other drops request body")
+            elif status_code in (307, 308):
+                self.assertEqual(sem["method"], "PRESERVE")
+                self.assertTrue(sem["preserves_body"])
+            else:
+                self.assertIn(status_code, (301, 302))
+
+    # -----------------------------------------------------------------------
+    # Test ZI3 — Milestone 4: Cross-host Authorization, Cookie & Validator stripping
+    # -----------------------------------------------------------------------
+    def test_zi3_cross_host_auth_and_cookie_stripping(self):
+        job = DownloadJob(
+            job_id="zi3",
+            url="https://auth.origin.com/download.zip",
+            output_path=str(self.out_dir / "zi3.bin")
+        )
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.url = "https://cdn.thirdparty.com/download.zip"
+        fake_response.history = []
+        fake_response.iter_content.return_value = [b"X" * 100]
+        fake_response.raise_for_status = MagicMock()
+
+        captured_headers = {}
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            def fake_get(url, headers=None, **kwargs):
+                captured_headers.update(headers or {})
+                return fake_response
+            sess_inst.get = fake_get
+            mock_sess.return_value = sess_inst
+
+            prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=99)
+            in_headers = {
+                "Authorization": "Bearer sensitive_token_123",
+                "Proxy-Authorization": "Basic proxy_secret",
+                "Cookie": "session=secret_cookie_val",
+                "If-Range": '"origin-etag-123"',
+            }
+            # Download targeting candidate cross-host URL
+            self.manager._download_with_requests(
+                job, "127.0.0.1", "https://cdn.thirdparty.com/download.zip",
+                self.out_dir / "zi3.tmp", "wb", in_headers, prog, time.perf_counter(), uuid.uuid4()
+            )
+
+            # Authorization, Proxy-Authorization, Cookie, and origin If-Range must be stripped across hosts
+            self.assertNotIn("Authorization", captured_headers)
+            self.assertNotIn("Proxy-Authorization", captured_headers)
+            self.assertNotIn("Cookie", captured_headers)
+            self.assertNotIn("If-Range", captured_headers)
+
+    # -----------------------------------------------------------------------
+    # Test ZI4 — Milestone 4: Protocol downgrade refusal (HTTPS -> HTTP)
+    # -----------------------------------------------------------------------
+    def test_zi4_protocol_downgrade_refusal(self):
+        job = DownloadJob(job_id="zi4", url="https://secure.example.com/file.bin", output_path=str(self.out_dir / "zi4.bin"))
         fake_response = MagicMock()
         fake_response.status_code = 200
         fake_response.url = "http://insecure.example.com/file.bin"
@@ -1604,45 +1750,319 @@ print("OK")
             prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=1024)
             with self.assertRaises(ValueError) as ctx:
                 self.manager._download_with_requests(
-                    job, "127.0.0.1", job.url, self.out_dir / "zi.tmp", "wb",
-                    {"Authorization": "Bearer secret"}, prog, time.perf_counter(), uuid.uuid4()
+                    job, "127.0.0.1", job.url, self.out_dir / "zi4.tmp", "wb",
+                    None, prog, time.perf_counter(), uuid.uuid4()
                 )
             self.assertIn("protocol downgrade", str(ctx.exception).lower())
+            self.assertTrue(is_non_retryable_error(ctx.exception))
 
     # -----------------------------------------------------------------------
-    # Test ZJ — Milestone 4: Tail racing with per-racer tmp files and cancel flag
+    # Test ZI5 — Milestone 4: URL query/credential and requests exception redaction
     # -----------------------------------------------------------------------
-    async def test_zj_tail_racing_racer_claim_and_thread_cancel(self):
-        dest = self.out_dir / "test_zj_tail.bin"
+    def test_zi5_url_and_exception_text_redaction(self):
+        url_with_secret = "https://cdn.example.com/download.zip?token=SUPERSECRET123&expire=99999"
+        redacted = redact_url(url_with_secret)
+        self.assertEqual(redacted, "https://cdn.example.com/download.zip?[REDACTED]")
+        self.assertNotIn("SUPERSECRET123", redacted)
+
+        url_with_creds = "https://user:password@cdn.example.com/file.iso"
+        redacted_creds = redact_url(url_with_creds)
+        self.assertNotIn("user", redacted_creds)
+        self.assertNotIn("password", redacted_creds)
+
+        # Requests exception string containing secret URL
+        raw_exc_text = (
+            "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='cdn.example.com', port=443): "
+            "Max retries exceeded with url: /download.zip?token=SUPERSECRET123&expire=99999 (Caused by ConnectTimeoutError)"
+        )
+        cleaned_exc = sanitize_exception_text(raw_exc_text)
+        self.assertNotIn("SUPERSECRET123", cleaned_exc)
+        self.assertIn("[REDACTED]", cleaned_exc)
+
+        # Exception with user:password
+        creds_exc_text = "Failed to connect to https://admin:superpass@internal.net/resource"
+        cleaned_creds = sanitize_exception_text(creds_exc_text)
+        self.assertNotIn("admin:superpass", cleaned_creds)
+
+    # -----------------------------------------------------------------------
+    # Test ZI6 — Milestone 4: Bounded 403/410 re-resolve to authoritative URL
+    # -----------------------------------------------------------------------
+    def test_zi6_bounded_403_410_re_resolve(self):
+        job = DownloadJob(
+            job_id="zi6",
+            url="https://authoritative.origin.com/file.bin",
+            output_path=str(self.out_dir / "zi6.bin")
+        )
+        candidate_cdn = "https://expired-token.cdn.com/file.bin?token=expired"
+        prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=99)
+
+        calls = []
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            def fake_get(target, **kwargs):
+                calls.append(target)
+                resp = MagicMock()
+                if "cdn" in target:
+                    resp.status_code = 403
+                else:
+                    resp.status_code = 200
+                    resp.url = target
+                    resp.history = []
+                    resp.iter_content.return_value = [b"A" * 100]
+                    resp.raise_for_status = MagicMock()
+                return resp
+            sess_inst.get = fake_get
+            mock_sess.return_value = sess_inst
+
+            self.manager._download_with_requests(
+                job, "127.0.0.1", candidate_cdn, self.out_dir / "zi6.tmp", "wb",
+                None, prog, time.perf_counter(), uuid.uuid4()
+            )
+
+            # First attempted candidate CDN (got 403), then fell back to authoritative URL (at most 1 fallback)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], candidate_cdn)
+            self.assertEqual(calls[1], job.url)
+
+    # -----------------------------------------------------------------------
+    # Test ZJ1 — Milestone 4: Tail racing exactly-once commit
+    # -----------------------------------------------------------------------
+    async def test_zj1_tail_racing_exactly_once_commit(self):
+        dest = self.out_dir / "test_zj1_tail.bin"
         part_file = self.out_dir / "chunk_00000.part"
-        chunk_files = {0: part_file}
+        part_file.unlink(missing_ok=True)
         chunk = Chunk(chunk_id=0, start=0, end=1023)
         job = DownloadJob(
-            job_id="test_zj",
-            url=f"{self.base_url}/test_zj.bin",
+            job_id="test_zj1",
+            url=f"{self.base_url}/test_zj1.bin",
             output_path=str(dest),
             expected_size=1024,
             supports_ranges=True,
         )
         job.chunks[0] = chunk
         job.progress["127.0.0.1"] = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
-
         chunk._racing_cancel = threading.Event()
 
-        # Simulate losing racer where competitor already claimed chunk completion
-        chunk._racing_claimed = True
+        # Track os.replace calls
+        replace_calls = []
+        real_replace = os.replace
+        def mock_replace(src, dst):
+            replace_calls.append((src, dst))
+            return real_replace(src, dst)
 
-        worker_id_loser = uuid.uuid4()
-        won = await self.manager._download_range(
-            job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, worker_id_loser, chunk=chunk
+        with patch("os.replace", side_effect=mock_replace):
+            # First racer completes and claims chunk
+            w1 = uuid.uuid4()
+            w1_tmp = part_file.with_suffix(f".tmp_{w1.hex[:8]}")
+            w1_tmp.write_bytes(b"A" * 1024)
+
+            won1 = await self.manager._download_range(
+                job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, w1, chunk=chunk
+            )
+            self.assertTrue(won1)
+            self.assertEqual(len(replace_calls), 1)
+
+            # Second racer completes afterwards
+            w2 = uuid.uuid4()
+            w2_tmp = part_file.with_suffix(f".tmp_{w2.hex[:8]}")
+            w2_tmp.write_bytes(b"B" * 1024)
+
+            won2 = await self.manager._download_range(
+                job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, w2, chunk=chunk
+            )
+            self.assertFalse(won2)
+            # os.replace must NOT have been called a second time
+            self.assertEqual(len(replace_calls), 1, "Exactly-once commit: os.replace must be called exactly once")
+            self.assertFalse(w2_tmp.exists(), "Loser tmp file must be cleaned up")
+
+    # -----------------------------------------------------------------------
+    # Test ZJ2 — Milestone 4: Tail racing loser thread termination via cancel flag
+    # -----------------------------------------------------------------------
+    def test_zj2_tail_racing_loser_thread_termination(self):
+        job = DownloadJob(
+            job_id="test_zj2",
+            url=f"{self.base_url}/test_zj2.bin",
+            output_path=str(self.out_dir / "zj2.bin"),
+            expected_size=1024,
+            supports_ranges=True,
         )
+        prog = InterfaceProgress(name="L", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+        tmp_file = self.out_dir / "zj2_loser.tmp"
+        cancel_evt = threading.Event()
 
-        # Loser must cleanly return False without committing or degrading interface health
-        self.assertFalse(won, "Losing racer must return False")
-        p = job.progress["127.0.0.1"]
-        self.assertEqual(p.failure_count, 0, "Losing racer must not increment failure_count")
-        self.assertEqual(p.stall_count, 0, "Losing racer must not increment stall_count")
-        self.assertEqual(p.health, "healthy", "Losing racer must not degrade interface health")
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = job.url
+        fake_resp.history = []
+        fake_resp.raise_for_status = MagicMock()
+
+        # Generator yielding chunks; sets cancel after first chunk
+        def chunk_gen():
+            yield b"A" * 256
+            cancel_evt.set()  # Winner claimed!
+            yield b"B" * 256
+            yield b"C" * 256
+        fake_resp.iter_content.return_value = chunk_gen()
+
+        with patch.object(self.manager, "_make_bound_session") as mock_sess:
+            sess_inst = MagicMock()
+            sess_inst.get.return_value = fake_resp
+            mock_sess.return_value = sess_inst
+
+            self.manager._download_with_requests(
+                job, "127.0.0.1", job.url, tmp_file, "wb", None,
+                prog, time.perf_counter(), uuid.uuid4(), expected_bytes=1024, cancel_event=cancel_evt
+            )
+
+        # Thread terminated early on cancel_evt.is_set(), unlinked tmp_file
+        self.assertFalse(tmp_file.exists(), "Losing thread must unlink tmp file and terminate immediately")
+
+    # -----------------------------------------------------------------------
+    # Test ZJ3 — Milestone 4: Loser racer zero health/EWMA impact
+    # -----------------------------------------------------------------------
+    async def test_zj3_tail_racing_loser_zero_health_ewma_impact(self):
+        dest = self.out_dir / "test_zj3.bin"
+        part_file = self.out_dir / "chunk_00000.part"
+        chunk = Chunk(chunk_id=0, start=0, end=1023)
+        job = DownloadJob(
+            job_id="test_zj3",
+            url=f"{self.base_url}/test_zj3.bin",
+            output_path=str(dest),
+            expected_size=1024,
+            supports_ranges=True,
+        )
+        job.chunks[0] = chunk
+        prog = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+        prog.ewma_speed_mb_s = 5.0
+        job.progress["127.0.0.1"] = prog
+
+        chunk._racing_claimed = True
+        chunk._racing_cancel = threading.Event()
+
+        won = await self.manager._download_range(
+            job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, uuid.uuid4(), chunk=chunk
+        )
+        self.assertFalse(won)
+        self.assertEqual(prog.failure_count, 0)
+        self.assertEqual(prog.stall_count, 0)
+        self.assertEqual(prog.consecutive_failures, 0)
+        self.assertEqual(prog.health, "healthy")
+        self.assertEqual(prog.ewma_speed_mb_s, 5.0, "EWMA throughput must not be degraded by losing racer")
+
+    # -----------------------------------------------------------------------
+    # Test ZJ4 — Milestone 4: Same-tick double-finish contention race
+    # -----------------------------------------------------------------------
+    async def test_zj4_tail_racing_same_tick_double_finish_race(self):
+        dest = self.out_dir / "test_zj4.bin"
+        part_file = self.out_dir / "chunk_00000.part"
+        part_file.unlink(missing_ok=True)
+        chunk = Chunk(chunk_id=0, start=0, end=1023)
+        job = DownloadJob(
+            job_id="test_zj4",
+            url=f"{self.base_url}/test_zj4.bin",
+            output_path=str(dest),
+            expected_size=1024,
+            supports_ranges=True,
+        )
+        job.chunks[0] = chunk
+        job.progress["127.0.0.1"] = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+        job.progress["127.0.0.2"] = InterfaceProgress(name="L2", ip_address="127.0.0.2", chunk_start=0, chunk_end=1023)
+
+        w1 = uuid.uuid4()
+        w2 = uuid.uuid4()
+        tmp1 = part_file.with_suffix(f".tmp_{w1.hex[:8]}")
+        tmp2 = part_file.with_suffix(f".tmp_{w2.hex[:8]}")
+        tmp1.write_bytes(b"A" * 1024)
+        tmp2.write_bytes(b"B" * 1024)
+
+        # Both racers arrive at claim step simultaneously
+        res1, res2 = await asyncio.gather(
+            self.manager._download_range(job, {"ip_address": "127.0.0.1", "name": "L1"}, (0, 1023), part_file, w1, chunk=chunk),
+            self.manager._download_range(job, {"ip_address": "127.0.0.2", "name": "L2"}, (0, 1023), part_file, w2, chunk=chunk),
+        )
+        # Exactly one won and exactly one lost
+        self.assertEqual(sorted([res1, res2]), [False, True])
+        self.assertTrue(part_file.exists())
+        self.assertEqual(part_file.stat().st_size, 1024)
+
+    # -----------------------------------------------------------------------
+    # Test ZK — Milestone 4: Worker cancellation between ASSIGNED and DOWNLOADING returns chunk to PENDING
+    # -----------------------------------------------------------------------
+    async def test_zk_cancel_between_assigned_and_downloading_returns_to_pending(self):
+        job = DownloadJob(
+            job_id="test_zk",
+            url=f"{self.base_url}/test_zk.bin",
+            output_path=str(self.out_dir / "zk.bin"),
+            expected_size=1024,
+            supports_ranges=True,
+        )
+        chunk = Chunk(chunk_id=0, start=0, end=1023, status=ChunkStatus.PENDING)
+        job.chunks[0] = chunk
+        job._ranges = [(0, 0, 1023)]
+        queue = asyncio.Queue()
+        queue.put_nowait(chunk)
+        job._queue = queue
+        chunk_files = {0: self.out_dir / "chunk_00000.part"}
+        job.progress["127.0.0.1"] = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+
+        # Inject cancellation hook in _calculate_worker_target_chunk_size (runs right between ASSIGNED and DOWNLOADING)
+        worker_task = None
+        def cancel_hook(prog):
+            self.assertEqual(chunk.status, ChunkStatus.ASSIGNED)
+            self.assertEqual(chunk.assigned_interface, "127.0.0.1")
+            worker_task.cancel()
+            raise asyncio.CancelledError()
+
+        with patch.object(self.manager, "_calculate_worker_target_chunk_size", side_effect=cancel_hook):
+            worker_task = asyncio.create_task(
+                self.manager._worker(job, {"ip_address": "127.0.0.1", "name": "L1"}, queue, chunk_files)
+            )
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Verify chunk was cleanly returned to PENDING with assigned_interface cleared
+        self.assertEqual(chunk.status, ChunkStatus.PENDING)
+        self.assertIsNone(chunk.assigned_interface)
+        self.assertFalse(queue.empty())
+        requeued_chunk = queue.get_nowait()
+        self.assertEqual(requeued_chunk.chunk_id, 0)
+
+    # -----------------------------------------------------------------------
+    # Test ZL — Milestone 4: Waiting state and countdown persist sanely across restart
+    # -----------------------------------------------------------------------
+    async def test_zl_waiting_state_and_countdown_persistence_across_restart(self):
+        dest = self.out_dir / "test_zl_waiting.bin"
+        job = DownloadJob(
+            job_id="test_zl",
+            url=f"{self.base_url}/test_zl.bin",
+            output_path=str(dest),
+            expected_size=1024,
+            supports_ranges=True,
+            status="waiting",
+            error="All interfaces unavailable — waiting to reconnect (175s remaining, resumable)",
+        )
+        self.assertTrue(job.is_resumable)
+        persisted = job.to_dict()
+        self.assertEqual(persisted["status"], "waiting")
+        self.assertTrue(persisted["is_resumable"])
+        self.assertIn("175s remaining", persisted["error"])
+
+        # Persist to JSON file
+        active_jobs_file = self.out_dir / "burst_active_jobs_zl.json"
+        active_jobs_file.write_text(_json.dumps({"downloads": [persisted]}), encoding="utf-8")
+        loaded = _json.loads(active_jobs_file.read_text(encoding="utf-8"))
+        loaded_job_data = loaded["downloads"][0]
+        self.assertEqual(loaded_job_data["status"], "waiting")
+
+        # Resume from persisted state
+        resumed = await self.manager.resume_job_from_state(loaded_job_data, self.iface)
+        self.assertIsNotNone(resumed)
+        self.assertTrue(resumed.is_resumable)
+        # Verify internal wait start is fresh (not negative)
+        self.assertIsNone(getattr(resumed, "_reconnect_wait_start", None))
+        await self.manager.cancel_job(resumed.job_id)
 
 
 if __name__ == "__main__":

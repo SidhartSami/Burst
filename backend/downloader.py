@@ -15,6 +15,7 @@ import re
 import shutil
 import socket
 import ssl
+import statistics
 import threading
 import time
 import urllib.parse
@@ -134,6 +135,18 @@ def redact_url(url: Optional[str]) -> str:
         return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
     except Exception:
         return url
+
+
+def sanitize_exception_text(exc_or_text: Any) -> str:
+    """Redact URLs, query strings, and credentials embedded in exception strings."""
+    text = str(exc_or_text) if exc_or_text is not None else ""
+    # Redact userinfo credentials: //user:pass@host -> //host
+    text = re.sub(r'://[^/@:\s]+:[^/@\s]+@', '://', text)
+    # Redact query strings in URLs: ?key=val... or /path?token=xyz -> /path?[REDACTED]
+    text = re.sub(r'(\?|\&)[a-zA-Z0-9_.~%+-]+=[^\s"\')]*', r'?[REDACTED]', text)
+    # Collapse consecutive ?[REDACTED]?[REDACTED] -> ?[REDACTED]
+    text = re.sub(r'(\?\[REDACTED\])+', '?[REDACTED]', text)
+    return text
 
 
 def normalize_etag(etag: Optional[str]) -> Optional[str]:
@@ -742,6 +755,8 @@ class DownloadManager:
             final_url=data.get("final_url"),
             range_error_reason=data.get("range_error_reason"),
             resume_confidence=data.get("resume_confidence", "high"),
+            status=data.get("status", "pending"),
+            error=data.get("error"),
         )
         job._ranges = data.get("_ranges", [])
         for r in job._ranges:
@@ -1100,59 +1115,59 @@ class DownloadManager:
                 queue.task_done()
                 continue
 
-            chunk.status = ChunkStatus.ASSIGNED
-            chunk.assigned_interface = ip
-
             chunk_idx = chunk.chunk_id
             start, end = chunk.start, chunk.end
             output_file = chunk_files[chunk_idx]
-
-            # --- Adaptive Chunk Sizing & Slicing based on EWMA and Health ---
-            target_cs = self._calculate_worker_target_chunk_size(prog)
-            chunk_bytes = end - start + 1
-            min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
-
-            # If chunk is larger than target_cs, slice off target_cs and return the remainder to the queue
-            if chunk_bytes > target_cs and (chunk_bytes - target_cs) >= min_cs:
-                old_end = end
-                end = min(start + target_cs - 1, old_end - min_cs)
-                if job.expected_size > 0:
-                    end = min(end, job.expected_size - 1)
-                chunk.end = end
-                new_idx = max(job.chunks.keys()) + 1
-                remainder_end = min(old_end, job.expected_size - 1) if job.expected_size > 0 else old_end
-                remainder = Chunk(chunk_id=new_idx, start=end + 1, end=remainder_end)
-                job.chunks[new_idx] = remainder
-                temp_dir = output_file.parent
-                new_part = temp_dir / f"chunk_{new_idx:05d}.part"
-                chunk_files[new_idx] = new_part
-                job._chunk_files[new_idx] = new_part
-                for i_r, r in enumerate(job._ranges):
-                    if r[0] == chunk_idx:
-                        job._ranges[i_r] = (chunk_idx, start, end)
-                        break
-                job._ranges.append((new_idx, remainder.start, remainder.end))
-                job._total_chunks = len(job._ranges)
-                queue.put_nowait(remainder)
-
-            chunk.status = ChunkStatus.DOWNLOADING
-            chunk.assigned_interface = ip
-            chunk.started_at = time.time()
-            chunk.attempts += 1
-
-            prog.chunk_start = start
-            prog.chunk_end = end
-            prog.current_chunk_idx = chunk_idx
-            prog._bytes_at_start_of_chunk = prog.downloaded
-            prog.status = "downloading"
-
             worker_id = uuid.uuid4()
-            if not hasattr(job, "_active_threads"):
-                job._active_threads = set()
-            job._active_threads.add(worker_id)
-            prog.request_count += 1
 
             try:
+                chunk.status = ChunkStatus.ASSIGNED
+                chunk.assigned_interface = ip
+
+                # --- Adaptive Chunk Sizing & Slicing based on EWMA and Health ---
+                target_cs = self._calculate_worker_target_chunk_size(prog)
+                chunk_bytes = end - start + 1
+                min_cs = config.get("MIN_CHUNK_SIZE") or (256 * 1024)
+
+                # If chunk is larger than target_cs, slice off target_cs and return the remainder to the queue
+                if chunk_bytes > target_cs and (chunk_bytes - target_cs) >= min_cs:
+                    old_end = end
+                    end = min(start + target_cs - 1, old_end - min_cs)
+                    if job.expected_size > 0:
+                        end = min(end, job.expected_size - 1)
+                    chunk.end = end
+                    new_idx = max(job.chunks.keys()) + 1
+                    remainder_end = min(old_end, job.expected_size - 1) if job.expected_size > 0 else old_end
+                    remainder = Chunk(chunk_id=new_idx, start=end + 1, end=remainder_end)
+                    job.chunks[new_idx] = remainder
+                    temp_dir = output_file.parent
+                    new_part = temp_dir / f"chunk_{new_idx:05d}.part"
+                    chunk_files[new_idx] = new_part
+                    job._chunk_files[new_idx] = new_part
+                    for i_r, r in enumerate(job._ranges):
+                        if r[0] == chunk_idx:
+                            job._ranges[i_r] = (chunk_idx, start, end)
+                            break
+                    job._ranges.append((new_idx, remainder.start, remainder.end))
+                    job._total_chunks = len(job._ranges)
+                    queue.put_nowait(remainder)
+
+                chunk.status = ChunkStatus.DOWNLOADING
+                chunk.assigned_interface = ip
+                chunk.started_at = time.time()
+                chunk.attempts += 1
+
+                prog.chunk_start = start
+                prog.chunk_end = end
+                prog.current_chunk_idx = chunk_idx
+                prog._bytes_at_start_of_chunk = prog.downloaded
+                prog.status = "downloading"
+
+                if not hasattr(job, "_active_threads"):
+                    job._active_threads = set()
+                job._active_threads.add(worker_id)
+                prog.request_count += 1
+
                 won = await self._download_range(job, iface, (start, end), output_file, worker_id, chunk=chunk)
                 if not won:
                     # Tail racer lost or was cancelled by winning competitor:
@@ -1190,8 +1205,9 @@ class DownloadManager:
                     queue.put_nowait(chunk)
                 raise
             except Exception as e:
+                clean_err_msg = sanitize_exception_text(str(e))
                 is_stall = isinstance(e, (StalledDownloadError, requests.exceptions.ReadTimeout))
-                chunk.last_error = str(e)
+                chunk.last_error = clean_err_msg
                 if chunk.status != ChunkStatus.COMPLETE:
                     chunk.status = ChunkStatus.PENDING
                     chunk.assigned_interface = None
@@ -1206,7 +1222,7 @@ class DownloadManager:
                 if isinstance(e, OriginResourceModifiedError):
                     job.status = "failed"
                     job.resume_confidence = "none"
-                    job.error = str(e)
+                    job.error = clean_err_msg
                     chunk.status = ChunkStatus.FAILED
                     job.is_cancelled = True
                     # Defined Mutation Abort Outcome:
@@ -1236,7 +1252,7 @@ class DownloadManager:
 
                 if is_non_retryable_error(e) or job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2:
                     job.status = "failed"
-                    job.error = f"Chunk {chunk_idx} failed permanently: {e}"
+                    job.error = f"Chunk {chunk_idx} failed permanently: {clean_err_msg}"
                     chunk.status = ChunkStatus.FAILED
                     job.is_cancelled = True
                     break
@@ -1244,7 +1260,7 @@ class DownloadManager:
                 prog.retry_count += 1
                 backoff_delay = calculate_backoff(chunk.attempts)
                 best_alt = self._find_best_alternate(job, ip)
-                reason = "Stalled watchdog timeout" if is_stall else str(e)[:100]
+                reason = "Stalled watchdog timeout" if is_stall else clean_err_msg[:100]
 
                 if best_alt:
                     job.retry_events.append(RetryEvent(
@@ -1254,12 +1270,12 @@ class DownloadManager:
                     ))
                     queue.put_nowait(chunk)
                     prog._cooldown_until = time.time() + cooldown_secs
-                    prog.error = str(e)
+                    prog.error = clean_err_msg
                     prog.status = "paused_slow"
                     prog.speed_mb_s = 0.0
                 else:
                     queue.put_nowait(chunk)
-                    prog.error = str(e)
+                    prog.error = clean_err_msg
                     prog.speed_mb_s = 0.0
                     await asyncio.sleep(backoff_delay)
             finally:
@@ -1773,20 +1789,50 @@ class DownloadManager:
                             job._workers[task_key] = new_task
 
             # Tail racing: launch duplicate racer on idle healthy interface for straggler chunks
+            # Trigger rule:
+            # 1. Empty queue (job._queue.empty())
+            # 2. Incomplete chunk active time far above peer median duration (threshold = max(0.5, 2.0 * peer_median))
+            # 3. Exactly one duplicate per chunk (tracked via _racing_spawned flag)
+            # 4. Healthy idle interface only (health == 'healthy', status in ('idle', 'pending'), not assigned to chunk)
             if config.get("ENABLE_TAIL_RACING", False) and job._queue.empty():
-                incomplete_chunks = [c for c in job.chunks.values() if c.status in (ChunkStatus.DOWNLOADING, ChunkStatus.ASSIGNED)]
+                completed_durs = [
+                    (c.completed_at - c.started_at)
+                    for c in job.chunks.values()
+                    if c.status == ChunkStatus.COMPLETE and c.completed_at and c.started_at and c.completed_at > c.started_at
+                ]
+                peer_median = statistics.median(completed_durs) if completed_durs else 1.0
+                straggler_threshold = max(0.5, 2.0 * peer_median)
+
+                incomplete_chunks = [
+                    c for c in job.chunks.values()
+                    if c.status in (ChunkStatus.DOWNLOADING, ChunkStatus.ASSIGNED)
+                    and not getattr(c, "_racing_spawned", False)
+                ]
                 if 0 < len(incomplete_chunks) <= int(config.get("TAIL_RACING_REMAINING_CHUNKS") or 2):
-                    idle_healthy_ifaces = [
-                        ip for ip, prog in job.progress.items()
-                        if prog.health == "healthy" and prog.status in ("idle", "pending")
-                    ]
                     for target_chunk in incomplete_chunks:
+                        # Find eligible idle healthy interfaces not already running this chunk
+                        idle_healthy_ifaces = [
+                            ip for ip, prog in job.progress.items()
+                            if prog.health == "healthy"
+                            and prog.status in ("idle", "pending")
+                            and ip != target_chunk.assigned_interface
+                        ]
                         if not idle_healthy_ifaces:
                             break
-                        if target_chunk.started_at and (now - target_chunk.started_at) > 2.0:
+                        chunk_dur = (now - target_chunk.started_at) if target_chunk.started_at else 0.0
+                        if chunk_dur > straggler_threshold:
+                            target_chunk._racing_spawned = True
                             if not getattr(target_chunk, "_racing_cancel", None):
                                 target_chunk._racing_cancel = threading.Event()
+                            racer_ip = idle_healthy_ifaces[0]
                             job._queue.put_nowait(target_chunk)
+                            racer_prog = job.progress[racer_ip]
+                            racer_prog.status = "pending"
+                            iface_dict = {"ip_address": racer_ip, "name": racer_prog.name}
+                            racer_task = asyncio.create_task(
+                                self._worker(job, iface_dict, job._queue, chunk_files)
+                            )
+                            job._workers[racer_ip] = racer_task
                             break
 
             # Check completion
@@ -1881,6 +1927,10 @@ class DownloadManager:
 
         # Check if already complete
         if part_file.exists() and part_file.stat().st_size == expected_bytes:
+            if chunk and getattr(chunk, "_racing_claimed", False):
+                # Competitor already claimed and committed this chunk
+                tmp_file.unlink(missing_ok=True)
+                return False
             if chunk:
                 chunk.status = ChunkStatus.COMPLETE
                 chunk.completed_at = time.time()
@@ -2025,13 +2075,16 @@ class DownloadManager:
                         if headers:
                             merged_headers.update(headers)
 
-                        # Strip Authorization on cross-host redirects/requests
-                        if "Authorization" in merged_headers:
-                            orig_host = urllib.parse.urlsplit(job.url).netloc
-                            target_host = urllib.parse.urlsplit(candidate_url).netloc
-                            if orig_host and target_host and orig_host.lower() != target_host.lower():
-                                merged_headers.pop("Authorization", None)
-                                merged_headers.pop("Proxy-Authorization", None)
+                        # Strip Authorization, Proxy-Authorization and Cookie on cross-host redirects/requests
+                        orig_host = urllib.parse.urlsplit(job.url).netloc
+                        target_host = urllib.parse.urlsplit(candidate_url).netloc
+                        host_changed = bool(orig_host and target_host and orig_host.lower() != target_host.lower())
+                        if host_changed:
+                            merged_headers.pop("Authorization", None)
+                            merged_headers.pop("Proxy-Authorization", None)
+                            merged_headers.pop("Cookie", None)
+                            # When host changes (e.g. redirected to CDN), drop origin If-Range validator
+                            merged_headers.pop("If-Range", None)
 
                         # Timeout is (connect_timeout, read_timeout)
                         response = session.get(
@@ -2084,16 +2137,18 @@ class DownloadManager:
                                         f"Content-Range mismatch: requested {exp_start}-{exp_end}, received {r_start}-{r_end}"
                                     )
 
-                        resp_etag = normalize_etag(response.headers.get("ETag"))
-                        if job.etag and resp_etag and resp_etag != job.etag:
-                            raise OriginResourceModifiedError(
-                                f"Remote resource modified mid-flight: ETag changed from {job.etag} to {resp_etag}"
-                            )
-                        resp_last_modified = response.headers.get("Last-Modified") or None
-                        if job.last_modified and resp_last_modified and resp_last_modified != job.last_modified:
-                            raise OriginResourceModifiedError(
-                                f"Remote resource modified mid-flight: Last-Modified changed from {job.last_modified} to {resp_last_modified}"
-                            )
+                        # Validators are origin-specific; do not compare across differing origin hosts
+                        if not host_changed:
+                            resp_etag = normalize_etag(response.headers.get("ETag"))
+                            if job.etag and resp_etag and resp_etag != job.etag:
+                                raise OriginResourceModifiedError(
+                                    f"Remote resource modified mid-flight: ETag changed from {job.etag} to {resp_etag}"
+                                )
+                            resp_last_modified = response.headers.get("Last-Modified") or None
+                            if job.last_modified and resp_last_modified and resp_last_modified != job.last_modified:
+                                raise OriginResourceModifiedError(
+                                    f"Remote resource modified mid-flight: Last-Modified changed from {job.last_modified} to {resp_last_modified}"
+                                )
 
                     # Token-bucket throttle state
                     throttle_window_start = time.monotonic()
@@ -2111,7 +2166,11 @@ class DownloadManager:
                                 raise ValueError("Job cancelled")
                             if job.status == "paused":
                                 raise ValueError("Job paused")
-                            if worker_id not in getattr(job, "_active_threads", set()):
+                            if not hasattr(job, "_active_threads"):
+                                job._active_threads = set()
+                            if not job._active_threads:
+                                job._active_threads.add(worker_id)
+                            if worker_id not in job._active_threads:
                                 raise ValueError("Worker thread cancelled/orphaned")
 
                             now = time.time()
@@ -2130,7 +2189,16 @@ class DownloadManager:
                                 )
 
                             last_progress_time = now
-                            handle.write(data)
+                            try:
+                                handle.write(data)
+                            except OSError as io_err:
+                                if getattr(io_err, "errno", None) == errno.ENOSPC or "space" in str(io_err).lower():
+                                    raise InsufficientDiskSpaceError(
+                                        f"Disk full during download write: {io_err}",
+                                        required_bytes=expected_bytes or 0,
+                                        available_bytes=0,
+                                    ) from io_err
+                                raise
                             chunk_downloaded += size
                             progress.downloaded += size
                             thread_lock = self._thread_locks.get(job.job_id)
