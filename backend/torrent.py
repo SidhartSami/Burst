@@ -106,7 +106,7 @@ def _make_settings(ip: Optional[str] = None) -> dict:
         # IPv6 requires brackets in listen_interfaces
         listen_ip = f"[{ip}]" if ":" in ip else ip
         port = _find_free_port()
-        base["listen_interfaces"] = f"{listen_ip}:{port}" if port else f"{listen_ip}:0"
+        base["listen_interfaces"] = f"{listen_ip}:{port},{listen_ip}:0" if port else f"{listen_ip}:0"
         if not ip.startswith("127.") and ip != "::1":
             base["outgoing_interfaces"] = ip
         else:
@@ -834,7 +834,21 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
         job.status = "fetching_metadata"
         print("[TORRENT] Phase 1: fetching metadata with unbound session…")
 
-        meta_ses = lt.session(_make_settings(ip=None))
+        if job.interface_ips and len(job.interface_ips) == 1:
+            meta_settings = _make_settings(ip=job.interface_ips[0])
+        elif job.interface_ips and len(job.interface_ips) > 1:
+            meta_settings = _make_settings(ip=None)
+            listen_strs = []
+            for ip in job.interface_ips:
+                listen_ip = f"[{ip}]" if ":" in ip else ip
+                listen_strs.append(f"{listen_ip}:0")
+            meta_settings["listen_interfaces"] = ",".join(listen_strs)
+            if not is_loopback:
+                meta_settings["outgoing_interfaces"] = job.interface_ips[0]
+        else:
+            meta_settings = _make_settings(ip=None)
+
+        meta_ses = lt.session(meta_settings)
         _load_dht_state(meta_ses)  # warm DHT routing table before bootstrap calls
         if not is_loopback:
             _bootstrap_dht(meta_ses)   # explicitly ping each router so routing table populates fast
