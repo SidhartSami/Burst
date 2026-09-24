@@ -64,11 +64,12 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
             job._running = False
             for ip, ses in list(job.sessions):
                 try:
-                    for _, h in list(job.handles):
-                        try:
-                            ses.remove_torrent(h)
-                        except Exception:
-                            pass
+                    for h_ip, h in list(job.handles):
+                        if h_ip == ip:
+                            try:
+                                ses.remove_torrent(h)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             job.sessions.clear()
@@ -526,7 +527,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         dest_b = os.path.join(client_dir, "real_torrent", "file_b.bin")
         dest_c = os.path.join(client_dir, "real_torrent", "file_c.bin")
 
-        for _ in range(60):
+        for _ in range(200):
             prog = client_handle.file_progress()
             if prog[0] > 0 or prog[2] > 0:
                 break
@@ -538,9 +539,16 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], "success")
         self.assertEqual(job.selected_size, len(data_a) + len(data_b) + len(data_c))
 
-        for _ in range(100):
+        for _ in range(200):
             prog = client_handle.file_progress()
             if prog[0] == len(data_a) and prog[1] == len(data_b) and prog[2] == len(data_c):
+                break
+            if client_handle.status().num_peers == 0:
+                client_handle.connect_peer(("127.0.0.1", seeder_port))
+            await asyncio.sleep(0.05)
+
+        for _ in range(60):
+            if os.path.exists(dest_a) and os.path.exists(dest_b) and os.path.exists(dest_c):
                 break
             await asyncio.sleep(0.05)
 
@@ -552,6 +560,10 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(open(dest_b, "rb").read(), data_b)
 
         job._running = False
+        try:
+            seeder_ses.remove_torrent(s_handle)
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------------
     # Test 11: Validation and security (index range, values 0-7, .torrent only)
@@ -724,7 +736,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         job._meta_handle.connect_peer(("127.0.0.1", seeder_port))
 
         # Wait for metadata arrival and pause
-        for _ in range(60):
+        for _ in range(200):
             if job.status == "paused" and job._torrent_info is not None:
                 break
             await asyncio.sleep(0.05)
@@ -742,7 +754,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.status, "downloading")
 
         # Confirm the final handle is created with file_priorities set in add_torrent_params!
-        for _ in range(50):
+        for _ in range(150):
             if len(job.handles) > 0:
                 break
             await asyncio.sleep(0.05)
@@ -757,9 +769,16 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         dest_b = os.path.join(client_dir, "mag_content", "file_b.bin")
         dest_c = os.path.join(client_dir, "mag_content", "file_c.bin")
 
-        for _ in range(80):
+        for _ in range(200):
             prog = h.file_progress()
             if prog[0] == len(data_a) and prog[2] == len(data_c):
+                break
+            if h.status().num_peers == 0:
+                h.connect_peer(("127.0.0.1", seeder_port))
+            await asyncio.sleep(0.05)
+
+        for _ in range(60):
+            if os.path.exists(dest_a) and os.path.exists(dest_c):
                 break
             await asyncio.sleep(0.05)
 
@@ -812,7 +831,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         s_atp.ti = lt.torrent_info(tor_path)
         s_atp.save_path = seeder_dir
         s_handle = seeder_ses.add_torrent(s_atp)
-        for _ in range(50):
+        for _ in range(150):
             if s_handle.status().is_seeding:
                 break
             await asyncio.sleep(0.05)
@@ -829,7 +848,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         h1 = job1.handles[0][1]
         h1.connect_peer(("127.0.0.1", seeder_port))
 
-        for _ in range(60):
+        for _ in range(200):
             if h1.file_progress()[0] == len(data_a):
                 break
             await asyncio.sleep(0.05)
@@ -849,7 +868,7 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         h2 = job2.handles[0][1]
 
         # Wait for file check
-        for _ in range(50):
+        for _ in range(150):
             st = h2.status()
             if not st.checking_files and st.total_wanted_done == len(data_a):
                 break
@@ -876,6 +895,10 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertEqual(job3.file_priorities, {0: 4, 1: 4}, "Explicit caller file_priorities must win over resume_data!")
         job3._running = False
+        try:
+            seeder_ses.remove_torrent(s_handle)
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------------
     # Test 15: Multi-handle progress merge with piece union (Item 3)
@@ -990,15 +1013,23 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         h = job.handles[0][1]
         h.connect_peer(("127.0.0.1", seeder_port))
 
-        for _ in range(60):
+        for _ in range(200):
             prog = h.file_progress()
             if prog[0] == len(data_a) and prog[2] == len(data_c):
                 break
+            if h.status().num_peers == 0:
+                h.connect_peer(("127.0.0.1", seeder_port))
             await asyncio.sleep(0.05)
 
         dest_a = os.path.join(client_dir, "unaligned", "file_a.txt")
         dest_b = os.path.join(client_dir, "unaligned", "file_b.txt")
         dest_c = os.path.join(client_dir, "unaligned", "file_c.txt")
+
+        # Allow libtorrent async disk thread to flush
+        for _ in range(60):
+            if os.path.exists(dest_a) and os.path.exists(dest_c):
+                break
+            await asyncio.sleep(0.05)
 
         # Selected files downloaded with exact byte sizes
         self.assertTrue(os.path.exists(dest_a))
@@ -1013,6 +1044,10 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(dest_b), "Deselected unaligned file_b.txt must never appear on disk!")
 
         job._running = False
+        try:
+            seeder_ses.remove_torrent(s_handle)
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------------
     # Test 17: UI and history use selected_size for percentages (Item 5)

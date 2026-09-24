@@ -275,8 +275,8 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(TEST_DATA[start : end + 1] + b"Z" * 500)
             return
 
-        # Stall after initial bytes simulation
-        if endpoint in self.stall_after_bytes_endpoints and count == 1:
+        # Stall after initial bytes simulation on worker chunk requests (not probe bytes=0-0)
+        if endpoint in self.stall_after_bytes_endpoints and range_header != "bytes=0-0" and count <= 2:
             self.send_response(206)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Range", f"bytes {start}-{end}/{len(TEST_DATA)}")
@@ -289,7 +289,7 @@ class MockHttpHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(TEST_DATA[start : start + 50])
             self.wfile.flush()
-            time.sleep(0.45)
+            time.sleep(1.0)
             return
 
         # Slow-but-progressing simulation (delay between chunks, well within 0.25s stall timeout)

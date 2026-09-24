@@ -50,9 +50,28 @@ def _sanitize_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
+    # Choose a free port in 15000-45000 to avoid Windows ephemeral/Hyper-V excluded port ranges
+    import random
+    for _ in range(100):
+        port = random.randint(15000, 45000)
+        try:
+            s_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s_tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s_udp.bind(("127.0.0.1", port))
+            s_tcp.bind(("127.0.0.1", port))
+            s_udp.close()
+            s_tcp.close()
+            return port
+        except OSError:
+            try:
+                s_udp.close()
+            except Exception:
+                pass
+            try:
+                s_tcp.close()
+            except Exception:
+                pass
+    return 0
 
 def _make_settings(ip: Optional[str] = None) -> dict:
     _init_lt()
@@ -86,12 +105,17 @@ def _make_settings(ip: Optional[str] = None) -> dict:
     if ip:
         # IPv6 requires brackets in listen_interfaces
         listen_ip = f"[{ip}]" if ":" in ip else ip
-        base["listen_interfaces"] = f"{listen_ip}:{_find_free_port()}"
-        base["outgoing_interfaces"] = ip
+        port = _find_free_port()
+        base["listen_interfaces"] = f"{listen_ip}:{port}" if port else f"{listen_ip}:0"
+        if not ip.startswith("127.") and ip != "::1":
+            base["outgoing_interfaces"] = ip
+        else:
+            base["enable_lsd"] = False
+            base["enable_natpmp"] = False
+            base["enable_upnp"] = False
     else:
-        # Fixed single port for meta session — only one runs at a time,
-        # and a well-known port avoids firewall and DHT bootstrap issues.
-        base["listen_interfaces"] = "0.0.0.0:6881"
+        # Fixed single port for meta session with ephemeral fallback to avoid port collisions in tests
+        base["listen_interfaces"] = "0.0.0.0:6881,0.0.0.0:0"
     return base
 
 
@@ -223,17 +247,49 @@ class TorrentJob:
         self.downloaded = 0
         self.boosted = False
         
-        if resume_data:
-            self.progress = resume_data.get("progress", 0.0)
-            self.torrent_total_size = resume_data.get("torrent_total_size", resume_data.get("expected_size", 0))
+        if resume_data and isinstance(resume_data, dict):
+            try:
+                self.progress = float(resume_data.get("progress", 0.0))
+            except (ValueError, TypeError):
+                self.progress = 0.0
+            try:
+                self.torrent_total_size = int(resume_data.get("torrent_total_size", resume_data.get("expected_size", 0)))
+            except (ValueError, TypeError):
+                self.torrent_total_size = 0
             self.total_size = self.torrent_total_size
-            self.selected_size = resume_data.get("selected_size", self.total_size)
-            self.downloaded = resume_data.get("downloaded", resume_data.get("total_downloaded", 0))
-            self.selected_downloaded = resume_data.get("selected_downloaded", self.downloaded)
-            self.status = resume_data.get("status", "fetching_metadata")
-            self.boosted = resume_data.get("boosted", False)
+            try:
+                self.selected_size = int(resume_data.get("selected_size", self.total_size))
+            except (ValueError, TypeError):
+                self.selected_size = self.total_size
+            try:
+                self.downloaded = int(resume_data.get("downloaded", resume_data.get("total_downloaded", 0)))
+            except (ValueError, TypeError):
+                self.downloaded = 0
+            try:
+                self.selected_downloaded = int(resume_data.get("selected_downloaded", self.downloaded))
+            except (ValueError, TypeError):
+                self.selected_downloaded = self.downloaded
+            st = resume_data.get("status", "fetching_metadata")
+            self.status = str(st) if isinstance(st, str) else "fetching_metadata"
+            self.boosted = bool(resume_data.get("boosted", False))
             if "file_priorities" in resume_data and not self.file_priorities:
-                self.file_priorities = {int(k): int(v) for k, v in resume_data["file_priorities"].items()}
+                fp_raw = resume_data["file_priorities"]
+                if isinstance(fp_raw, dict):
+                    parsed_fp = {}
+                    for k, v in fp_raw.items():
+                        try:
+                            parsed_fp[int(k)] = int(v)
+                        except (ValueError, TypeError):
+                            pass
+                    self.file_priorities = parsed_fp
+                elif isinstance(fp_raw, list):
+                    parsed_fp = {}
+                    for i, v in enumerate(fp_raw):
+                        try:
+                            parsed_fp[i] = int(v)
+                        except (ValueError, TypeError):
+                            pass
+                    self.file_priorities = parsed_fp
 
         self.speed_combined = 0
         self.upload_speed = 0
@@ -737,11 +793,36 @@ def inspect_torrent(torrent_path_or_uri: str) -> dict:
     }
 
 
+def _clean_stray_metadata_files(output_dir: Path, ti: lt.torrent_info):
+    """Clean up any 0-byte or unwanted empty files created in output_dir during Phase 1 metadata fetch."""
+    # ponytail: Stray files and 0-byte placeholders cleaned from output directory after metadata fetch. ceiling: scans all file entries from torrent metadata. upgrade: add recursive empty directory pruning.
+    try:
+        if not output_dir.exists():
+            return
+        num = ti.num_files()
+        for i in range(num):
+            f_rel = ti.files().file_path(i)
+            f_path = output_dir / f_rel
+            if f_path.exists() and f_path.is_file():
+                try:
+                    if f_path.stat().st_size == 0:
+                        f_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[TORRENT] Error during stray-file scan: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Internal: two-phase engine
 # ---------------------------------------------------------------------------
 
 async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
+    is_loopback = (
+        all(ip.startswith("127.") or ip == "::1" for ip in job.interface_ips)
+        if job.interface_ips
+        else False
+    )
     # ── Phase 1: metadata with unbound session ─────────────────────────────
     is_local_file = job.magnet_uri.endswith(".torrent") and Path(job.magnet_uri).exists()
     
@@ -751,7 +832,8 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
         meta_ses = lt.session(_make_settings(ip=None))
         _load_dht_state(meta_ses)  # warm DHT routing table before bootstrap calls
-        _bootstrap_dht(meta_ses)   # explicitly ping each router so routing table populates fast
+        if not is_loopback:
+            _bootstrap_dht(meta_ses)   # explicitly ping each router so routing table populates fast
 
         job._meta_session = meta_ses
 
@@ -763,13 +845,14 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
 
         meta_handle = meta_ses.add_torrent(params)
         job._meta_handle = meta_handle
-        _add_trackers(meta_handle)
-        # Force immediate announce to all trackers — without this, libtorrent
-        # may wait up to 30 minutes for the first announce cycle.
-        try:
-            meta_handle.force_reannounce()
-        except Exception as e:
-            print(f"[TORRENT] force_reannounce error (harmless): {e}")
+        if not is_loopback:
+            _add_trackers(meta_handle)
+            # Force immediate announce to all trackers — without this, libtorrent
+            # may wait up to 30 minutes for the first announce cycle.
+            try:
+                meta_handle.force_reannounce()
+            except Exception as e:
+                print(f"[TORRENT] force_reannounce error (harmless): {e}")
 
         METADATA_TIMEOUT = 180  # 3 min — longer timeout for cold DHT + ISP UDP blocks
         start = time.time()
@@ -797,11 +880,12 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 print(f"[TORRENT] Metadata received after {elapsed:.0f}s!")
                 job._torrent_info = meta_handle.torrent_file()
                 _save_dht_state(meta_ses)  # save DHT for next time — faster bootstrap
-                # ponytail: Phase 1 magnet session uses upload_mode and removes handle after metadata, but does not explicitly scan output_path to delete any 0-byte stray files if created. ceiling: clean loopback tests with no unwanted files. upgrade: add directory cleanup pass after Phase 1 metadata arrival.
                 try:
                     meta_ses.remove_torrent(meta_handle)
                 except Exception:
                     pass
+                # Stray-file scan: clean up any 0-byte or unwanted empty files created in output_path during metadata fetch
+                _clean_stray_metadata_files(Path(job.output_path), job._torrent_info)
                 break
 
             if elapsed > METADATA_TIMEOUT:
@@ -868,7 +952,8 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     for ip in list(job.interface_ips):
         try:
             ses = lt.session(_make_settings(ip=ip))
-            _bootstrap_dht(ses)
+            if not is_loopback:
+                _bootstrap_dht(ses)
             atp = lt.add_torrent_params()
             atp.ti = lt.torrent_info(ti)
             atp.save_path = job.output_path
@@ -882,11 +967,12 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 ses.set_download_rate_limit(int(limit * 1024))
 
             h = ses.add_torrent(atp)
-            _add_trackers(h)
-            try:
-                h.force_reannounce()
-            except Exception as e:
-                print(f"[TORRENT] force_reannounce error on Phase 2 (harmless): {e}")
+            if not is_loopback:
+                _add_trackers(h)
+                try:
+                    h.force_reannounce()
+                except Exception as e:
+                    print(f"[TORRENT] force_reannounce error on Phase 2 (harmless): {e}")
  
             job.sessions.append((ip, ses))
             job.handles.append((ip, h))
@@ -1023,17 +1109,26 @@ async def _monitor_download(job: TorrentJob):
             if not is_finished:
                 all_finished = False
 
-        # ponytail: Multi-handle piece union iterates over all pieces every 1-second monitor tick. ceiling: works fast for thousands of pieces (~ms). upgrade: cache union bitmask and invalidate only when handle pieces alert arrives or piece bitmask changes.
-        # Multi-handle progress merge: calculate piece union across all active interfaces
+        # ponytail: Multi-handle piece union caches merged wanted bytes across ticks. ceiling: invalidates cache when piece bitmask changes. upgrade: cache piece bitmask per handle with dirty flag on piece alert.
+        # Multi-handle progress merge: calculate piece union across all active interfaces with caching
         if has_union and ti and num_pieces > 0:
-            p_len = ti.piece_length()
-            t_size = ti.total_size()
-            merged_wanted_bytes = 0
-            for idx in range(num_pieces):
-                if union_pieces[idx] and _is_piece_wanted(ti, idx, job.file_priorities):
-                    p_start = idx * p_len
-                    p_bytes = min(p_len, t_size - p_start)
-                    merged_wanted_bytes += p_bytes
+            if (
+                getattr(job, "_cached_union_pieces", None) == union_pieces
+                and getattr(job, "_cached_priorities_len", None) == len(job.file_priorities)
+            ):
+                merged_wanted_bytes = getattr(job, "_cached_merged_wanted_bytes", 0)
+            else:
+                p_len = ti.piece_length()
+                t_size = ti.total_size()
+                merged_wanted_bytes = 0
+                for idx in range(num_pieces):
+                    if union_pieces[idx] and _is_piece_wanted(ti, idx, job.file_priorities):
+                        p_start = idx * p_len
+                        p_bytes = min(p_len, t_size - p_start)
+                        merged_wanted_bytes += p_bytes
+                job._cached_union_pieces = list(union_pieces)
+                job._cached_priorities_len = len(job.file_priorities)
+                job._cached_merged_wanted_bytes = merged_wanted_bytes
             max_selected_downloaded = max(max_selected_downloaded, merged_wanted_bytes)
 
         target_size = job.selected_size if job.selected_size > 0 else job.total_size
@@ -1044,7 +1139,7 @@ async def _monitor_download(job: TorrentJob):
                 all_finished = True
             else:
                 all_finished = False
-        elif 's' in locals():
+        elif 's' in locals() and hasattr(s, 'progress') and isinstance(getattr(s, 'progress', None), (int, float)):
             max_progress = max(max_progress, s.progress)
 
         job.speed_combined = total_speed

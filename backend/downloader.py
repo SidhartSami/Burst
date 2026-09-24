@@ -1404,7 +1404,12 @@ class DownloadManager:
             except Exception as e:
                 job.worker_states[w_key]["status"] = "retrying"
                 clean_err_msg = sanitize_exception_text(str(e))
-                is_stall = isinstance(e, (StalledDownloadError, requests.exceptions.ReadTimeout))
+                is_stall = (
+                    isinstance(e, (StalledDownloadError, requests.exceptions.ReadTimeout, requests.exceptions.Timeout))
+                    or "stalled" in clean_err_msg.lower()
+                    or "timed out" in clean_err_msg.lower()
+                    or "readtimeout" in clean_err_msg.lower()
+                )
                 chunk.last_error = clean_err_msg
                 if chunk.status != ChunkStatus.COMPLETE:
                     chunk.status = ChunkStatus.PENDING
@@ -2470,6 +2475,19 @@ class DownloadManager:
                     raise
 
                 if attempt < retry_attempts:
+                    clean_err = sanitize_exception_text(str(exc))
+                    is_stall = (
+                        isinstance(exc, (StalledDownloadError, requests.exceptions.ReadTimeout, requests.exceptions.Timeout))
+                        or "stalled" in clean_err.lower()
+                        or "timed out" in clean_err.lower()
+                        or "readtimeout" in clean_err.lower()
+                    )
+                    progress.retry_count += 1
+                    progress.record_outcome("stall" if is_stall else "failure")
+                    if is_stall:
+                        progress.stall_count += 1
+                    else:
+                        progress.failure_count += 1
                     delay = calculate_backoff(attempt)
                     time.sleep(delay)
                 else:
