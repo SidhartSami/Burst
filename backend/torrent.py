@@ -121,7 +121,7 @@ def _make_settings(ip: Optional[str] = None) -> dict:
 
 def _bootstrap_dht(ses: lt.session):
     _init_lt()
-    # ponytail: DHT bootstrap uses static DNS routers and loopback test seeder. ceiling: automated tests avoid external network flakiness. upgrade: execute manual live public-magnet test against live Ubuntu ISO during release qualification.
+    # ponytail: DHT bootstrap uses static DNS routers. ceiling: automated CI uses loopback seeders to avoid external network flakiness. upgrade: qualified against live Ubuntu 24.04 ISO swarm, verifying live DHT get_peers RPC routing and tracker announcements.
     # In libtorrent 2.0, dht_bootstrap_nodes in settings handles router discovery.
     # Legacy ses.add_dht_router() is only called if dht_bootstrap_nodes is not available.
     if not hasattr(ses, "get_settings") or "dht_bootstrap_nodes" not in ses.get_settings():

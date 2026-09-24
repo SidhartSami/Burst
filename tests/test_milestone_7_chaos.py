@@ -32,10 +32,14 @@ from downloader import (
     InterfaceProgress,
     is_non_retryable_error,
 )
+import libtorrent as lt
 from torrent import (
     TorrentJob,
     _clean_stray_metadata_files,
     _make_settings,
+    _load_dht_state,
+    start_torrent_download,
+    active_torrents,
     DHT_STATE_FILE,
 )
 from test_fixtures import (
@@ -305,6 +309,207 @@ class TestMilestone7Hardening(BaseHttpTest):
         self.assertEqual(dest.stat().st_size, len(TEST_DATA))
         self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), TEST_DATA_HASH)
 
+    # -----------------------------------------------------------------------
+    # 8. Torrent Chaos: Truncated bencoded resume data & DHT state
+    # -----------------------------------------------------------------------
+    def test_torrent_truncated_bencoded_resume_and_dht_data(self):
+        truncated_bencoded = b"d4:nodes32:some_truncated_binary_without_closing"
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "read_bytes", return_value=truncated_bencoded):
+            mock_ses = MagicMock()
+            # _load_dht_state must handle corrupt/truncated bencoded bytes gracefully
+            _load_dht_state(mock_ses)
+            # load_state must not be called with broken payload
+            mock_ses.load_state.assert_not_called()
+
+        job = TorrentJob(
+            magnet_uri="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=TruncTest",
+            output_path=str(self.out_dir),
+            interface_ips=["127.0.0.1"],
+            resume_data={"bencoded_fastresume": b"d5:filesl...truncated", "progress": "invalid"},
+        )
+        self.assertEqual(job.progress, 0.0)
+
+    # -----------------------------------------------------------------------
+    # 9. Torrent Chaos: Multi-interface download with mid-download interface drop
+    # -----------------------------------------------------------------------
+    async def test_torrent_chaos_interface_loss_mid_download(self):
+        test_data = b"T" * 32768
+        seeder_dir = self.out_dir / "t_chaos_seed"
+        client_dir = self.out_dir / "t_chaos_client"
+        content_dir = seeder_dir / "t_chaos"
+        content_dir.mkdir(parents=True, exist_ok=True)
+        client_dir.mkdir(parents=True, exist_ok=True)
+        (content_dir / "payload.bin").write_bytes(test_data)
+
+        fs = lt.file_storage()
+        fs.add_file("t_chaos/payload.bin", len(test_data))
+        ct = lt.create_torrent(fs, 16384, flags=lt.create_torrent.v1_only)
+        lt.set_piece_hashes(ct, str(seeder_dir))
+        tor_bytes = lt.bencode(ct.generate())
+        tor_file = self.out_dir / "t_chaos.torrent"
+        tor_file.write_bytes(tor_bytes)
+
+        seeder_ses = lt.session({"listen_interfaces": "127.0.0.1:0"})
+        s_atp = lt.add_torrent_params()
+        s_atp.ti = lt.torrent_info(str(tor_file))
+        s_atp.save_path = str(seeder_dir)
+        s_h = seeder_ses.add_torrent(s_atp)
+        for _ in range(150):
+            if s_h.status().is_seeding:
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(s_h.status().is_seeding)
+        seeder_port = seeder_ses.listen_port()
+
+        job = await start_torrent_download(
+            magnet_uri=str(tor_file),
+            output_path=str(client_dir),
+            interface_ips=["127.0.0.1", "127.0.0.2"],
+        )
+        await asyncio.sleep(0.1)
+        for _, h in job.handles:
+            h.connect_peer(("127.0.0.1", seeder_port))
+
+        # Drop second interface session mid-download
+        if len(job.sessions) > 1:
+            dropped_ip, dropped_ses = job.sessions.pop(1)
+            if len(job.handles) > 1:
+                _, dropped_h = job.handles.pop(1)
+                try:
+                    dropped_ses.remove_torrent(dropped_h)
+                except Exception:
+                    pass
+
+        # Remaining interface must complete the transfer
+        main_handle = job.handles[0][1]
+        for _ in range(300):
+            if main_handle.status().is_seeding or (main_handle.file_progress() and main_handle.file_progress()[0] == len(test_data)):
+                break
+            await asyncio.sleep(0.05)
+
+        dest = client_dir / "t_chaos" / "payload.bin"
+        for _ in range(100):
+            if dest.exists() and dest.stat().st_size == len(test_data):
+                break
+            await asyncio.sleep(0.05)
+
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(test_data))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), hashlib.sha256(test_data).hexdigest())
+
+        job._running = False
+        try:
+            seeder_ses.remove_torrent(s_h)
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------------
+    # 10. Torrent Chaos: Mid-download interruption, state persistence & restart
+    # -----------------------------------------------------------------------
+    async def test_torrent_chaos_restart_mid_download(self):
+        test_data = b"R" * 65536  # 4 pieces of 16384
+        seeder_dir = self.out_dir / "t_restart_seed"
+        client_dir = self.out_dir / "t_restart_client"
+        content_dir = seeder_dir / "t_restart"
+        content_dir.mkdir(parents=True, exist_ok=True)
+        client_dir.mkdir(parents=True, exist_ok=True)
+        (content_dir / "file.bin").write_bytes(test_data)
+
+        fs = lt.file_storage()
+        fs.add_file("t_restart/file.bin", len(test_data))
+        ct = lt.create_torrent(fs, 16384, flags=lt.create_torrent.v1_only)
+        lt.set_piece_hashes(ct, str(seeder_dir))
+        tor_file = self.out_dir / "t_restart.torrent"
+        tor_file.write_bytes(lt.bencode(ct.generate()))
+
+        seeder_ses = lt.session({"listen_interfaces": "127.0.0.1:0"})
+        s_atp = lt.add_torrent_params()
+        s_atp.ti = lt.torrent_info(str(tor_file))
+        s_atp.save_path = str(seeder_dir)
+        s_h = seeder_ses.add_torrent(s_atp)
+        for _ in range(150):
+            if s_h.status().is_seeding:
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(s_h.status().is_seeding)
+        seeder_port = seeder_ses.listen_port()
+
+        job1 = await start_torrent_download(
+            magnet_uri=str(tor_file),
+            output_path=str(client_dir),
+            interface_ips=["127.0.0.1"],
+        )
+        await asyncio.sleep(0.1)
+        h1 = job1.handles[0][1]
+        h1.connect_peer(("127.0.0.1", seeder_port))
+
+        for _ in range(200):
+            if h1.file_progress() and h1.file_progress()[0] >= 16384:
+                break
+            await asyncio.sleep(0.05)
+
+        state1 = job1.to_dict()
+        job1._running = False
+        for _, s in list(job1.sessions):
+            try:
+                s.remove_torrent(h1)
+            except Exception:
+                pass
+        job1.sessions.clear()
+        job1.handles.clear()
+        active_torrents.clear()
+
+        # Session 2: Resume from saved state and finish downloading
+        job2 = await start_torrent_download(
+            magnet_uri=str(tor_file),
+            output_path=str(client_dir),
+            interface_ips=["127.0.0.1"],
+            resume_data=state1,
+        )
+        await asyncio.sleep(0.1)
+        h2 = job2.handles[0][1]
+        h2.connect_peer(("127.0.0.1", seeder_port))
+
+        for _ in range(300):
+            if h2.file_progress() and h2.file_progress()[0] == len(test_data):
+                break
+            await asyncio.sleep(0.05)
+
+        dest = client_dir / "t_restart" / "file.bin"
+        for _ in range(100):
+            if dest.exists() and dest.stat().st_size == len(test_data):
+                break
+            await asyncio.sleep(0.05)
+
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(test_data))
+        self.assertEqual(hashlib.sha256(dest.read_bytes()).hexdigest(), hashlib.sha256(test_data).hexdigest())
+
+        job2._running = False
+        try:
+            seeder_ses.remove_torrent(s_h)
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------------
+    # 11. Loopback-only settings verification (Requirement 7)
+    # -----------------------------------------------------------------------
+    def test_non_loopback_settings_enable_all_network_features(self):
+        real_settings = _make_settings("192.168.0.103")
+        self.assertEqual(real_settings["outgoing_interfaces"], "192.168.0.103")
+        self.assertTrue(real_settings["enable_lsd"])
+        self.assertTrue(real_settings["enable_natpmp"])
+        self.assertTrue(real_settings["enable_upnp"])
+        self.assertTrue(real_settings["listen_interfaces"].startswith("192.168.0.103:"))
+
+        loopback_settings = _make_settings("127.0.0.1")
+        self.assertNotIn("outgoing_interfaces", loopback_settings)
+        self.assertFalse(loopback_settings["enable_lsd"])
+        self.assertFalse(loopback_settings["enable_natpmp"])
+        self.assertFalse(loopback_settings["enable_upnp"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
