@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass, asdict
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from typing import Dict, List, Optional
 
 import psutil
@@ -30,7 +30,13 @@ VIRTUAL_KEYWORDS = (
     "vpn",
     "tun",
     "tap",
+    "tailscale",
+    "wireguard",
+    "zerotier",
+    "openvpn",
 )
+
+CGNAT_NETWORK = ip_network("100.64.0.0/10")
 
 
 def _is_loopback_or_invalid(ip: str) -> bool:
@@ -38,7 +44,7 @@ def _is_loopback_or_invalid(ip: str) -> bool:
         addr = ip_address(ip)
     except ValueError:
         return True
-    return addr.is_loopback or addr.is_link_local
+    return addr.is_loopback or addr.is_link_local or addr in CGNAT_NETWORK
 
 
 def _infer_interface_type(name: str) -> str:

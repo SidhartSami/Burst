@@ -1453,7 +1453,25 @@ class DownloadManager:
                             break
                     break
 
-                if is_non_retryable_error(e) or job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2:
+                is_unreachable = (
+                    "unreachable network" in clean_err_msg.lower()
+                    or "unreachable host" in clean_err_msg.lower()
+                    or "10051" in clean_err_msg
+                    or "10065" in clean_err_msg
+                )
+                if is_unreachable:
+                    prog.consecutive_failures = max_failures
+                    prog.status = "excluded"
+                    prog._cooldown_until = time.time() + float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
+                    prog.error = f"Unreachable network on {ip}"
+                    print(f"[WORKER] Interface {ip} has no route to host ({clean_err_msg}), excluding from job {job.job_id}")
+
+                active_alternatives = [
+                    alt_p for alt_ip, alt_p in job.progress.items()
+                    if alt_ip != ip and alt_p.status not in ("excluded", "failed", "cancelled")
+                ]
+
+                if (is_non_retryable_error(e) and not is_unreachable) or (job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2 and not active_alternatives):
                     job.status = "failed"
                     job.error = f"Chunk {chunk_idx} failed permanently: {clean_err_msg}"
                     chunk.status = ChunkStatus.FAILED

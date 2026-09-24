@@ -357,8 +357,8 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
   const waitingCountdown = status.waiting_remaining_s ? ` (${Math.round(status.waiting_remaining_s)}s)` : '';
   const statusLabel = isWaiting
     ? `WAITING${waitingCountdown}${status.is_resumable ? ' [RESUMABLE]' : ''}`
-    : (isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : status.status));
-  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (isPaused || isWaiting ? 'paused' : 'downloading')));
+    : (isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : (status.status === 'fetching_metadata' ? 'FETCHING METADATA' : (status.status ? status.status.toUpperCase() : 'UNKNOWN'))));
+  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (status.status === 'fetching_metadata' ? 'paused' : (isPaused || isWaiting ? 'paused' : 'downloading'))));
 
   const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
   const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
@@ -600,7 +600,13 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
           </span>
         ) : status.type === "torrent" ? (
           <span>
-            {pct.toFixed(1)}% • Selected: {formatBytes(status.selected_size ?? status.expected_size)} / Total: {formatBytes(status.torrent_total_size ?? status.total_size)}
+            {status.status === 'fetching_metadata' ? (
+              <span style={{ color: 'var(--warning)', fontWeight: 500 }}>
+                Fetching metadata from swarm (finding seeders)...
+              </span>
+            ) : (
+              `${pct.toFixed(1)}% • Selected: ${formatBytes(status.selected_size ?? status.expected_size)} / Total: ${formatBytes(status.torrent_total_size ?? status.total_size)}`
+            )}
           </span>
         ) : (
           <span>
