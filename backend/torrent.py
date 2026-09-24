@@ -66,8 +66,6 @@ def _make_settings(ip: Optional[str] = None) -> dict:
             "router.bittorrent.com:6881,"
             "router.utorrent.com:6881,"
             "dht.transmissionbt.com:6881,"
-            "dht.aelitis.com:6881,"
-            "router.bitcomet.com:6881,"
             "dht.libtorrent.org:25401"
         ),
         "connection_speed": 50,
@@ -371,11 +369,11 @@ class TorrentJob:
         d_norm = dir_path.replace("\\", "/").strip("/").lower()
         if not d_norm:
             return True
-        if f_norm == d_norm or f_norm.startswith(d_norm + "/"):
-            return True
         parts = f_norm.split("/")
         d_parts = d_norm.split("/")
-        for i in range(len(parts) - len(d_parts) + 1):
+        if len(d_parts) >= len(parts):
+            return False
+        for i in range(len(parts) - len(d_parts)):
             if parts[i:i + len(d_parts)] == d_parts:
                 return True
         return False
@@ -422,7 +420,7 @@ class TorrentJob:
             "seeders": self.seeders,
             "leechers": self.leechers,
             "status": self.status,
-            "expected_size": self.total_size,
+            "expected_size": self.selected_size if self.selected_size > 0 else self.total_size,
             "total_downloaded": self.selected_downloaded,
             "torrent_total_size": self.torrent_total_size,
             "total_size": self.total_size,
@@ -741,8 +739,9 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
         METADATA_TIMEOUT = 180  # 3 min — longer timeout for cold DHT + ISP UDP blocks
         start = time.time()
 
+        last_log = 0.0
         while job._running:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             elapsed = time.time() - start
 
             # Pop and log meta session alerts
@@ -781,19 +780,13 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 print(f"[TORRENT] Metadata timeout. state={s.state} peers={s.num_peers}")
                 return
 
-            if int(elapsed) % 10 == 0 and elapsed >= 10:
-                dht_nodes = 0
-                dht_global_nodes = 0
-                try:
-                    dht_st = meta_ses.dht_status()
-                    dht_nodes = dht_st.nodes
-                    dht_global_nodes = dht_st.dht_global_nodes
-                except:
-                    pass
+            if elapsed - last_log >= 10:
+                last_log = elapsed
+                dht_running = getattr(meta_ses, "is_dht_running", lambda: True)()
                 print(
                     f"[TORRENT] Waiting for metadata… {elapsed:.0f}s "
                     f"state={s.state} peers={s.num_peers} "
-                    f"dht_nodes={dht_nodes} dht_global={dht_global_nodes}"
+                    f"dht_running={dht_running}"
                 )
                 for t in meta_handle.trackers():
                     last_err = getattr(t, 'last_error', None)
@@ -868,6 +861,24 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     await _monitor_download(job)
 
 
+def _is_piece_wanted(ti: lt.torrent_info, piece_idx: int, file_priorities: Dict[int, int]) -> bool:
+    if not file_priorities:
+        return True
+    p_len = ti.piece_length()
+    p_start = piece_idx * p_len
+    p_end = min(p_start + p_len - 1, ti.total_size() - 1)
+    offset = 0
+    for f_idx in range(ti.num_files()):
+        f_size = ti.files().file_size(f_idx)
+        f_start = offset
+        f_end = offset + f_size - 1
+        offset += f_size
+        if not (p_end < f_start or p_start > f_end):
+            if file_priorities.get(f_idx, 4) > 0:
+                return True
+    return False
+
+
 async def _monitor_download(job: TorrentJob):
     no_peers_since = time.time()
     warned = False
@@ -931,6 +942,11 @@ async def _monitor_download(job: TorrentJob):
         total_peers = 0
         all_finished = True
 
+        ti = job._torrent_info
+        num_pieces = ti.num_pieces() if ti else 0
+        union_pieces = [False] * num_pieces if num_pieces > 0 else []
+        has_union = False
+
         for ip, h in list(job.handles):
             try:
                 s = h.status()
@@ -945,22 +961,49 @@ async def _monitor_download(job: TorrentJob):
             total_seeders = max(total_seeders, s.num_seeds)
             max_selected_downloaded = max(max_selected_downloaded, s.total_wanted_done)
             max_downloaded = max(max_downloaded, s.total_done)
-            target_size = job.selected_size if job.selected_size > 0 else job.total_size
-            if target_size > 0:
-                calc_prog = min(1.0, max_selected_downloaded / target_size)
-                max_progress = max(max_progress, calc_prog)
-            else:
-                max_progress = max(max_progress, s.progress)
+
+            if num_pieces > 0:
+                try:
+                    p_vec = s.pieces
+                    if len(p_vec) == num_pieces:
+                        has_union = True
+                        for idx in range(num_pieces):
+                            if p_vec[idx]:
+                                union_pieces[idx] = True
+                except Exception:
+                    pass
 
             is_finished = (
                 getattr(s, "is_finished", False)
                 or getattr(s, "is_seeding", False)
                 or int(s.state) in FINISHED_STATE_VALS
-                or (job.selected_size > 0 and max_selected_downloaded >= job.selected_size)
                 or (s.total_wanted > 0 and s.total_wanted_done >= s.total_wanted)
             )
             if not is_finished:
                 all_finished = False
+
+        # Multi-handle progress merge: calculate piece union across all active interfaces
+        if has_union and ti and num_pieces > 0:
+            p_len = ti.piece_length()
+            t_size = ti.total_size()
+            merged_wanted_bytes = 0
+            for idx in range(num_pieces):
+                if union_pieces[idx] and _is_piece_wanted(ti, idx, job.file_priorities):
+                    p_start = idx * p_len
+                    p_bytes = min(p_len, t_size - p_start)
+                    merged_wanted_bytes += p_bytes
+            max_selected_downloaded = max(max_selected_downloaded, merged_wanted_bytes)
+
+        target_size = job.selected_size if job.selected_size > 0 else job.total_size
+        if target_size > 0:
+            calc_prog = min(1.0, max_selected_downloaded / target_size)
+            max_progress = max(max_progress, calc_prog)
+            if max_selected_downloaded >= target_size:
+                all_finished = True
+            else:
+                all_finished = False
+        elif 's' in locals():
+            max_progress = max(max_progress, s.progress)
 
         job.speed_combined = total_speed
         job.progress = max_progress
