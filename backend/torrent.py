@@ -175,13 +175,30 @@ def _add_trackers(handle):
 # ---------------------------------------------------------------------------
 
 class TorrentJob:
-    def __init__(self, magnet_uri: str, output_path: str, interface_ips: List[str], job_id: str = None, bandwidth_limits: dict = None, resume_data: dict = None):
+    def __init__(
+        self,
+        magnet_uri: str,
+        output_path: str,
+        interface_ips: List[str],
+        job_id: str = None,
+        bandwidth_limits: dict = None,
+        resume_data: dict = None,
+        file_priorities: Optional[Dict[int, int] | List[int]] = None,
+    ):
         self.job_id = job_id or str(uuid.uuid4())
         self.magnet_uri = magnet_uri
         self.output_path = output_path
         self.interface_ips = list(interface_ips)
         self.bandwidth_limits = bandwidth_limits or {}
         self.filename = self._extract_name(magnet_uri)
+
+        # File selection: file index -> priority (0 = do not download, 1..7 = download, 4 = default)
+        self.file_priorities: Dict[int, int] = {}
+        if file_priorities:
+            if isinstance(file_priorities, list):
+                self.file_priorities = {i: int(p) for i, p in enumerate(file_priorities)}
+            elif isinstance(file_priorities, dict):
+                self.file_priorities = {int(k): int(v) for k, v in file_priorities.items()}
 
         self.status = "fetching_metadata"
         self.progress = 0.0
@@ -195,6 +212,8 @@ class TorrentJob:
             self.downloaded = resume_data.get("total_downloaded", 0)
             self.status = resume_data.get("status", "fetching_metadata")
             self.boosted = resume_data.get("boosted", False)
+            if "file_priorities" in resume_data and not self.file_priorities:
+                self.file_priorities = {int(k): int(v) for k, v in resume_data["file_priorities"].items()}
 
         self.speed_combined = 0
         self.speeds: Dict[str, int] = {ip: 0 for ip in interface_ips}
@@ -213,6 +232,73 @@ class TorrentJob:
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.error: Optional[str] = None
+
+    def get_files(self) -> List[dict]:
+        """Return list of files with path, size, priority, and progress."""
+        if not self._torrent_info:
+            return []
+        ti = self._torrent_info
+        num = ti.num_files()
+
+        prog_bytes = [0] * num
+        if self.handles:
+            try:
+                prog_bytes = self.handles[0][1].file_progress()
+            except Exception:
+                pass
+
+        files = []
+        for i in range(num):
+            f_path = ti.files().file_path(i)
+            f_size = ti.files().file_size(i)
+            prio = self.file_priorities.get(i, 4)
+            done = prog_bytes[i] if i < len(prog_bytes) else 0
+            ratio = (done / f_size) if f_size > 0 else 1.0
+            files.append({
+                "index": i,
+                "path": f_path,
+                "size": f_size,
+                "priority": prio,
+                "downloaded": done,
+                "progress": ratio,
+                "wanted": prio > 0,
+            })
+        return files
+
+    async def set_file_priorities(self, priorities: Dict[int, int] | List[int]) -> dict:
+        """Dynamically update file download priorities across all active interface handles."""
+        _init_lt()
+        if isinstance(priorities, list):
+            new_p = {i: int(p) for i, p in enumerate(priorities)}
+        elif isinstance(priorities, dict):
+            new_p = {int(k): int(v) for k, v in priorities.items()}
+        else:
+            raise ValueError(f"Invalid priorities format: {type(priorities)}")
+
+        self.file_priorities.update(new_p)
+
+        if self._torrent_info:
+            num = self._torrent_info.num_files()
+            prio_list = [self.file_priorities.get(i, 4) for i in range(num)]
+            for ip, h in list(self.handles):
+                try:
+                    h.prioritize_files(prio_list)
+                except Exception as e:
+                    print(f"[TORRENT] Error updating file priorities on handle {ip}: {e}")
+
+            # Recalculate total_size based on wanted files
+            wanted_bytes = sum(
+                self._torrent_info.files().file_size(i)
+                for i in range(num)
+                if self.file_priorities.get(i, 4) > 0
+            )
+            self.total_size = wanted_bytes
+
+        return {
+            "status": "success",
+            "file_priorities": self.file_priorities,
+            "total_size": self.total_size,
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -236,6 +322,8 @@ class TorrentJob:
             "magnet_uri": self.magnet_uri,
             "bandwidth_limits": self.bandwidth_limits,
             "boosted": self.boosted,
+            "file_priorities": self.file_priorities,
+            "files": self.get_files() if self._torrent_info else [],
         }
 
     def _extract_name(self, magnet_uri: str) -> str:
@@ -278,6 +366,9 @@ class TorrentJob:
         atp.ti = lt.torrent_info(self._torrent_info)
         atp.save_path = self.output_path
         atp.storage_mode = lt.storage_mode_t.storage_mode_sparse
+        if self.file_priorities:
+            num = self._torrent_info.num_files()
+            atp.file_priorities = [self.file_priorities.get(i, 4) for i in range(num)]
         h = ses.add_torrent(atp)
         _add_trackers(h)
 
@@ -384,6 +475,7 @@ async def start_torrent_download(
     bandwidth_limits: Optional[dict] = None,
     job_id: Optional[str] = None,
     resume_data: Optional[dict] = None,
+    file_priorities: Optional[Dict[int, int] | List[int]] = None,
 ) -> TorrentJob:
     # Normalize local torrent file path if it is a file URI or base64 data, or download remote torrent files
     _init_lt()
@@ -448,7 +540,15 @@ async def start_torrent_download(
                 counter += 1
             final_path = f"{final_path}({counter})"
 
-    job = TorrentJob(magnet_uri, final_path, interface_ips, job_id=job_id, bandwidth_limits=bandwidth_limits, resume_data=resume_data)
+    job = TorrentJob(
+        magnet_uri,
+        final_path,
+        interface_ips,
+        job_id=job_id,
+        bandwidth_limits=bandwidth_limits,
+        resume_data=resume_data,
+        file_priorities=file_priorities,
+    )
     active_torrents[job.job_id] = job
     try:
         Path(final_path).mkdir(parents=True, exist_ok=True)
@@ -456,6 +556,35 @@ async def start_torrent_download(
         print(f"[TORRENT] Directory error: {e}")
     asyncio.create_task(_run_torrent(job, bandwidth_limits or {}))
     return job
+
+
+def inspect_torrent(torrent_path_or_uri: str) -> dict:
+    """Inspect a .torrent file or local path to extract file list and metadata before downloading."""
+    _init_lt()
+    path = torrent_path_or_uri.strip()
+    if path.startswith("file:///"):
+        path = path[8:]
+    elif path.startswith("file://"):
+        path = path[7:]
+    
+    ti = lt.torrent_info(path)
+    files = []
+    for i in range(ti.num_files()):
+        files.append({
+            "index": i,
+            "path": ti.files().file_path(i),
+            "size": ti.files().file_size(i),
+            "priority": 4,
+            "wanted": True,
+        })
+    return {
+        "name": ti.name(),
+        "total_size": ti.total_size(),
+        "num_files": ti.num_files(),
+        "piece_length": ti.piece_length(),
+        "num_pieces": ti.num_pieces(),
+        "files": files,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +701,11 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     job.status = "downloading"
 
     ti = job._torrent_info
-    job.total_size = ti.total_size()
+    num = ti.num_files()
+    if job.file_priorities:
+        job.total_size = sum(ti.files().file_size(i) for i in range(num) if job.file_priorities.get(i, 4) > 0)
+    else:
+        job.total_size = ti.total_size()
 
     for ip in list(job.interface_ips):
         try:
@@ -587,6 +720,8 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
             atp.ti = lt.torrent_info(ti)
             atp.save_path = job.output_path
             atp.storage_mode = lt.storage_mode_t.storage_mode_sparse
+            if job.file_priorities:
+                atp.file_priorities = [job.file_priorities.get(i, 4) for i in range(num)]
 
             limit = bandwidth_limits.get(ip)
             if limit:
@@ -683,10 +818,20 @@ async def _monitor_download(job: TorrentJob):
             job.peers_per_interface[ip] = s.num_peers
             total_peers += s.num_peers
             total_seeders = max(total_seeders, s.num_seeds)
-            max_progress = max(max_progress, s.progress)
             max_downloaded = max(max_downloaded, s.total_wanted_done)
+            if job.total_size > 0:
+                calc_prog = min(1.0, max_downloaded / job.total_size)
+                max_progress = max(max_progress, calc_prog)
+            else:
+                max_progress = max(max_progress, s.progress)
 
-            if int(s.state) not in FINISHED_STATE_VALS:
+            is_finished = (
+                getattr(s, "is_finished", False)
+                or getattr(s, "is_seeding", False)
+                or int(s.state) in FINISHED_STATE_VALS
+                or (s.total_wanted > 0 and s.total_wanted_done >= s.total_wanted)
+            )
+            if not is_finished:
                 all_finished = False
 
         job.speed_combined = total_speed

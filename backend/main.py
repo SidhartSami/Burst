@@ -52,6 +52,7 @@ class DownloadRequest(BaseModel):
     output_path: str = Field(min_length=1)
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
+    file_priorities: Optional[Dict[int, int]] = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -73,6 +74,16 @@ class TorrentStartRequest(BaseModel):
     output_path: str
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
+    file_priorities: Optional[Dict[int, int]] = None
+
+
+class FilePrioritiesRequest(BaseModel):
+    priorities: Dict[int, int]
+
+
+class TorrentInspectRequest(BaseModel):
+    torrent_path: Optional[str] = None
+    magnet_uri: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -664,7 +675,10 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
     
     if is_torrent:
         try:
-            job = await start_torrent_download(payload.url, payload.output_path, payload.interface_ips, payload.bandwidth_limits)
+            job = await start_torrent_download(
+                payload.url, payload.output_path, payload.interface_ips,
+                payload.bandwidth_limits, file_priorities=payload.file_priorities,
+            )
             # Only broadcast if it's not an internal check (though pings usually aren't magnets)
             if "BURST_INTERNAL_CHECK" not in payload.url:
                 await broadcast_event("new_job", {"job_id": job.job_id})
@@ -1348,7 +1362,10 @@ async def start_torrent_api(req: TorrentStartRequest) -> Dict[str, str]:
     if not req.interface_ips:
         raise HTTPException(status_code=400, detail="No interfaces selected")
     try:
-        job = await start_torrent_download(req.magnet_uri, req.output_path, req.interface_ips, req.bandwidth_limits)
+        job = await start_torrent_download(
+            req.magnet_uri, req.output_path, req.interface_ips,
+            req.bandwidth_limits, file_priorities=req.file_priorities,
+        )
         await broadcast_event("new_job", {"job_id": job.job_id})
         save_state()
         return {"job_id": job.job_id}
@@ -1361,6 +1378,33 @@ async def get_torrent_status(job_id: str) -> Dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
+
+@app.get("/torrent/{job_id}/files")
+async def get_torrent_files(job_id: str) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "files": job.get_files()}
+
+@app.post("/torrent/{job_id}/files/priorities")
+async def set_torrent_file_priorities(job_id: str, req: FilePrioritiesRequest) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    res = await job.set_file_priorities(req.priorities)
+    save_state()
+    return res
+
+@app.post("/torrent/inspect")
+async def inspect_torrent_api(req: TorrentInspectRequest) -> Dict[str, Any]:
+    from torrent import inspect_torrent
+    target = req.torrent_path or req.magnet_uri
+    if not target:
+        raise HTTPException(status_code=400, detail="Missing torrent_path or magnet_uri")
+    try:
+        return inspect_torrent(target)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/show")
 async def show_window_endpoint():
