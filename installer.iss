@@ -1,6 +1,6 @@
 [Setup]
 AppName=Burst
-AppVersion=1.1.2
+AppVersion=2.0.0
 AppVerName=Burst
 AppPublisher=SidhartSami
 DefaultDirName={autopf}\Burst
@@ -9,7 +9,7 @@ UninstallDisplayIcon={app}\Burst.exe
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=Burst_Setup_v1.1.2
+OutputBaseFilename=Burst_Setup_v2.0.0
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 UsedUserAreasWarning=no

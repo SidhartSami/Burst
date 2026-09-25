@@ -5,8 +5,8 @@
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
   [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://www.microsoft.com/windows)
-  [![Release](https://img.shields.io/badge/Release-v1.0--candidate-success.svg)](https://github.com/SidhartSami/Burst/releases)
-  [![Tests: 95/95 Passing](https://img.shields.io/badge/Tests-95%2F95%20Passing-brightgreen.svg)](tests/)
+  [![Release](https://img.shields.io/badge/Release-v2.0.0-success.svg)](https://github.com/SidhartSami/Burst/releases)
+  [![Tests: 100/100 Passing](https://img.shields.io/badge/Tests-100%2F100%20Passing-brightgreen.svg)](tests/)
 </div>
 
 ---

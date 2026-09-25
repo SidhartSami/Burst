@@ -2768,7 +2768,7 @@ export default function App() {
                   })}
 
                   <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
-                    Burst v1.3.0
+                    Burst v2.0.0
                   </div>
                 </div>
               )}
