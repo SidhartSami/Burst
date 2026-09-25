@@ -546,8 +546,8 @@ class DownloadJob:
             raw_wait_max = getattr(self, "_reconnect_wait_max", None)
             if raw_wait_max is None:
                 raw_cfg = config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT")
-                raw_wait_max = float(raw_cfg if raw_cfg is not None else 180.0)
-            if wait_start and raw_wait_max > 0:
+                raw_wait_max = float(raw_cfg if raw_cfg is not None else 0.0)
+            if wait_start and raw_wait_max and raw_wait_max > 0:
                 waiting_remaining = max(0.0, round(raw_wait_max - (now - wait_start), 1))
 
         speed_comb_mb = round(sum(p.speed_mb_s for p in self.progress.values()), 2)
@@ -1825,8 +1825,12 @@ class DownloadManager:
         job = self.get_job(job_id)
         if not job:
             raise ValueError("Job not found")
-        if job.status != "downloading":
+        if job.status not in ("downloading", "waiting", "waiting_reconnect"):
             return {"status": "already_paused_or_inactive", "current": job.status}
+
+        job.status = "paused"
+        job._reconnect_wait_start = None
+        job.error = None
 
         # Cancel all active workers
         for ip, task in list(job._workers.items()):
@@ -1853,7 +1857,6 @@ class DownloadManager:
                 prog.status = "pending"
         
         job._workers.clear()
-        job.status = "paused"
         if getattr(job, "_completion_event", None):
             job._completion_event.set()
         return {"status": "paused"}
@@ -1906,6 +1909,12 @@ class DownloadManager:
 
         if getattr(job, "_completion_event", None):
             job._completion_event.set()
+
+        monitor_task = self._job_tasks.get(job_id)
+        if (monitor_task is None or monitor_task.done()) and job.supports_ranges and job._ranges:
+            active_ifaces = [{"ip_address": ip, "name": p.name} for ip, p in job.progress.items() if p.status != "cancelled"]
+            if active_ifaces:
+                self._job_tasks[job_id] = asyncio.create_task(self._parallel_download(job, active_ifaces))
 
         return {"status": "resumed", "workers_spawned": spawned}
 
@@ -2066,6 +2075,18 @@ class DownloadManager:
             if job.is_cancelled:
                 break
 
+            if job.status == "paused":
+                if getattr(job, "_completion_event", None):
+                    try:
+                        await asyncio.wait_for(job._completion_event.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
+                    finally:
+                        job._completion_event.clear()
+                else:
+                    await asyncio.sleep(0.5)
+                continue
+
             now = time.time()
 
             # Periodic weight rebalancing
@@ -2199,7 +2220,7 @@ class DownloadManager:
                     job._reconnect_wait_start = now
 
                 raw_timeout = config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT")
-                reconnect_timeout = float(raw_timeout if raw_timeout is not None else 180.0)
+                reconnect_timeout = float(raw_timeout if raw_timeout is not None else 0.0)
                 elapsed_wait = now - job._reconnect_wait_start
 
                 if reconnect_timeout <= 0 or elapsed_wait < reconnect_timeout:
@@ -2227,7 +2248,7 @@ class DownloadManager:
             else:
                 await asyncio.sleep(0.05)
 
-        if not job.is_cancelled and job.status != "failed":
+        if not job.is_cancelled and job.status not in ("failed", "paused"):
             # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge
             for c in job.chunks.values():
                 part_f = job._chunk_files[c.chunk_id]
@@ -2243,17 +2264,17 @@ class DownloadManager:
             if not out_file.exists() or out_file.stat().st_size != job.expected_size:
                 raise ValueError(f"Final file size verification failed: expected {job.expected_size}, got {out_file.stat().st_size if out_file.exists() else 0}")
 
-        await cleanup_chunks(list(chunk_files.values()))
-        # Clean up any leftover temporary files
-        for tmp_f in temp_dir.glob("chunk_*.*"):
+            await cleanup_chunks(list(chunk_files.values()))
+            # Clean up any leftover temporary files
+            for tmp_f in temp_dir.glob("chunk_*.*"):
+                try:
+                    tmp_f.unlink(missing_ok=True)
+                except Exception:
+                    pass
             try:
-                tmp_f.unlink(missing_ok=True)
-            except Exception:
+                temp_dir.rmdir()
+            except OSError:
                 pass
-        try:
-            temp_dir.rmdir()
-        except OSError:
-            pass
 
     async def _download_range(self, job: DownloadJob, interface: Dict[str, str],
                               byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID,

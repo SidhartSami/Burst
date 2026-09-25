@@ -56,7 +56,7 @@ DISCONNECT_DETECTION_TIMEOUT: float = 3.0         # Seconds of zero progress bef
 RETRY_SAME_INTERFACE_COOLDOWN: float = 15.0       # Seconds before failed iface is eligible again
 MAX_CONSECUTIVE_FAILURES: int = 3                  # Consecutive chunk failures → exclude interface
 EXCLUDED_INTERFACE_COOLDOWN: float = 60.0          # Seconds an interface remains excluded before re-probing
-SINGLE_INTERFACE_RECONNECT_TIMEOUT: float = 180.0  # Bounded wait in seconds (3 min) for single interface recovery with visible 'waiting' state
+SINGLE_INTERFACE_RECONNECT_TIMEOUT: float = 0.0    # 0 = infinite wait (never fails on timeout) until user cancels or network reconnects
 ENABLE_CHUNK_FSYNC: bool = True                    # Per-chunk fsync before atomic commit (durability vs throughput)
 # ponytail: warm-up and tail tapering add chunk-split overhead with no measured win on loopback;
 # enable only when a benchmark on real asymmetric interfaces shows improvement over uniform.
@@ -136,6 +136,14 @@ def load_settings() -> Dict[str, Any]:
         try:
             with SETTINGS_FILE.open("r") as fh:
                 overrides = json.load(fh)
+            # Auto-migrate legacy 180s timeout setting to 0.0 (infinite wait)
+            if overrides.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT") in (180, 180.0):
+                overrides["SINGLE_INTERFACE_RECONNECT_TIMEOUT"] = 0.0
+                try:
+                    with SETTINGS_FILE.open("w") as wfh:
+                        json.dump(overrides, wfh, indent=2)
+                except OSError:
+                    pass
             settings.update({k: v for k, v in overrides.items() if k in _DEFAULTS})
         except (json.JSONDecodeError, OSError):
             pass

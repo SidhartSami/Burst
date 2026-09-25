@@ -257,7 +257,8 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
     ? (status.interface_ips || []).length
     : Object.values(status.interfaces || {}).filter(i => i.status !== "excluded" && i.status !== "cancelled").length;
 
-  const isPaused = status.status === 'paused' || status.status === 'waiting_reconnect' || (status.status === 'downloading' && activeIfaces === 0);
+  const isPaused = status.status === 'paused';
+  const isWaiting = !isPaused && (status.is_waiting || status.status === 'waiting' || status.status === 'waiting_reconnect' || (status.status === 'downloading' && activeIfaces === 0));
 
   const [showHintState, setShowHintState] = useState(showHint);
   const [hintOpacity, setHintOpacity] = useState(1);
@@ -363,12 +364,26 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
   const showSparkline = status.status === 'downloading' && !isPaused && activeIfacesList.length > 0 && chartData.length > 0;
 
-  const isWaiting = status.is_waiting || status.status === 'waiting' || status.status === 'waiting_reconnect';
-  const waitingCountdown = (status.waiting_remaining_s && status.waiting_remaining_s > 0) ? ` (${Math.round(status.waiting_remaining_s)}s)` : '';
-  const statusLabel = isWaiting
-    ? `WAITING${waitingCountdown}`
-    : (isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : (status.status === 'fetching_metadata' ? 'FETCHING METADATA' : (status.status ? status.status.toUpperCase() : 'UNKNOWN'))));
-  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (status.status === 'fetching_metadata' ? 'paused' : (isWaiting ? 'waiting' : (isPaused ? 'paused' : 'downloading')))));
+  const statusLabel = isPaused
+    ? 'PAUSED'
+    : (isWaiting
+      ? 'WAITING'
+      : (status.status === 'merging'
+        ? 'MERGING...'
+        : (status.status === 'fetching_metadata'
+          ? 'FETCHING METADATA'
+          : (status.status ? status.status.toUpperCase() : 'UNKNOWN'))));
+  const statusClass = status.status === 'completed'
+    ? 'completed'
+    : (status.status === 'failed'
+      ? 'failed'
+      : (status.status === 'merging'
+        ? 'merging'
+        : (isPaused
+          ? 'paused'
+          : (status.status === 'fetching_metadata'
+            ? 'paused'
+            : (isWaiting ? 'waiting' : 'downloading')))));
 
   const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
   const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
@@ -416,6 +431,15 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
             </>
           ) : (
             <>
+              {!isDone && (
+                <button
+                  className="action-btn"
+                  onClick={isPaused ? onResume : onPause}
+                  title={isPaused ? "Resume download" : "Pause download"}
+                >
+                  {isPaused ? <Play size={15} /> : <Pause size={15} />}
+                </button>
+              )}
               {status.status === 'downloading' && status.type !== 'torrent' && (
                 <button
                   className={`action-btn boost-btn ${status.boosted ? 'active-boost' : ''}`}
@@ -597,10 +621,10 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
       </div>
 
       <div className="dl-bottom">
-        {isWaiting ? (
-          <span>Waiting to reconnect • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
-        ) : isPaused ? (
+        {isPaused ? (
           <span>Paused • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
+        ) : isWaiting ? (
+          <span>Waiting for network • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
         ) : status.status === 'failed' ? (
           <span style={{ color: 'var(--danger)', fontWeight: 500 }}>
             {friendlyError(status.error)}{status.is_resumable ? ' • (Resumable)' : ''}

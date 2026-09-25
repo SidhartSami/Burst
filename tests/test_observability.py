@@ -593,6 +593,45 @@ class TestObservability(unittest.TestCase):
         # Must be well below 15 KB (measured ~9 KB)
         self.assertLess(json_bytes, 15_000, f"JSON payload {json_bytes} exceeds 15 KB limit!")
 
+    # -----------------------------------------------------------------------
+    # 15. Pause & resume from waiting_reconnect (no stuck timer)
+    # -----------------------------------------------------------------------
+    def test_pause_and_resume_waiting_reconnect_job(self):
+        from downloader import DownloadManager
+        import threading
+        manager = DownloadManager()
+        job = DownloadJob(
+            job_id="job_pause_waiting",
+            url="http://example.com/file.bin",
+            output_path=str(self.dir_path / "file.bin"),
+            expected_size=50_000_000,
+            supports_ranges=True,
+            status="waiting_reconnect",
+        )
+        job._reconnect_wait_start = time.time() - 10.0
+        job.error = "All interfaces unavailable — waiting to reconnect"
+        manager.jobs[job.job_id] = job
+        manager._locks[job.job_id] = asyncio.Lock()
+        manager._thread_locks[job.job_id] = threading.Lock()
+
+        # Pause while waiting
+        res = asyncio.run(manager.pause_job(job.job_id))
+        self.assertEqual(res["status"], "paused")
+        self.assertEqual(job.status, "paused")
+        self.assertIsNone(job._reconnect_wait_start)
+        self.assertIsNone(job.error)
+
+        d = job.to_dict()
+        self.assertEqual(d["status"], "paused")
+        self.assertFalse(d["is_waiting"])
+        self.assertEqual(d["waiting_remaining_s"], 0.0)
+
+        # Resume from paused
+        res_resume = asyncio.run(manager.resume_job(job.job_id))
+        self.assertEqual(res_resume["status"], "resumed")
+        self.assertEqual(job.status, "downloading")
+
+
 
 if __name__ == "__main__":
     unittest.main()
