@@ -1132,6 +1132,33 @@ async def interface_polling_loop():
                             await ws.send_json(msg)
                         except Exception:
                             pass
+
+                if added or removed:
+                    try:
+                        await manager.handle_interface_change(added, removed)
+                    except Exception as e:
+                        print(f"[IFACE_POLL] Error in manager.handle_interface_change: {e}")
+
+                    for tjob in list(active_torrents.values()):
+                        if tjob.status not in ("completed", "failed"):
+                            for rem in removed:
+                                rem_ip = str(rem["ip_address"])
+                                if rem_ip in tjob.interface_ips:
+                                    try:
+                                        await tjob.remove_interface(rem_ip)
+                                    except Exception:
+                                        pass
+                            for add in added:
+                                add_ip = str(add["ip_address"])
+                                try:
+                                    await tjob.add_interface(add_ip, add.get("name", ""))
+                                except Exception:
+                                    pass
+
+                    try:
+                        save_state()
+                    except Exception:
+                        pass
             
             last_interfaces = current_dict
         except Exception:

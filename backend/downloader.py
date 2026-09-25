@@ -543,9 +543,12 @@ class DownloadJob:
         waiting_remaining = 0.0
         if self.status in ("waiting", "waiting_reconnect"):
             wait_start = getattr(self, "_reconnect_wait_start", None)
-            wait_max = getattr(self, "_reconnect_wait_max", 180.0)
-            if wait_start:
-                waiting_remaining = max(0.0, round(wait_max - (now - wait_start), 1))
+            raw_wait_max = getattr(self, "_reconnect_wait_max", None)
+            if raw_wait_max is None:
+                raw_cfg = config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT")
+                raw_wait_max = float(raw_cfg if raw_cfg is not None else 180.0)
+            if wait_start and raw_wait_max > 0:
+                waiting_remaining = max(0.0, round(raw_wait_max - (now - wait_start), 1))
 
         speed_comb_mb = round(sum(p.speed_mb_s for p in self.progress.values()), 2)
         speed_comb_bytes = int(speed_comb_mb * 1024 * 1024)
@@ -1738,6 +1741,86 @@ class DownloadManager:
         self._rebalance_weights(job)
         return {"status": "success", "removed": ip, "queue_size": job._queue.qsize() if job._queue else 0}
 
+    async def handle_interface_change(self, added: List[Dict[str, Any]], removed: List[Dict[str, Any]]) -> None:
+        """Handle OS network interface additions/removals (e.g. Wi-Fi switch, DHCP change)."""
+        removed_ips = {str(i["ip_address"]): i for i in removed}
+        added_ips = {str(i["ip_address"]): i for i in added}
+
+        print(f"[IFACE_POLL] Network change detected: added={list(added_ips.keys())}, removed={list(removed_ips.keys())}")
+
+        for job in list(self.jobs.values()):
+            if job.status == "completed":
+                continue
+            if job.status == "failed" and "resumable" not in (job.error or "").lower():
+                continue
+
+            # Check if any interface in this job was removed from the OS
+            for rem_ip, rem_iface in list(removed_ips.items()):
+                if rem_ip in job.progress:
+                    old_name = job.progress[rem_ip].name
+                    print(f"[IFACE_CHANGE] Job {job.job_id}: Interface {rem_ip} ({old_name}) removed from OS")
+
+                    # Look for a replacement on the same physical adapter (e.g. Wi-Fi IP changed)
+                    replacement = next((a for a in added if a.get("name") == old_name), None)
+                    if not replacement and added:
+                        active_remaining = [
+                            ip for ip, p in job.progress.items()
+                            if ip != rem_ip and ip not in removed_ips and p.status not in ("excluded", "cancelled")
+                        ]
+                        if not active_remaining:
+                            replacement = added[0]
+
+                    # 1. Safely remove and purge the dead interface
+                    try:
+                        for key in list(job._workers.keys()):
+                            if key == rem_ip or key.startswith(f"{rem_ip}_"):
+                                task = job._workers[key]
+                                if not task.done():
+                                    task.cancel()
+                                del job._workers[key]
+
+                        prog = job.progress[rem_ip]
+                        if prog.current_chunk_idx is not None and job._queue:
+                            c = job.chunks.get(prog.current_chunk_idx)
+                            if c and c.status != ChunkStatus.COMPLETE:
+                                c.status = ChunkStatus.PENDING
+                                c.assigned_interface = None
+                                job._queue.put_nowait(c)
+                            downloaded_this_chunk = prog.downloaded - prog._bytes_at_start_of_chunk
+                            if downloaded_this_chunk > 0:
+                                with self._thread_locks[job.job_id]:
+                                    job.total_downloaded -= downloaded_this_chunk
+                                prog.downloaded = prog._bytes_at_start_of_chunk
+                            prog.current_chunk_idx = None
+
+                        job.progress.pop(rem_ip, None)
+                    except Exception as exc:
+                        print(f"[IFACE_CHANGE] Error purging old IP {rem_ip}: {exc}")
+
+                    # 2. Add replacement interface if found
+                    if replacement:
+                        new_ip = str(replacement["ip_address"])
+                        print(f"[IFACE_CHANGE] Migrating job {job.job_id} to new interface {new_ip} ({replacement.get('name')})")
+                        try:
+                            await self.add_interface(job.job_id, replacement)
+                        except Exception as exc:
+                            print(f"[IFACE_CHANGE] Failed adding replacement {new_ip}: {exc}")
+
+            # If job was waiting to reconnect and new interfaces are available, attach and resume
+            if job.status in ("waiting", "waiting_reconnect") and added:
+                for add_iface in added:
+                    add_ip = str(add_iface["ip_address"])
+                    if add_ip not in job.progress:
+                        try:
+                            print(f"[IFACE_CHANGE] Job {job.job_id} waiting — auto-attaching new interface {add_ip}")
+                            await self.add_interface(job.job_id, add_iface)
+                            break
+                        except Exception as exc:
+                            print(f"[IFACE_CHANGE] Auto-attach failed: {exc}")
+
+            if getattr(job, "_completion_event", None):
+                job._completion_event.set()
+
     async def pause_job(self, job_id: str) -> Dict[str, Any]:
         job = self.get_job(job_id)
         if not job:
@@ -2115,13 +2198,15 @@ class DownloadManager:
                 if getattr(job, "_reconnect_wait_start", None) is None:
                     job._reconnect_wait_start = now
 
-                reconnect_timeout = float(config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT") or 180.0)
+                raw_timeout = config.get("SINGLE_INTERFACE_RECONNECT_TIMEOUT")
+                reconnect_timeout = float(raw_timeout if raw_timeout is not None else 180.0)
                 elapsed_wait = now - job._reconnect_wait_start
 
-                if elapsed_wait < reconnect_timeout:
+                if reconnect_timeout <= 0 or elapsed_wait < reconnect_timeout:
                     job.status = "waiting_reconnect"
-                    remaining_secs = int(reconnect_timeout - elapsed_wait)
-                    job.error = f"All interfaces unavailable — waiting to reconnect ({remaining_secs}s remaining, resumable)"
+                    remaining_secs = int(reconnect_timeout - elapsed_wait) if reconnect_timeout > 0 else 0
+                    time_msg = f" ({remaining_secs}s remaining)" if reconnect_timeout > 0 else ""
+                    job.error = f"All interfaces unavailable — waiting to reconnect{time_msg} (resumable)"
                     await asyncio.sleep(0.2)
                     continue
                 else:

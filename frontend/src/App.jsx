@@ -364,11 +364,11 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
   const showSparkline = status.status === 'downloading' && !isPaused && activeIfacesList.length > 0 && chartData.length > 0;
 
   const isWaiting = status.is_waiting || status.status === 'waiting' || status.status === 'waiting_reconnect';
-  const waitingCountdown = status.waiting_remaining_s ? ` (${Math.round(status.waiting_remaining_s)}s)` : '';
+  const waitingCountdown = (status.waiting_remaining_s && status.waiting_remaining_s > 0) ? ` (${Math.round(status.waiting_remaining_s)}s)` : '';
   const statusLabel = isWaiting
-    ? `WAITING${waitingCountdown}${status.is_resumable ? ' [RESUMABLE]' : ''}`
+    ? `WAITING${waitingCountdown}`
     : (isPaused ? 'PAUSED' : (status.status === 'merging' ? 'MERGING...' : (status.status === 'fetching_metadata' ? 'FETCHING METADATA' : (status.status ? status.status.toUpperCase() : 'UNKNOWN'))));
-  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (status.status === 'fetching_metadata' ? 'paused' : (isPaused || isWaiting ? 'paused' : 'downloading'))));
+  const statusClass = status.status === 'completed' ? 'completed' : (status.status === 'failed' ? 'failed' : (status.status === 'merging' ? 'merging' : (status.status === 'fetching_metadata' ? 'paused' : (isWaiting ? 'waiting' : (isPaused ? 'paused' : 'downloading')))));
 
   const safeDownloaded = Math.max(0, status.total_downloaded ?? 0);
   const pct = Math.min(100, (safeDownloaded / Math.max(1, status.expected_size || 1)) * 100);
@@ -460,7 +460,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                 key={iface.ip_address}
                 className={`iface-pill ${isSelected ? 'active' : ''}`}
                 style={{
-                  opacity: isPaused ? 0.4 : 1,
+                  opacity: (!isSelected || live?.health === 'excluded') ? 0.45 : (isPaused ? 0.6 : 1),
                   filter: isPaused ? 'grayscale(60%)' : 'none',
                 }}
                 title={`${iface.name} (${iface.ip_address})${live?.bytes ? ` • ${formatBytes(live.bytes)}` : ''}${live?.health ? ` • Health: ${live.health}` : ''}`}
@@ -473,11 +473,6 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                 <div className="dot" style={{ background: isSelected ? tone.dot : 'var(--text-muted)' }} />
                 {shortName(iface.name, iface.interface_type)}
                 {isSelected && speed > 0 && <span style={{ opacity: 0.8 }}>{Number(speed).toFixed(1)} MB/s</span>}
-                {live?.health && live.health !== 'healthy' && (
-                  <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: live.health === 'excluded' ? 'var(--danger)' : 'var(--warning)', color: '#000', fontWeight: 600 }}>
-                    {live.health.toUpperCase()}
-                  </span>
-                )}
                 {isSelected && isShared && status.status === 'downloading' && <AlertTriangle size={12} style={{ color: 'var(--warning)', marginLeft: '2px' }} title="Shared with another download" />}
               </div>
             );
@@ -602,7 +597,9 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
       </div>
 
       <div className="dl-bottom">
-        {isPaused ? (
+        {isWaiting ? (
+          <span>Waiting to reconnect • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
+        ) : isPaused ? (
           <span>Paused • {safePct.toFixed(1)}%{status.is_resumable ? ' • Resumable' : ''}</span>
         ) : status.status === 'failed' ? (
           <span style={{ color: 'var(--danger)', fontWeight: 500 }}>
@@ -1047,9 +1044,25 @@ export default function App() {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission();
     }
-    const t1 = setInterval(fetchInterfaces, 15000);
+    const t1 = setInterval(fetchInterfaces, 5000);
     const t2 = setInterval(runSpeedtestSilent, 20000);
-    return () => { clearInterval(t1); clearInterval(t2); };
+
+    let ifaceWs = null;
+    try {
+      const ifaceWsUrl = `${API_BASE.replace(/^http/, "ws")}/ws/interfaces`;
+      ifaceWs = new WebSocket(ifaceWsUrl);
+      ifaceWs.onmessage = () => {
+        fetchInterfaces();
+      };
+    } catch { }
+
+    return () => {
+      clearInterval(t1);
+      clearInterval(t2);
+      if (ifaceWs) {
+        try { ifaceWs.close(); } catch { }
+      }
+    };
   }, []);
 
   const startDownload = async (forceUrl = null, forcePath = null) => {
@@ -2651,6 +2664,28 @@ export default function App() {
                     { key: "SLOW_INTERFACE_GRACE_PERIOD", label: "Slow grace period", unit: "sec", divisor: 1, step: 1, info: "How long an interface is allowed to stay below the min speed threshold before being paused. Prevents false positives on brief congestion." },
                   ].map(({ key, label, unit, divisor, step, info }) => {
                     const displayVal = Math.round((appSettings[key] ?? 0) / divisor * 100) / 100;
+                    return (
+                      <label key={key} className="setting-row">
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          {label}
+                          <InfoTooltip text={info} />
+                        </span>
+                        <div className="setting-input-wrap">
+                          <input type="number" value={displayVal} step={step} min={0} onChange={(e) => {
+                            const raw = Number(e.target.value) * divisor;
+                            setAppSettings(prev => ({ ...prev, [key]: raw }));
+                          }} />
+                          <span className="setting-unit">{unit}</span>
+                        </div>
+                      </label>
+                    );
+                  })}
+
+                  <div className="settings-section-title">Network Recovery</div>
+                  {[
+                    { key: "SINGLE_INTERFACE_RECONNECT_TIMEOUT", label: "Reconnect timeout", unit: "sec (0 = infinite)", divisor: 1, step: 30, info: "How long Burst waits to reconnect when network drops before marking download failed. Set to 0 for infinite/unlimited wait." },
+                  ].map(({ key, label, unit, divisor, step, info }) => {
+                    const displayVal = Math.round((appSettings[key] ?? 180) / divisor * 100) / 100;
                     return (
                       <label key={key} className="setting-row">
                         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>

@@ -593,6 +593,7 @@ input[type=number] {
 .status-badge.waiting {
   background: var(--surface-2);
   color: var(--text-muted);
+  border: 1px solid var(--border);
 }
 
 .dl-speed {
@@ -805,6 +806,11 @@ input[type=number] {
 
 .progress-fill.paused {
   background: var(--warning);
+}
+
+.progress-fill.waiting {
+  background: var(--text-muted);
+  opacity: 0.6;
 }
 
 .dl-bottom {

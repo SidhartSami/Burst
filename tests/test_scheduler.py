@@ -917,7 +917,59 @@ class TestScheduler(BaseHttpTest):
             self.assertIsNone(job.error)
             await self.manager.cancel_job(job.job_id)
 
+    # -----------------------------------------------------------------------
+    # Test ZO — Dynamic interface migration on network change (e.g. Wi-Fi switch)
+    # -----------------------------------------------------------------------
+    async def test_zo_handle_interface_change_migration(self):
+        job = DownloadJob(
+            job_id="test_zo_migration",
+            url=f"{self.base_url}/test_zo.bin",
+            output_path=str(self.out_dir / "zo_mig.bin"),
+            expected_size=1024,
+            supports_ranges=True,
+            status="downloading",
+        )
+        job._queue = asyncio.Queue()
+        job._chunk_files = {}
+        old_ip = "192.168.1.100"
+        new_ip = "192.168.0.50"
+        job.progress[old_ip] = InterfaceProgress(name="Wi-Fi", ip_address=old_ip, chunk_start=0, chunk_end=1023)
+        self.manager.jobs[job.job_id] = job
+
+        # Simulate Wi-Fi network switch
+        removed = [{"name": "Wi-Fi", "ip_address": old_ip}]
+        added = [{"name": "Wi-Fi", "ip_address": new_ip}]
+        await self.manager.handle_interface_change(added, removed)
+
+        # Old IP should be purged from job.progress
+        self.assertNotIn(old_ip, job.progress)
+        # New IP should be actively added
+        self.assertIn(new_ip, job.progress)
+        self.assertEqual(job.progress[new_ip].name, "Wi-Fi")
+        await self.manager.cancel_job(job.job_id)
+
+    # -----------------------------------------------------------------------
+    # Test ZP — Zero/Infinite reconnect timeout does not report remaining countdown
+    # -----------------------------------------------------------------------
+    async def test_zp_infinite_reconnect_timeout(self):
+        job = DownloadJob(
+            job_id="test_zp_infinite",
+            url=f"{self.base_url}/test_zp.bin",
+            output_path=str(self.out_dir / "zp_inf.bin"),
+            expected_size=1024,
+            supports_ranges=True,
+            status="waiting_reconnect",
+            error="All interfaces unavailable — waiting to reconnect (resumable)",
+        )
+        job._reconnect_wait_start = time.time() - 3600.0  # 1 hour ago
+        job._reconnect_wait_max = 0.0  # 0 = infinite
+
+        d = job.to_dict()
+        self.assertEqual(d["status"], "waiting_reconnect")
+        self.assertEqual(d["waiting_remaining_s"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
