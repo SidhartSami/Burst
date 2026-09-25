@@ -116,15 +116,48 @@ function shortName(name, type) {
   return name || "Adapter";
 }
 
-function toneFor(name) {
-  const lowered = String(name || "").toLowerCase();
-  if (/(wi-?fi|wireless|wlan)/i.test(lowered)) {
-    return { dot: "var(--wifi-color)" };
+export const ORANGE_PALETTE = [
+  "#f97316", // 0: Vivid Brand Orange (fiery red-orange)
+  "#f59e0b", // 1: Golden Amber (warm honey gold — high contrast against #f97316)
+  "#c2410c", // 2: Deep Burnt Rust (dark rich terracotta — high contrast)
+  "#fb923c", // 3: Bright Tangerine / Peach
+  "#d97706", // 4: Rich Dark Amber
+  "#ea580c", // 5: Fiery Flame Orange
+  "#fb7185", // 6: Coral Warm Rose
+  "#9a3412", // 7: Dark Brick Bronze
+];
+
+export function getInterfaceColor(ipOrName, availableInterfaces = []) {
+  if (!ipOrName) return "var(--accent)";
+  if (ipOrName === "resume") return "#64748b"; // Slate gray for resumed / pre-existing chunks
+
+  const list = availableInterfaces || [];
+  // Match by IP or by name in available interfaces to get unique index
+  const idx = list.findIndex(
+    i => i && (i.ip_address === ipOrName || i.name === ipOrName)
+  );
+
+  if (idx !== -1) {
+    return ORANGE_PALETTE[idx % ORANGE_PALETTE.length];
   }
-  if (/(phone|usb|rndis|mobile|samsung|huawei|xiaomi)/i.test(lowered)) {
-    return { dot: "var(--ethernet-color)" };
+
+  // Type / name heuristics if no list match
+  const lowered = String(ipOrName).toLowerCase();
+  if (/(wi-?fi|wireless|wlan)/i.test(lowered)) return ORANGE_PALETTE[1]; // Golden amber for Wi-Fi
+  if (/(phone|usb|rndis|mobile|samsung|huawei|xiaomi)/i.test(lowered)) return ORANGE_PALETTE[0]; // Brand orange for Phone
+  if (/ethernet/i.test(lowered)) return ORANGE_PALETTE[2]; // Deep rust for Ethernet
+
+  // Deterministic fallback based on string hash for unknown IPs
+  let hash = 0;
+  for (let i = 0; i < ipOrName.length; i++) {
+    hash = (hash * 31 + ipOrName.charCodeAt(i)) >>> 0;
   }
-  return { dot: "var(--extra-color)" };
+  return ORANGE_PALETTE[hash % ORANGE_PALETTE.length];
+}
+
+function toneFor(name, ip, availableInterfaces = []) {
+  const color = ip ? getInterfaceColor(ip, availableInterfaces) : getInterfaceColor(name, availableInterfaces);
+  return { dot: color };
 }
 
 function readDroppedUrl(event) {
@@ -476,7 +509,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
             if (isOptimistic && isOptimistic.ip === iface.ip_address) isSelected = isOptimistic.selected;
 
             const speed = isPaused ? 0 : (live?.speed_mb_s || 0);
-            const tone = toneFor(shortName(iface.name, iface.interface_type));
+            const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, uniqueAvailableInterfaces);
             const isShared = allUsedIps.filter(ip => ip === iface.ip_address).length > 1;
 
             return (
@@ -556,7 +589,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                 margin={{ top: 2, right: 0, left: 0, bottom: 2 }}
               >
                 {activeIfacesList.map(iface => {
-                  const tone = toneFor(shortName(iface.name, iface.interface_type));
+                  const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, uniqueAvailableInterfaces);
                   const color = tone.dot;
                   return (
                     <Area
@@ -587,27 +620,34 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
               <span>Workers: {status.workers.filter(w => w.status === 'downloading').length} active / {status.workers.length}</span>
             )}
           </div>
-          <div style={{ display: 'flex', gap: '1px', height: '6px', width: '100%', borderRadius: '3px', overflow: 'hidden', background: 'var(--border)' }}>
+          <div style={{ display: 'flex', gap: '1px', height: '8px', width: '100%', borderRadius: '4px', overflow: 'hidden', background: 'var(--border)' }}>
             {status.chunk_map.is_aggregated ? (
               status.chunk_map.buckets.map((b) => {
-                const ifaceColor = b.dominant_interface ? (toneFor(shortName(b.dominant_interface))?.dot || 'var(--accent)') : 'transparent';
-                const opacity = b.percent > 0 ? Math.max(0.2, b.percent / 100) : 0;
+                const ifaceColor = b.dominant_interface ? getInterfaceColor(b.dominant_interface, uniqueAvailableInterfaces) : 'transparent';
+                const opacity = b.percent > 0 ? Math.max(0.35, b.percent / 100) : 0;
+                const domIface = uniqueAvailableInterfaces.find(i => i.ip_address === b.dominant_interface);
+                const domLabel = domIface ? `${shortName(domIface.name, domIface.interface_type)} (${b.dominant_interface})` : (b.dominant_interface || 'none');
                 return (
                   <div
                     key={b.bucket_index}
                     style={{ flex: 1, height: '100%', backgroundColor: opacity > 0 ? ifaceColor : 'transparent', opacity: opacity || 0.1 }}
-                    title={`Bucket ${b.bucket_index} (chunks ${b.start_chunk}..${b.end_chunk}): ${b.committed_count}/${b.total_chunks} (${b.percent}%) • Dominant: ${b.dominant_interface || 'none'}`}
+                    title={`Bucket ${b.bucket_index} (chunks ${b.start_chunk}..${b.end_chunk}): ${b.committed_count}/${b.total_chunks} (${b.percent}%) • Dominant: ${domLabel}`}
                   />
                 );
               })
             ) : (
               Object.entries(status.chunk_map.chunks || {}).map(([cid, chk]) => {
-                const ifaceColor = chk.committed_interface ? (toneFor(shortName(chk.committed_interface))?.dot || 'var(--accent)') : (chk.status === 'DOWNLOADING' ? 'var(--warning)' : 'transparent');
+                const isCommitted = chk.status === 'COMPLETE' || !!chk.committed_interface;
+                const ifaceColor = chk.committed_interface
+                  ? getInterfaceColor(chk.committed_interface, uniqueAvailableInterfaces)
+                  : (chk.status === 'DOWNLOADING' ? 'var(--warning)' : 'transparent');
+                const chkIface = uniqueAvailableInterfaces.find(i => i.ip_address === chk.committed_interface);
+                const chkLabel = chkIface ? `${shortName(chkIface.name, chkIface.interface_type)} (${chk.committed_interface})` : (chk.committed_interface || '');
                 return (
                   <div
                     key={cid}
-                    style={{ flex: 1, height: '100%', backgroundColor: ifaceColor || 'transparent', opacity: chk.committed_interface ? 1 : (chk.status === 'DOWNLOADING' ? 0.7 : 0.1) }}
-                    title={`Chunk ${cid}: ${chk.status} ${chk.committed_interface ? `by ${chk.committed_interface}` : (chk.assigned_interface ? `assigned to ${chk.assigned_interface}` : '')}`}
+                    style={{ flex: 1, height: '100%', backgroundColor: ifaceColor || 'transparent', opacity: isCommitted ? 1 : (chk.status === 'DOWNLOADING' ? 0.7 : 0.1) }}
+                    title={`Chunk ${cid}: ${chk.status} ${chk.committed_interface ? `by ${chkLabel}` : (chk.assigned_interface ? `assigned to ${chk.assigned_interface}` : '')}`}
                   />
                 );
               })
@@ -2477,7 +2517,7 @@ export default function App() {
                     <tr className="conn-row" key={iface.ip_address}>
                       <td>
                         <div className="conn-name">
-                          <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type)).dot }} />
+                          <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces).dot }} />
                           {iface.name || iface.ip_address}
                           <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
                         </div>

@@ -29,8 +29,8 @@
   --danger-dim: rgba(220, 38, 38, 0.1);
 
   --ethernet-color: #f97316;
-  --wifi-color: #fb923c;
-  --extra-color: #fdba74;
+  --wifi-color: #f59e0b;
+  --extra-color: #c2410c;
 
   --sidebar-hover: rgba(0, 0, 0, 0.04);
   --sidebar-selected: rgba(0, 0, 0, 0.08);
@@ -59,8 +59,8 @@
   --danger-dim: rgba(248, 113, 113, 0.15);
 
   --ethernet-color: #f97316;
-  --wifi-color: #fb923c;
-  --extra-color: #fdba74;
+  --wifi-color: #f59e0b;
+  --extra-color: #c2410c;
 
   --sidebar-hover: rgba(255, 255, 255, 0.04);
   --sidebar-selected: rgba(255, 255, 255, 0.08);
