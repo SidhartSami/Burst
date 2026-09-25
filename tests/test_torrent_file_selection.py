@@ -1162,6 +1162,154 @@ class TestTorrentFileSelection(unittest.IsolatedAsyncioTestCase):
         ses = lt.session(settings)
         self.assertIsNotNone(ses)
 
+    # -----------------------------------------------------------------------
+    # Test 20: Inspect torrent with base64 and file:// URIs
+    # -----------------------------------------------------------------------
+    def test_inspect_torrent_base64_and_file_uri(self):
+        import base64
+        with open(self.torrent_file, "rb") as f:
+            b64_content = base64.b64encode(f.read()).decode("utf-8")
+        
+        # Test base64:filename:data
+        res_b64 = inspect_torrent(f"base64:test_multi.torrent:{b64_content}")
+        self.assertEqual(res_b64["name"], "multi_file_torrent")
+        self.assertEqual(res_b64["num_files"], 3)
+        self.assertEqual(len(res_b64["files"]), 3)
+
+        # Test data:application/x-bittorrent;base64,data
+        res_data = inspect_torrent(f"data:application/x-bittorrent;base64,{b64_content}")
+        self.assertEqual(res_data["name"], "multi_file_torrent")
+        self.assertEqual(res_data["num_files"], 3)
+
+        # Test file:// URI
+        file_uri = "file:///" + self.torrent_file.replace("\\", "/")
+        res_uri = inspect_torrent(file_uri)
+        self.assertEqual(res_uri["name"], "multi_file_torrent")
+        self.assertEqual(res_uri["num_files"], 3)
+
+    # -----------------------------------------------------------------------
+    # Test 21: TorrentJob set_output_path
+    # -----------------------------------------------------------------------
+    async def test_torrent_job_set_output_path(self):
+        job = TorrentJob(
+            self.torrent_file,
+            self.out_dir,
+            ["127.0.0.1"],
+            job_id="test_set_path_job",
+        )
+        new_dir = os.path.join(self.dir_path, "new_downloads")
+        res = await job.set_output_path(new_dir)
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(job.output_path, os.path.normpath(new_dir))
+        self.assertTrue(os.path.exists(new_dir))
+
+    # -----------------------------------------------------------------------
+    # Test 22: API endpoints for disk space, inspect base64, and output path update
+    # -----------------------------------------------------------------------
+    async def test_modal_api_endpoints(self):
+        from fastapi.testclient import TestClient
+        from main import app
+
+        client = TestClient(app)
+
+        # 1. GET /disk-space
+        resp = client.get(f"/disk-space?path={self.dir_path}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("free_bytes", data)
+        self.assertIn("total_bytes", data)
+        self.assertGreater(data["free_bytes"], 0)
+
+        # 2. POST /torrent/inspect with base64
+        import base64
+        with open(self.torrent_file, "rb") as f:
+            b64_content = base64.b64encode(f.read()).decode("utf-8")
+        resp_inspect = client.post("/torrent/inspect", json={"torrent_path": f"base64:test.torrent:{b64_content}"})
+        self.assertEqual(resp_inspect.status_code, 200)
+        self.assertEqual(resp_inspect.json()["name"], "multi_file_torrent")
+
+        # 3. POST /torrent/{job_id}/path
+        job = await start_torrent_download(
+            magnet_uri=self.torrent_file,
+            output_path=self.out_dir,
+            interface_ips=["127.0.0.1"],
+        )
+        await asyncio.sleep(0.1)
+
+        new_path = os.path.join(self.dir_path, "updated_via_api")
+        resp_path = client.post(f"/torrent/{job.job_id}/path", json={"path": new_path})
+        self.assertEqual(resp_path.status_code, 200)
+        self.assertEqual(resp_path.json()["status"], "success")
+        self.assertEqual(job.output_path, os.path.normpath(new_path))
+        job._running = False
+
+    # -----------------------------------------------------------------------
+    # Test 23: Quoted paths, single quotes, and file:// URIs in inspection & download
+    # -----------------------------------------------------------------------
+    async def test_quoted_paths_and_file_uris(self):
+        # Double quoted path
+        double_quoted = f'"{self.torrent_file}"'
+        info1 = inspect_torrent(double_quoted)
+        self.assertEqual(info1["name"], "multi_file_torrent")
+
+        # Single quoted path
+        single_quoted = f"'{self.torrent_file}'"
+        info2 = inspect_torrent(single_quoted)
+        self.assertEqual(info2["name"], "multi_file_torrent")
+
+        # file:// URI
+        file_uri = f"file:///{self.torrent_file.replace(os.sep, '/')}"
+        info3 = inspect_torrent(file_uri)
+        self.assertEqual(info3["name"], "multi_file_torrent")
+
+        # Start download with quoted path
+        job = await start_torrent_download(
+            magnet_uri=double_quoted,
+            output_path=self.out_dir,
+            interface_ips=["127.0.0.1"],
+            wait_for_selection=True,
+        )
+        self.assertTrue(job.wait_for_selection)
+        self.assertEqual(job.to_dict()["wait_for_selection"], True)
+        job._running = False
+
+    # -----------------------------------------------------------------------
+    # Test 24: is_torrent_source helper and POST /download torrent auto-detection
+    # -----------------------------------------------------------------------
+    async def test_is_torrent_source_and_download_endpoint(self):
+        from fastapi.testclient import TestClient
+        from main import app, is_torrent_source
+
+        # Test is_torrent_source
+        self.assertTrue(is_torrent_source(f'"{self.torrent_file}"'))
+        self.assertTrue(is_torrent_source(f"'{self.torrent_file}'"))
+        self.assertTrue(is_torrent_source("https://example.com/test.torrent?token=123"))
+        self.assertTrue(is_torrent_source("magnet:?xt=urn:btih:abcdef"))
+        self.assertFalse(is_torrent_source("https://example.com/file.zip"))
+        self.assertFalse(is_torrent_source(""))
+
+        # Test POST /torrent/inspect with quoted path
+        client = TestClient(app)
+        resp_quoted = client.post("/torrent/inspect", json={"torrent_path": f'"{self.torrent_file}"'})
+        self.assertEqual(resp_quoted.status_code, 200)
+        self.assertEqual(resp_quoted.json()["name"], "multi_file_torrent")
+
+        # Test POST /download with a .torrent file auto-routes to torrent with wait_for_selection=True
+        with patch("main._interfaces_by_ip", return_value={"127.0.0.1": MagicMock()}):
+            resp_dl = client.post("/download", json={
+                "url": f'"{self.torrent_file}"',
+                "output_path": self.out_dir,
+                "interface_ips": ["127.0.0.1"],
+            })
+            self.assertEqual(resp_dl.status_code, 200)
+            data = resp_dl.json()
+            self.assertEqual(data["type"], "torrent")
+            job = active_torrents.get(data["job_id"])
+            self.assertIsNotNone(job)
+            self.assertTrue(job.wait_for_selection)
+            job._running = False
+
 
 if __name__ == "__main__":
     unittest.main()
+

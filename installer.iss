@@ -1,10 +1,14 @@
 [Setup]
 AppName=Burst
 AppVersion=2.0.0
-AppVerName=Burst
+AppVerName=Burst v2.0.0
 AppPublisher=SidhartSami
+AppPublisherURL=https://github.com/SidhartSami/Burst
+AppSupportURL=https://github.com/SidhartSami/Burst/issues
+AppUpdatesURL=https://github.com/SidhartSami/Burst/releases
 DefaultDirName={autopf}\Burst
 DefaultGroupName=Burst
+SetupIconFile=assets\logo.ico
 UninstallDisplayIcon={app}\Burst.exe
 Compression=lzma2
 SolidCompression=yes
@@ -13,9 +17,10 @@ OutputBaseFilename=Burst_Setup_v2.0.0
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 UsedUserAreasWarning=no
+WizardStyle=modern
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "chromeext"; Description: "Enable Chrome/Edge Integration"; GroupDescription: "Browser Extensions:"; Flags: unchecked
 Name: "firefoxext"; Description: "Enable Firefox/Zen Integration"; GroupDescription: "Browser Extensions:"; Flags: unchecked
 
@@ -24,6 +29,7 @@ Name: "firefoxext"; Description: "Enable Firefox/Zen Integration"; GroupDescript
 Source: "dist\Burst\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; We also include the logo in the install folder just in case
 Source: "assets\logo.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Native messaging host
 Source: "dist\native_host.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\native_host.py";           DestDir: "{app}"; Flags: ignoreversion
@@ -31,8 +37,8 @@ Source: "backend\native_host.bat";          DestDir: "{app}"; Flags: ignoreversi
 Source: "backend\com.burst.download.manager.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\com.burst.download.manager.firefox.json"; DestDir: "{app}"; Flags: ignoreversion
 ; Package the extensions so they are automatically unpacked for the user to load
-Source: "extension-chrome\*"; DestDir: "{app}\extension-chrome"; Excludes: "*.pem"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: chromeext
-Source: "extension-firefox\*"; DestDir: "{app}\extension-firefox"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: firefoxext
+Source: "extension-chrome\*"; DestDir: "{app}\extension-chrome"; Excludes: "*.pem"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "extension-firefox\*"; DestDir: "{app}\extension-firefox"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; -- Chrome Native Messaging Host --

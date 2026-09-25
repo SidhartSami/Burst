@@ -45,6 +45,63 @@ def _sanitize_path(path: str) -> str:
         clean.append(part)
     return drive + os.sep.join(clean)
 
+
+def _get_libtorrent_save_path(output_path: str, ti: Optional[lt.torrent_info] = None) -> str:
+    """If multi-file torrent has root folder matching the basename of output_path,
+    return the parent directory so libtorrent writes directly into output_path rather
+    than creating a duplicate nested directory."""
+    try:
+        if not ti or ti.num_files() <= 1:
+            return output_path
+        out_norm = os.path.normpath(output_path)
+        ti_name_norm = os.path.normpath(ti.name())
+        if os.path.basename(out_norm).lower() == os.path.basename(ti_name_norm).lower():
+            parent = os.path.dirname(out_norm)
+            if parent:
+                return parent
+    except Exception:
+        pass
+    return output_path
+
+
+def _clean_release_name(raw: str) -> str:
+    """Clean release name: remove Windows-illegal characters, sizes, versions,
+    DLCs, and extra edition clutter while preserving main title and group tags like [FitGirl Repack]."""
+    if not raw:
+        return "torrent-download"
+    s = raw.strip()
+    
+    # 1. Replace Windows-illegal characters
+    for ch in [':', '*', '?', '"', '<', '>', '|']:
+        s = s.replace(ch, ' - ' if ch == ':' else '')
+    
+    # 2. Extract [Tag] at the end if present (e.g. [FitGirl Repack], [DODI Repack])
+    tag_match = re.search(r'\[([^\]]*(?:fitgirl|repack|dodi|elamigos|gog|rg|empress|skidrow|codex|flt|tenoke)[^\]]*)\]', s, flags=re.I)
+    group_tag = ''
+    if tag_match:
+        tag_inner = re.sub(r',?\s*\d+(?:\.\d+)?\s*(?:GB|MB|TB|GiB|MiB)', '', tag_match.group(1), flags=re.I).strip(' ,')
+        group_tag = f'[{tag_inner}]'
+        s = s[:tag_match.start()] + s[tag_match.end():]
+        
+    # 3. Remove sizes like 10.4 GB, [10.4 GB], (10.4 GB)
+    s = re.sub(r'\[?\s*\d+(?:\.\d+)?\s*(?:GB|MB|TB|GiB|MiB)\s*\]?', '', s, flags=re.I)
+    
+    # 4. Remove version/DLC/patch/build/multi info in parens: (v1.4.00... MULTi5)
+    s = re.sub(r'\s*\([^)]*(?:v\d|patch|dlc|multi|build|update|\.0|\.1|\.2|\.3|\.4|\.5|\.6|\.7|\.8|\.9)[^)]*\)', '', s, flags=re.I)
+    
+    # 5. Remove edition prefixes before version parens, e.g. ' - Praetor Edition', ' - Deluxe Edition'
+    s = re.sub(r'\s*-\s*[A-Za-z0-9\s]+Edition\b', '', s, flags=re.I)
+
+    # 6. Re-attach group tag if present
+    if group_tag:
+        s = s.strip(' -–—') + ' ' + group_tag
+        
+    # 7. Normalize spaces and dashes
+    s = re.sub(r'\s*-\s*-\s*', ' - ', s)
+    s = re.sub(r'\s{2,}', ' ', s).strip(' -–—')
+    return s or "torrent-download"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -476,6 +533,22 @@ class TorrentJob:
             return {"status": "no_files_matched", "dir_path": dir_path, "file_priorities": self.file_priorities}
         return await self.set_file_priorities(matching)
 
+    async def set_output_path(self, new_path: str) -> dict:
+        """Update destination save path for this torrent job."""
+        final_path = _sanitize_path(new_path)
+        self.output_path = final_path
+        try:
+            Path(final_path).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"[TORRENT] Error creating directory {final_path}: {e}")
+        save_dir = _get_libtorrent_save_path(final_path, self._torrent_info)
+        for ip, h in list(self.handles):
+            try:
+                h.move_storage(save_dir)
+            except Exception as e:
+                print(f"[TORRENT] Error moving storage to {save_dir}: {e}")
+        return {"status": "success", "output_path": self.output_path}
+
     def to_dict(self) -> dict:
         rem_bytes = max(0, (self.selected_size if self.selected_size > 0 else self.total_size) - self.selected_downloaded)
         eta_sec = (
@@ -536,6 +609,7 @@ class TorrentJob:
             "boosted": self.boosted,
             "file_priorities": self.file_priorities,
             "files": self.get_files() if self._torrent_info else [],
+            "wait_for_selection": self.wait_for_selection,
         }
 
     def _extract_name(self, magnet_uri: str) -> str:
@@ -547,10 +621,10 @@ class TorrentJob:
                 params = urllib.parse.parse_qs(qs)
                 names = params.get("dn", [])
                 if names:
-                    return names[0]
+                    return _clean_release_name(names[0])
             elif magnet_uri.endswith(".torrent"):
                 from pathlib import Path
-                return Path(magnet_uri).stem
+                return _clean_release_name(Path(magnet_uri).stem)
         except:
             pass
         return "torrent"
@@ -571,7 +645,7 @@ class TorrentJob:
         _bootstrap_dht(ses)
         atp = lt.add_torrent_params()
         atp.ti = lt.torrent_info(self._torrent_info)
-        atp.save_path = self.output_path
+        atp.save_path = _get_libtorrent_save_path(self.output_path, self._torrent_info)
         atp.storage_mode = lt.storage_mode_t.storage_mode_sparse
         if self.file_priorities:
             num = self._torrent_info.num_files()
@@ -691,7 +765,7 @@ async def start_torrent_download(
 ) -> TorrentJob:
     # Normalize local torrent file path if it is a file URI or base64 data, or download remote torrent files
     _init_lt()
-    normalized_uri = magnet_uri.strip()
+    normalized_uri = magnet_uri.strip().strip('"').strip("'")
     if normalized_uri.startswith("file:///"):
         normalized_uri = normalized_uri[8:]
     elif normalized_uri.startswith("file://"):
@@ -710,14 +784,17 @@ async def start_torrent_download(
             normalized_uri = temp_path
         except Exception as e:
             print(f"[TORRENT] Failed to decode base64 torrent: {e}")
-    elif normalized_uri.startswith(("http://", "https://")) and (normalized_uri.endswith(".torrent") or ".torrent" in normalized_uri.split("?")[0]):
+    elif normalized_uri.startswith(("http://", "https://")) and (normalized_uri.lower().endswith(".torrent") or ".torrent" in normalized_uri.lower().split("?")[0]):
         try:
             import requests
             import tempfile
-            r = requests.get(normalized_uri, timeout=15, verify=False)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            r = requests.get(normalized_uri, headers=headers, timeout=15, verify=False)
             r.raise_for_status()
             filename = normalized_uri.split("/")[-1].split("?")[0] or "download.torrent"
-            if not filename.endswith(".torrent"):
+            if not filename.lower().endswith(".torrent"):
                 filename += ".torrent"
             temp_dir = tempfile.gettempdir()
             temp_path = os.path.join(temp_dir, filename)
@@ -730,10 +807,10 @@ async def start_torrent_download(
     
     import urllib.parse
     normalized_uri = urllib.parse.unquote(normalized_uri)
-    if normalized_uri.endswith(".torrent") or os.path.exists(normalized_uri):
+    if normalized_uri.lower().endswith(".torrent") or os.path.exists(normalized_uri):
         normalized_uri = os.path.normpath(normalized_uri)
 
-    if not (normalized_uri.startswith("magnet:") or (normalized_uri.endswith(".torrent") and os.path.exists(normalized_uri))):
+    if not (normalized_uri.startswith("magnet:") or (normalized_uri.lower().endswith(".torrent") and os.path.exists(normalized_uri))):
         raise ValueError(f"Unsupported torrent source: '{normalized_uri}'. Expected magnet link or valid .torrent file.")
         
     magnet_uri = normalized_uri
@@ -777,14 +854,55 @@ async def start_torrent_download(
 
 
 def inspect_torrent(torrent_path_or_uri: str) -> dict:
-    """Inspect a .torrent file or local path to extract file list and metadata before downloading."""
+    """Inspect a .torrent file, local path, base64 data, or remote URL to extract file list and metadata before downloading."""
     _init_lt()
-    path = torrent_path_or_uri.strip()
+    path = torrent_path_or_uri.strip().strip('"').strip("'")
     if path.startswith("file:///"):
         path = path[8:]
     elif path.startswith("file://"):
         path = path[7:]
-    
+    elif path.startswith("base64:"):
+        import base64
+        import tempfile
+        parts = path.split(":", 2)
+        filename = parts[1] if len(parts) > 2 else "temp.torrent"
+        b64_data = parts[2] if len(parts) > 2 else parts[1]
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, filename if filename.lower().endswith(".torrent") else filename + ".torrent")
+        with open(temp_path, "wb") as temp_file:
+            temp_file.write(base64.b64decode(b64_data))
+        path = temp_path
+    elif path.startswith("data:application/x-bittorrent;base64,") or path.startswith("data:;base64,"):
+        import base64
+        import tempfile
+        b64_data = path.split(",", 1)[1]
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, "uploaded.torrent")
+        with open(temp_path, "wb") as temp_file:
+            temp_file.write(base64.b64decode(b64_data))
+        path = temp_path
+    elif path.startswith(("http://", "https://")) and (path.lower().endswith(".torrent") or ".torrent" in path.lower().split("?")[0]):
+        import requests
+        import tempfile
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(path, headers=headers, timeout=15, verify=False)
+        r.raise_for_status()
+        filename = path.split("/")[-1].split("?")[0] or "download.torrent"
+        if not filename.lower().endswith(".torrent"):
+            filename += ".torrent"
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, filename)
+        with open(temp_path, "wb") as temp_file:
+            temp_file.write(r.content)
+        path = temp_path
+
+    import urllib.parse
+    path = urllib.parse.unquote(path)
+    if os.path.exists(path):
+        path = os.path.normpath(path)
+
     ti = lt.torrent_info(path)
     files = []
     for i in range(ti.num_files()):
@@ -802,6 +920,7 @@ def inspect_torrent(torrent_path_or_uri: str) -> dict:
         "piece_length": ti.piece_length(),
         "num_pieces": ti.num_pieces(),
         "files": files,
+        "normalized_path": path,
     }
 
 
@@ -958,6 +1077,8 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
     num = ti.num_files()
     job.torrent_total_size = ti.total_size()
     job.total_size = ti.total_size()
+    if ti.name():
+        job.filename = ti.name()
     if job.file_priorities:
         job.selected_size = sum(ti.files().file_size(i) for i in range(num) if job.file_priorities.get(i, 4) > 0)
     else:
@@ -982,7 +1103,7 @@ async def _run_torrent(job: TorrentJob, bandwidth_limits: dict):
                 _bootstrap_dht(ses)
             atp = lt.add_torrent_params()
             atp.ti = lt.torrent_info(ti)
-            atp.save_path = job.output_path
+            atp.save_path = _get_libtorrent_save_path(job.output_path, ti)
             atp.storage_mode = lt.storage_mode_t.storage_mode_sparse
             if job.file_priorities:
                 atp.file_priorities = [job.file_priorities.get(i, 4) for i in range(num)]

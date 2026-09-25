@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ResponsiveContainer, AreaChart, Area } from "recharts";
 import { friendlyError } from "./utils/errors";
 import SchedulePicker from "./components/SchedulePicker";
+import TorrentAddModal, { cleanReleaseTitle } from "./TorrentAddModal";
 import {
   AlertTriangle,
   AlertCircle,
@@ -17,6 +18,7 @@ import {
   History,
   Search,
   FolderOpen,
+  FileText,
   Minus,
   Square,
   Play,
@@ -160,24 +162,48 @@ function toneFor(name, ip, availableInterfaces = []) {
   return { dot: color };
 }
 
+function cleanInputPath(str) {
+  if (!str) return "";
+  return String(str).trim().replace(/^["']|["']$/g, "").trim();
+}
+
+function isTorrentSource(str) {
+  if (!str) return false;
+  const clean = cleanInputPath(str);
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower.startsWith("magnet:") || lower.startsWith("base64:") || lower.startsWith("data:")) return true;
+  if (lower.endsWith(".torrent")) return true;
+  if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("file://")) {
+    const urlWithoutQuery = lower.split("?")[0].split("#")[0];
+    if (urlWithoutQuery.endsWith(".torrent")) return true;
+  }
+  return false;
+}
+
 function readDroppedUrl(event) {
   // Accept magnet links, http/https URLs, file:/// paths, or local files
   const uriList = event.dataTransfer.getData("text/uri-list");
   if (uriList) {
     const found = uriList.split("\n").find((line) => {
-      const trimmed = line.trim();
-      return trimmed.startsWith("http") || trimmed.startsWith("magnet:") || trimmed.startsWith("file://");
+      const trimmed = cleanInputPath(line);
+      return trimmed.startsWith("http") || trimmed.startsWith("magnet:") || trimmed.startsWith("file://") || isTorrentSource(trimmed);
     });
-    if (found) return found.trim();
+    if (found) return cleanInputPath(found);
   }
-  const plainText = event.dataTransfer.getData("text/plain").trim();
-  if (plainText && (/^https?:\/\//i.test(plainText) || plainText.startsWith("magnet:") || plainText.startsWith("file://"))) return plainText;
+  const plainText = event.dataTransfer.getData("text/plain");
+  if (plainText) {
+    const cleaned = cleanInputPath(plainText);
+    if (/^https?:\/\//i.test(cleaned) || cleaned.startsWith("magnet:") || cleaned.startsWith("file://") || isTorrentSource(cleaned)) {
+      return cleaned;
+    }
+  }
 
   // Check files array for dropped files ( WebView2 exposes file.path )
   if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
     const file = event.dataTransfer.files[0];
-    if (file.name.endsWith(".torrent") || file.path?.endsWith(".torrent")) {
-      if (file.path) return file.path;
+    if (file.name.toLowerCase().endsWith(".torrent") || file.path?.toLowerCase().endsWith(".torrent")) {
+      if (file.path) return cleanInputPath(file.path);
     }
   }
   return "";
@@ -701,7 +727,11 @@ export default function App() {
   const [renderedInterfaces, setRenderedInterfaces] = useState([]);
   const [selectedIps, setSelectedIps] = useState([]);
   const [url, setUrl] = useState("");
-  const [outputPath, setOutputPath] = useState("C:/Burst-Downloads/burst-download.bin");
+  const [outputPath, setOutputPath] = useState(() => {
+    const saved = localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/";
+    return saved.endsWith("/") || saved.endsWith("\\") ? saved : saved + "/";
+  });
+  const userEditedMainPathRef = useRef(false);
   const [activeJobs, setActiveJobs] = useState([]);
   const [expandedGraphs, setExpandedGraphs] = useState({});
   const hasShownGraphHintRef = useRef(false);
@@ -771,6 +801,49 @@ export default function App() {
   const [batchError, setBatchError] = useState(null);
   const [batchSearchQuery, setBatchSearchQuery] = useState("");
 
+  // Add Torrent modal dialog state
+  const [torrentModalData, setTorrentModalData] = useState(null); // null | { job_id, name, total_size, files, is_magnet, magnet_uri, output_path, peers }
+
+  const torrentFileInputRef = useRef(null);
+
+  const handlePickTorrentFile = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/select-torrent-file`);
+      const data = await resp.json();
+      if (data?.path) {
+        const cleanPath = cleanInputPath(data.path);
+        handleUrlChange(cleanPath);
+        await handleOpenTorrentModal(cleanPath);
+        return;
+      }
+      if (data?.error) {
+        torrentFileInputRef.current?.click();
+      }
+    } catch {
+      torrentFileInputRef.current?.click();
+    }
+  };
+
+  const handleTorrentFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+
+    if (file.path) {
+      const cleanPath = cleanInputPath(file.path);
+      handleUrlChange(cleanPath);
+      handleOpenTorrentModal(cleanPath, file.name.replace(/\.torrent$/i, ""));
+    } else {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64Data = reader.result.split(",")[1];
+        const torrentUri = `base64:${file.name}:${base64Data}`;
+        handleUrlChange(torrentUri);
+        await handleOpenTorrentModal(torrentUri, file.name.replace(/\.torrent$/i, ""));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   const jobSocketsRef = useRef({});
   const dragCounter = useRef(0);
@@ -964,54 +1037,54 @@ export default function App() {
   const handleUrlChange = (newUrl) => {
     setUrl(newUrl);
 
-    // Reliable base-dir extractor: works whether outputPath ends with a
-    // filename or a trailing slash.
-    const getBaseDir = () => {
-      const p = outputPath || "";
-      // If it already ends with a separator it IS a directory
-      if (p.endsWith("/") || p.endsWith("\\")) return p;
-      // Otherwise strip the last component
-      const parts = p.split(/[\\/]/);
-      parts.pop();
-      const dir = parts.join("\\");
-      return dir ? dir + "\\" : "C:\\Burst-Downloads\\";
-    };
-
     // Always fall back to the settings download path as authoritative base
     const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
     const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
 
-    const isTorrent = newUrl.trim().startsWith("magnet:") || newUrl.trim().endsWith(".torrent") || newUrl.trim().startsWith("file://") || newUrl.trim().startsWith("base64:");
+    if (!newUrl || !newUrl.trim()) {
+      userEditedMainPathRef.current = false;
+      setOutputPath(safeSettingsBase);
+      return;
+    }
+
+    if (userEditedMainPathRef.current) {
+      // User explicitly typed a custom path; preserve it
+      return;
+    }
+
+    const clean = cleanInputPath(newUrl);
+    const isTorrent = isTorrentSource(clean);
     if (isTorrent) {
-      let torrentName = "torrent-download";
-      const magnetNameMatch = newUrl.match(/dn=([^&]+)/);
+      let rawName = "torrent-download";
+      const magnetNameMatch = clean.match(/dn=([^&]+)/);
       if (magnetNameMatch) {
-        torrentName = decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, " ").trim() || "torrent-download";
-      } else if (newUrl.toLowerCase().endsWith(".torrent")) {
-        const parts = newUrl.split(/[\\/]/);
+        rawName = decodeURIComponent(magnetNameMatch[1]).replace(/\+/g, " ").trim() || "torrent-download";
+      } else if (clean.toLowerCase().includes(".torrent")) {
+        const pathPart = clean.split("?")[0].split("#")[0];
+        const parts = pathPart.split(/[\\/]/);
         const lastPart = parts.pop() || "";
         if (lastPart.toLowerCase().endsWith(".torrent")) {
-          torrentName = lastPart.slice(0, -8) || "torrent-download";
+          rawName = lastPart.slice(0, -8) || "torrent-download";
         }
-      } else if (newUrl.startsWith("base64:")) {
-        // base64:filename:data
-        const parts = newUrl.split(":");
+      } else if (clean.startsWith("base64:")) {
+        const parts = clean.split(":");
         const filename = parts[1] || "";
         if (filename.toLowerCase().endsWith(".torrent")) {
-          torrentName = filename.slice(0, -8) || "torrent-download";
+          rawName = filename.slice(0, -8) || "torrent-download";
         }
       }
-      setOutputPath(safeSettingsBase + torrentName);
+      const cleanName = cleanReleaseTitle(rawName);
+      setOutputPath(safeSettingsBase + cleanName);
       return;
     }
 
     // Extract filename from a plain URL
     const knownPageRoutes = new Set(['watch', 'shorts', 'live', 'embed', 'playlist', 'v', 'e', 'channel', 'c', 'user', 'feed']);
-    const rawSegment = newUrl.split("/").pop()?.split("?")[0] || "";
+    const rawSegment = clean.split("/").pop()?.split("?")[0] || "";
     const filename = (rawSegment && !knownPageRoutes.has(rawSegment.toLowerCase()) && rawSegment.includes("."))
       ? rawSegment
-      : "burst-download.bin";
-    setOutputPath(safeSettingsBase + filename);
+      : "";
+    setOutputPath(filename ? safeSettingsBase + filename : safeSettingsBase);
   };
 
 
@@ -1129,17 +1202,201 @@ export default function App() {
     };
   }, []);
 
-  const startDownload = async (forceUrl = null, forcePath = null) => {
-    const cleanUrl = (forceUrl || url).trim();
-    const cleanOutputPath = (forcePath || outputPath).trim();
-    const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
-    const isTorrent = cleanUrl.startsWith("magnet:") || cleanUrl.endsWith(".torrent") || cleanUrl.startsWith("file://") || cleanUrl.startsWith("base64:");
+  const handleOpenTorrentModal = async (source, customName = null) => {
+    const cleanSource = cleanInputPath(source);
+    if (!cleanSource) return;
+
+    const isMagnet = cleanSource.startsWith("magnet:");
+    const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+    const safeBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+
+    if (!isMagnet) {
+      // Local .torrent file, base64 data URI, or remote torrent URL
+      try {
+        const resp = await fetch(`${API_BASE}/torrent/inspect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ torrent_path: cleanSource }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.detail) {
+          throw new Error(data.detail || "Failed to inspect torrent file");
+        }
+
+        const rawTorrentName = data.name || customName || "torrent-download";
+        const torrentName = cleanReleaseTitle(rawTorrentName);
+        const defaultOutputPath = safeBase + torrentName;
+
+        setTorrentModalData({
+          job_id: null,
+          name: torrentName,
+          total_size: data.total_size || 0,
+          files: data.files || [],
+          is_magnet: false,
+          magnet_uri: data.normalized_path || cleanSource,
+          output_path: defaultOutputPath,
+          peers: 0,
+        });
+        return;
+      } catch (err) {
+        console.error("[Inspect Torrent Error]:", err);
+        setToast(friendlyError(err.message || "Failed to inspect torrent file"));
+        return;
+      }
+    }
+
+    // Magnet link
+    let rawMagnetName = customName || "torrent-download";
+    const dnMatch = cleanSource.match(/dn=([^&]+)/);
+    if (dnMatch) {
+      rawMagnetName = decodeURIComponent(dnMatch[1]).replace(/\+/g, " ").trim() || "torrent-download";
+    }
+    const magnetName = cleanReleaseTitle(rawMagnetName);
+    const defaultOutputPath = safeBase + magnetName;
 
     try {
-      const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
-      const body = isTorrent
-        ? { magnet_uri: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits }
-        : { url: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
+      const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map((i) => i.ip_address);
+      const resp = await fetch(`${API_BASE}/torrent/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          magnet_uri: cleanSource,
+          output_path: defaultOutputPath,
+          interface_ips: effectiveIps,
+          bandwidth_limits: bandwidthLimits,
+          wait_for_selection: true,
+          paused: false,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.detail) {
+        throw new Error(data.detail || "Failed to start torrent metadata fetch");
+      }
+
+      const jobId = data.job_id;
+      if (jobId) {
+        setActiveJobs((prev) => (prev.includes(jobId) ? prev : [...prev, jobId]));
+      }
+
+      setTorrentModalData({
+        job_id: jobId,
+        name: magnetName,
+        total_size: 0,
+        files: [],
+        is_magnet: true,
+        magnet_uri: cleanSource,
+        output_path: defaultOutputPath,
+        peers: 0,
+      });
+      setUrl("");
+    } catch (err) {
+      console.error("[Start Magnet Error]:", err);
+      setToast(friendlyError(err.message || "Failed to retrieve magnet metadata"));
+    }
+  };
+
+  const handleConfirmTorrentModal = async ({ outputPath: chosenPath, filePriorities }) => {
+    if (!torrentModalData) return;
+    const { job_id, magnet_uri, name } = torrentModalData;
+
+    try {
+      const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map((i) => i.ip_address);
+
+      if (job_id) {
+        // Update output path if changed
+        if (chosenPath && chosenPath !== torrentModalData.output_path) {
+          await fetch(`${API_BASE}/torrent/${job_id}/path`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: chosenPath }),
+          });
+        }
+
+        // Set file priorities
+        await fetch(`${API_BASE}/torrent/${job_id}/files/priorities`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ priorities: filePriorities }),
+        });
+
+        // Resume download
+        await fetch(`${API_BASE}/torrent/${job_id}/resume`, { method: "POST" });
+        setToast(`Started download for ${name}`);
+        setTorrentModalData(null);
+        setUrl("");
+        const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+        const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+        setOutputPath(safeSettingsBase);
+        userEditedMainPathRef.current = false;
+        setActiveTab("active");
+      } else {
+        // Start fresh inspected torrent
+        const resp = await fetch(`${API_BASE}/torrent/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            magnet_uri: magnet_uri,
+            output_path: chosenPath,
+            interface_ips: effectiveIps,
+            bandwidth_limits: bandwidthLimits,
+            file_priorities: filePriorities,
+            wait_for_selection: false,
+            paused: false,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || "Failed to start torrent");
+        if (data.job_id) {
+          setActiveJobs((prev) => (prev.includes(data.job_id) ? prev : [...prev, data.job_id]));
+          setToast(`Started download for ${name}`);
+          setTorrentModalData(null);
+          setUrl("");
+          const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+          const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+          setOutputPath(safeSettingsBase);
+          userEditedMainPathRef.current = false;
+          setActiveTab("active");
+        }
+      }
+    } catch (err) {
+      console.error("[Confirm Torrent Error]:", err);
+      setToast(friendlyError(err.message || "Failed to start torrent download"));
+    }
+  };
+
+  const handleCancelTorrentModal = async () => {
+    if (!torrentModalData) return;
+    const { job_id } = torrentModalData;
+    if (job_id) {
+      try {
+        await fetch(`${API_BASE}/download/${job_id}/cancel`, { method: "POST" });
+        setActiveJobs((prev) => prev.filter((id) => id !== job_id));
+      } catch (err) {
+        console.error("[Cancel Torrent Job Error]:", err);
+      }
+    }
+    setTorrentModalData(null);
+    const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+    const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+    setOutputPath(safeSettingsBase);
+    userEditedMainPathRef.current = false;
+    setUrl("");
+  };
+
+  const startDownload = async (forceUrl = null, forcePath = null) => {
+    const cleanUrl = cleanInputPath(forceUrl || url);
+    const cleanOutputPath = cleanInputPath(forcePath || outputPath);
+    const effectiveIps = selectedIps.length ? selectedIps : renderedInterfaces.map(i => i.ip_address);
+    const isTorrent = isTorrentSource(cleanUrl);
+
+    if (isTorrent) {
+      await handleOpenTorrentModal(cleanUrl, forcePath);
+      return;
+    }
+
+    try {
+      const endpoint = `${API_BASE}/download`;
+      const body = { url: cleanUrl, output_path: cleanOutputPath, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
 
       const resp = await fetch(endpoint, {
         method: "POST",
@@ -1155,6 +1412,10 @@ export default function App() {
           return [...prev, data.job_id];
         });
         setUrl("");
+        const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
+        const safeSettingsBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
+        setOutputPath(safeSettingsBase);
+        userEditedMainPathRef.current = false;
         setActiveTab("active");
       }
     } catch (err) {
@@ -1165,44 +1426,45 @@ export default function App() {
 
   const handleDownloadClick = async () => {
     if (downloadBtnState === "checking") return;
-    const targetUrl = url.trim();
+    const targetUrl = cleanInputPath(url);
     if (!targetUrl) return;
 
-    const isTorrent = targetUrl.startsWith("magnet:") || targetUrl.endsWith(".torrent") || targetUrl.startsWith("file://") || targetUrl.startsWith("base64:");
-
-    if (!isTorrent) {
-      // First check if this is a webpage or direct download
-      setUrlTypeHint("checking");
-      try {
-        const typeResp = await fetch(`${API_BASE}/url-type?url=${encodeURIComponent(targetUrl)}`);
-        const typeData = await typeResp.json();
-        if (typeData.type === "html_page") {
-          setUrlTypeHint({ type: "html_page", title: typeData.title || "Webpage" });
-          return; // wait for user choice
-        }
-        setUrlTypeHint(null);
-      } catch {
-        setUrlTypeHint(null);
-      }
-
-
-      // Normal file download — analyze first
-      setDownloadBtnState("checking");
-      try {
-        const resp = await fetch(`${API_BASE}/analyze`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: targetUrl, interface_ip: selectedIps[0] || null })
-        });
-        const data = await resp.json().catch(() => ({}));
-        setDownloadBtnState("idle");
-        if (!resp.ok) { setToast(data.detail || data.error || `HTTP ${resp.status}: URL analysis failed`); return; }
-      } catch (err) {
-        setDownloadBtnState("idle");
-        setToast("Connection error");
-        return;
-      }
+    if (isTorrentSource(targetUrl)) {
+      await handleOpenTorrentModal(targetUrl);
+      return;
     }
+
+    // First check if this is a webpage or direct download
+    setUrlTypeHint("checking");
+    try {
+      const typeResp = await fetch(`${API_BASE}/url-type?url=${encodeURIComponent(targetUrl)}`);
+      const typeData = await typeResp.json();
+      if (typeData.type === "html_page") {
+        setUrlTypeHint({ type: "html_page", title: typeData.title || "Webpage" });
+        return; // wait for user choice
+      }
+      setUrlTypeHint(null);
+    } catch {
+      setUrlTypeHint(null);
+    }
+
+    // Normal file download — analyze first
+    setDownloadBtnState("checking");
+    try {
+      const resp = await fetch(`${API_BASE}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: targetUrl, interface_ip: selectedIps[0] || null })
+      });
+      const data = await resp.json().catch(() => ({}));
+      setDownloadBtnState("idle");
+      if (!resp.ok) { setToast(data.detail || data.error || `HTTP ${resp.status}: URL analysis failed`); return; }
+    } catch (err) {
+      setDownloadBtnState("idle");
+      setToast("Connection error");
+      return;
+    }
+
     startDownload();
     setUrlTypeHint(null);
   };
@@ -1283,6 +1545,42 @@ export default function App() {
         ws.onmessage = (event) => {
           const payload = JSON.parse(event.data);
           setJobStatuses(prev => ({ ...prev, [id]: payload }));
+
+          // Live metadata update for open Add Torrent modal or auto-open if waiting for selection
+          setTorrentModalData(prev => {
+            if (prev && prev.job_id === id) {
+              const updated = { ...prev };
+              if (payload.peers !== undefined || payload.seeders !== undefined) {
+                updated.peers = payload.peers || payload.seeders || 0;
+              }
+              if (payload.files && payload.files.length > 0) {
+                updated.files = payload.files;
+                if (payload.torrent_total_size || payload.total_size) {
+                  updated.total_size = payload.torrent_total_size || payload.total_size;
+                }
+                if (payload.filename && payload.filename !== "torrent") {
+                  updated.name = payload.filename;
+                }
+              }
+              return updated;
+            }
+
+            // Auto-open modal if job is waiting for selection and modal is not open
+            if (!prev && payload.type === "torrent" && payload.wait_for_selection) {
+              return {
+                job_id: id,
+                name: payload.filename || "torrent",
+                total_size: payload.torrent_total_size || payload.total_size || 0,
+                files: payload.files || [],
+                is_magnet: (payload.magnet_uri || "").startsWith("magnet:"),
+                magnet_uri: payload.magnet_uri,
+                output_path: payload.output_path,
+                peers: payload.seeders || payload.peers || 0,
+              };
+            }
+
+            return prev;
+          });
           if (payload.status === "completed" || payload.status === "failed") {
             const duration = Math.max(0, (payload.finished_at || 0) - (payload.started_at || 0));
             // speed_combined is the live speed, zeroed at completion — compute true avg from bytes/time
@@ -1589,19 +1887,19 @@ export default function App() {
             // If a local .torrent file was dropped directly from the OS file system
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
               const file = e.dataTransfer.files[0];
-              if (file.name.endsWith(".torrent")) {
+              if (file.name.toLowerCase().endsWith(".torrent") || file.path?.toLowerCase().endsWith(".torrent")) {
+                if (file.path) {
+                  const cleanedPath = cleanInputPath(file.path);
+                  handleUrlChange(cleanedPath);
+                  await handleOpenTorrentModal(cleanedPath, file.name.replace(/\.torrent$/i, ""));
+                  return;
+                }
                 const reader = new FileReader();
                 reader.onload = async () => {
                   const base64Data = reader.result.split(",")[1];
                   const torrentUri = `base64:${file.name}:${base64Data}`;
-                  
-                  const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
-                  const safeBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
-                  const torrentName = file.name.slice(0, -8) || "torrent-download";
-                  const computedPath = safeBase + torrentName;
-                  
                   handleUrlChange(torrentUri);
-                  await startDownload(torrentUri, computedPath);
+                  await handleOpenTorrentModal(torrentUri, file.name.replace(/\.torrent$/i, ""));
                 };
                 reader.readAsDataURL(file);
                 return;
@@ -1610,32 +1908,20 @@ export default function App() {
 
             const droppedUrl = readDroppedUrl(e);
             if (droppedUrl) {
-              // Compute the path now (synchronously) before React re-renders,
-              // to avoid passing a stale outputPath closure into startDownload.
-              const isTorrent = droppedUrl.startsWith("magnet:") || droppedUrl.endsWith(".torrent") || droppedUrl.startsWith("file://");
+              const cleanDropped = cleanInputPath(droppedUrl);
+              if (isTorrentSource(cleanDropped)) {
+                handleUrlChange(cleanDropped);
+                await handleOpenTorrentModal(cleanDropped);
+                return;
+              }
+
               const settingsBase = appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads";
               const safeBase = settingsBase.endsWith("/") || settingsBase.endsWith("\\") ? settingsBase : settingsBase + "/";
-              let computedPath;
-              if (isTorrent) {
-                let torrentName = "torrent-download";
-                const m = droppedUrl.match(/dn=([^&]+)/);
-                if (m) {
-                  torrentName = decodeURIComponent(m[1]).replace(/\+/g, " ").trim() || "torrent-download";
-                } else {
-                  const parts = droppedUrl.split(/[\\/]/);
-                  const lastPart = parts.pop() || "";
-                  if (lastPart.toLowerCase().endsWith(".torrent")) {
-                    torrentName = lastPart.slice(0, -8) || "torrent-download";
-                  }
-                }
-                computedPath = safeBase + torrentName;
-              } else {
-                const seg = droppedUrl.split("/").pop()?.split("?")[0] || "";
-                const fname = seg && seg.includes(".") ? seg : "burst-download.bin";
-                computedPath = safeBase + fname;
-              }
-              handleUrlChange(droppedUrl);
-              startDownload(droppedUrl, computedPath);
+              const seg = cleanDropped.split("/").pop()?.split("?")[0] || "";
+              const fname = seg && seg.includes(".") ? seg : "burst-download.bin";
+              const computedPath = safeBase + fname;
+              handleUrlChange(cleanDropped);
+              startDownload(cleanDropped, computedPath);
             }
           }}
         >
@@ -2013,7 +2299,28 @@ export default function App() {
                         placeholder="Paste a URL, magnet link, or .torrent..."
                         value={url}
                         onChange={(e) => handleUrlChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleDownloadClick();
+                          }
+                        }}
                       />
+                      <input
+                        type="file"
+                        ref={torrentFileInputRef}
+                        accept=".torrent"
+                        style={{ display: "none" }}
+                        onChange={handleTorrentFileSelect}
+                      />
+                      <button
+                        type="button"
+                        className="torrent-file-pick-btn"
+                        title="Open .torrent file"
+                        onClick={handlePickTorrentFile}
+                      >
+                        <FileText size={18} />
+                      </button>
                       <button
                         className="btn-primary"
                         onClick={handleDownloadClick}
@@ -2032,16 +2339,20 @@ export default function App() {
                           if (data.path) {
                             const dp = data.path;
                             const safeDir = dp.endsWith("/") || dp.endsWith("\\") ? dp : dp + "/";
-                            const isMagnet = url.trim().startsWith("magnet:");
+                            const isTorrent = isTorrentSource(url.trim());
                             const isHttp = /^https?:\/\//i.test(url.trim());
-                            if (url && (isMagnet || isHttp)) {
+                            if (url && (isTorrent || isHttp)) {
                               // Re-derive filename from current url against new dir
                               const m = url.match(/dn=([^&]+)/);
                               const seg = url.split("/").pop()?.split("?")[0] || "";
-                              const name = isMagnet
-                                ? (m ? decodeURIComponent(m[1]).replace(/\+/g, " ").trim() : "torrent-download")
-                                : (seg && seg.includes(".") ? seg : "burst-download.bin");
-                              setOutputPath(safeDir + name);
+                              let name = "";
+                              if (isTorrent) {
+                                const rawName = m ? decodeURIComponent(m[1]).replace(/\+/g, " ").trim() : "torrent-download";
+                                name = cleanReleaseTitle(rawName);
+                              } else if (seg && seg.includes(".")) {
+                                name = seg;
+                              }
+                              setOutputPath(name ? safeDir + name : safeDir);
                             } else {
                               setOutputPath(safeDir);
                             }
@@ -2056,7 +2367,10 @@ export default function App() {
                             <input
                               autoFocus
                               value={outputPath}
-                              onChange={(e) => setOutputPath(e.target.value)}
+                              onChange={(e) => {
+                                userEditedMainPathRef.current = true;
+                                setOutputPath(e.target.value);
+                              }}
                               onBlur={() => setEditingOutputPath(false)}
                               onKeyDown={(e) => e.key === 'Enter' && setEditingOutputPath(false)}
                             />
@@ -2807,6 +3121,16 @@ export default function App() {
           }
           setPromptData(null);
         })}
+      />
+
+      <TorrentAddModal
+        isOpen={!!torrentModalData}
+        torrentData={torrentModalData}
+        apiBase={API_BASE}
+        defaultPath={appSettings?.DOWNLOAD_PATH || localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/"}
+        onConfirm={handleConfirmTorrentModal}
+        onCancel={handleCancelTorrentModal}
+        onBrowsePath={handleBrowsePath}
       />
     </div>
   );

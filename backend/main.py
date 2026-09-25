@@ -29,6 +29,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 from typing import Any, Dict, List, Optional, Set
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,7 +54,7 @@ class DownloadRequest(BaseModel):
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
     file_priorities: Optional[Dict[int, int]] = None
-    wait_for_selection: Optional[bool] = False
+    wait_for_selection: Optional[bool] = None
     paused: Optional[bool] = False
 
 
@@ -77,7 +78,7 @@ class TorrentStartRequest(BaseModel):
     interface_ips: List[str]
     bandwidth_limits: Optional[Dict[str, int]] = None
     file_priorities: Optional[Dict[int, int]] = None
-    wait_for_selection: Optional[bool] = False
+    wait_for_selection: Optional[bool] = None
     paused: Optional[bool] = False
 
 
@@ -101,6 +102,10 @@ class BulkSelectionRequest(BaseModel):
 class TorrentInspectRequest(BaseModel):
     torrent_path: Optional[str] = None
     magnet_uri: Optional[str] = None
+
+
+class TorrentPathRequest(BaseModel):
+    path: str
 
 
 class SettingsUpdate(BaseModel):
@@ -679,6 +684,24 @@ async def analyze(payload: AnalyzeRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def is_torrent_source(url_or_path: str) -> bool:
+    if not url_or_path:
+        return False
+    clean = url_or_path.strip().strip('"').strip("'")
+    clean_lower = clean.lower()
+    if clean_lower.startswith("magnet:"):
+        return True
+    if clean_lower.startswith("base64:") or clean_lower.startswith("data:"):
+        return True
+    if clean_lower.endswith(".torrent"):
+        return True
+    if clean_lower.startswith(("http://", "https://", "file://")):
+        path_part = clean_lower.split("?")[0].split("#")[0]
+        if path_part.endswith(".torrent"):
+            return True
+    return False
+
+
 @app.post("/download")
 async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
     # Show the hidden window on new actual download
@@ -691,14 +714,15 @@ async def start_download(payload: DownloadRequest) -> Dict[str, Any]:
                 print(f"Error showing window: {e}")
 
     # Auto-detect download type
-    is_torrent = payload.url.startswith("magnet:")
+    is_torrent = is_torrent_source(payload.url)
     
     if is_torrent:
         try:
+            wait_sel = True if payload.wait_for_selection is None else bool(payload.wait_for_selection)
             job = await start_torrent_download(
                 payload.url, payload.output_path, payload.interface_ips,
                 payload.bandwidth_limits, file_priorities=payload.file_priorities,
-                wait_for_selection=bool(payload.wait_for_selection),
+                wait_for_selection=wait_sel,
                 paused=bool(payload.paused),
             )
             # Only broadcast if it's not an internal check (though pings usually aren't magnets)
@@ -1040,6 +1064,50 @@ async def select_path():
         return {"path": path if path else None}
     except Exception as e:
         return {"path": None, "error": str(e)}
+
+
+@app.get("/select-torrent-file")
+async def select_torrent_file():
+    """Opens a native file selection dialog for .torrent files and returns the selected path."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        path = filedialog.askopenfilename(
+            title="Select .torrent file",
+            filetypes=[("Torrent files", "*.torrent"), ("All files", "*.*")]
+        )
+        root.destroy()
+        if path:
+            return {"path": os.path.normpath(path)}
+        return {"path": None}
+    except Exception as e:
+        return {"path": None, "error": str(e)}
+
+
+@app.get("/disk-space")
+async def get_disk_space(path: str = "") -> Dict[str, Any]:
+    """Return total and free disk space in bytes for the specified path or default download drive."""
+    import shutil
+    target = path.strip() if path else ""
+    if not target:
+        settings = config.load_settings()
+        target = settings.get("DOWNLOAD_PATH") or "C:\\"
+    try:
+        p = Path(target).resolve()
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        usage = shutil.disk_usage(str(p))
+        return {
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "path": str(p),
+        }
+    except Exception as e:
+        return {"error": str(e), "free_bytes": None, "total_bytes": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1522,19 +1590,44 @@ async def deselect_dir_api(job_id: str, req: DirDeselectionRequest) -> Dict[str,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/torrent/{job_id}/path")
+async def set_torrent_path_api(job_id: str, req: TorrentPathRequest) -> Dict[str, Any]:
+    job = active_torrents.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        res = await job.set_output_path(req.path)
+        save_state()
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.post("/torrent/inspect")
 async def inspect_torrent_api(req: TorrentInspectRequest) -> Dict[str, Any]:
     from torrent import inspect_torrent
+    import urllib.parse
     target = req.torrent_path or req.magnet_uri
     if not target:
         raise HTTPException(status_code=400, detail="Missing torrent_path or magnet_uri")
-    if req.torrent_path:
-        if not req.torrent_path.lower().endswith(".torrent"):
+    
+    target_clean = target.strip().strip('"').strip("'")
+    is_base64 = target_clean.startswith("base64:") or target_clean.startswith("data:")
+    is_remote = target_clean.startswith(("http://", "https://"))
+    is_file_uri = target_clean.startswith("file://")
+
+    if req.torrent_path and not (is_base64 or is_remote or is_file_uri):
+        if not target_clean.lower().endswith(".torrent"):
             raise HTTPException(status_code=400, detail="Only .torrent files are allowed")
-        if not os.path.exists(req.torrent_path):
+        if not os.path.exists(target_clean):
             raise HTTPException(status_code=400, detail="Torrent file not found")
+    elif is_file_uri:
+        raw_path = target_clean[8:] if target_clean.startswith("file:///") else target_clean[7:]
+        raw_path = urllib.parse.unquote(raw_path)
+        if not os.path.exists(raw_path):
+            raise HTTPException(status_code=400, detail="Torrent file not found")
+
     try:
-        return inspect_torrent(target)
+        return inspect_torrent(target_clean)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

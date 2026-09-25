@@ -112,26 +112,33 @@ def get_default_path(filename: str) -> str:
     return os.path.join(default_dir, safe_name)
 
 
-def is_magnet(url: str) -> bool:
-    url_lower = url.strip().lower()
+def is_torrent_link(url: str) -> bool:
+    clean = url.strip().strip('"').strip("'")
+    url_lower = clean.lower()
     if url_lower.startswith("magnet:"):
         return True
-    if url_lower.endswith(".torrent"):
-        if url_lower.startswith("http://") or url_lower.startswith("https://"):
-            return False
+    path_part = url_lower.split("?")[0].split("#")[0]
+    if path_part.endswith(".torrent"):
         return True
     return False
 
 
 def extract_magnet_name(url: str) -> str:
     try:
-        if "?" in url:
+        clean = url.strip().strip('"').strip("'")
+        if "?" in clean and clean.lower().startswith("magnet:"):
             import urllib.parse
-            qs = url.split("?", 1)[1]
+            qs = clean.split("?", 1)[1]
             params = urllib.parse.parse_qs(qs)
             names = params.get("dn", [])
             if names:
                 return names[0]
+        elif ".torrent" in clean.lower():
+            import urllib.parse
+            base = clean.split("?")[0].split("#")[0].split("/")[-1].split("\\")[-1]
+            base = urllib.parse.unquote(base)
+            if base.lower().endswith(".torrent"):
+                return base[:-8]
     except:
         pass
     return "torrent"
@@ -158,12 +165,13 @@ def handle(message: dict) -> dict:
         return {"success": False, "error": f"Failed to get interfaces: {e}"}
 
     try:
-        if is_magnet(url):
-            magnet_name = extract_magnet_name(url)
+        if is_torrent_link(url):
+            torrent_name = extract_magnet_name(url)
             payload = {
                 "url": url,
-                "output_path": get_default_path(magnet_name),
+                "output_path": get_default_path(torrent_name),
                 "interface_ips": interface_ips,
+                "wait_for_selection": True,
             }
             resp = requests.post(f"{API_BASE}/download", json=payload, timeout=10, headers=HEADERS)
         else:

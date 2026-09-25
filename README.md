@@ -1,109 +1,117 @@
 <div align="center">
-  <img src="assets/logo.png" width="128" height="128" alt="Burst Logo">
+  <img src="assets/logo.png" width="120" height="120" alt="Burst Logo">
   <h1>Burst</h1>
-  <p><strong>Aggregate Your Network Interfaces into a Single High-Speed Download Pipeline</strong></p>
+  <p><strong>Combine your Wi-Fi, Ethernet, and Mobile Hotspot into one ultra-fast download connection.</strong></p>
 
-  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-  [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](https://www.microsoft.com/windows)
-  [![Release](https://img.shields.io/badge/Release-v2.0.0-success.svg)](https://github.com/SidhartSami/Burst/releases)
-  [![Tests: 100/100 Passing](https://img.shields.io/badge/Tests-100%2F100%20Passing-brightgreen.svg)](tests/)
+  <p>
+    <a href="https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe">
+      <img src="https://img.shields.io/badge/Download-Burst%20for%20Windows%20(v2.0.0)-f97316?style=for-the-badge&logo=windows&logoColor=white" alt="Download Burst for Windows">
+    </a>
+  </p>
+
+  [![Version](https://img.shields.io/badge/Version-v2.0.0-f97316.svg)](https://github.com/SidhartSami/Burst/releases)
+  [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-0078D6.svg)](https://www.microsoft.com/windows)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![Free & Open Source](https://img.shields.io/badge/Free%20%26-Open%20Source-22c55e.svg)](https://github.com/SidhartSami/Burst)
 </div>
 
 ---
 
 ## ⚡ What is Burst?
 
-**Burst** is an open-source download accelerator that combines multiple active internet connections—such as **Wi-Fi, Ethernet, and Mobile Hotspots (4G/5G)**—into a single aggregated stream. 
+Have you ever wished you could combine your home Wi-Fi and your phone's 5G mobile hotspot to download files twice as fast?
 
-Unlike channel bonding solutions that require costly VPN subscriptions or remote proxy servers, Burst operates entirely on your local machine. It partitions downloads into dynamic byte-range chunks and binds them directly to specific network interfaces at the OS socket level.
+**Burst** is a free, modern download accelerator for Windows that bonds all your available internet connections together. When you download a file or torrent, Burst divides it into pieces and downloads them simultaneously across your **Wi-Fi, Ethernet cable, and USB/Hotspot connections**, combining their speeds into one powerful stream.
+
+* **No expensive hardware required.**
+* **No paid VPNs or remote bonding subscriptions.**
+* **100% free and open-source.**
 
 ---
 
 ## 🚀 Key Features
 
-* ⚡ **True Bandwidth Aggregation** — Download concurrently over Ethernet, Wi-Fi, and LTE without third-party servers or VPNs.
-* 🧲 **HTTP & Torrent Engine** — Full support for direct HTTP/HTTPS downloads, `.torrent` files, and live BitTorrent swarms via libtorrent.
-* 📁 **Selective Torrent Downloading** — Interactive file-tree browser with native file priorities (0–7) and folder selection before downloading metadata.
-* 📊 **Real-Time Observability** — Live dashboard displaying per-adapter throughput, EWMA health status, and a visual chunk distribution map.
-* 🛡️ **Fault-Tolerant & Resilient** — Dynamic chunk slicing, automated worker stall recovery, seamless failover if an adapter disconnects, and preflight disk safety checks.
-* 🌐 **Browser Extensions** — One-click download capture for Google Chrome, Microsoft Edge, Mozilla Firefox, and Zen Browser.
-* 🔄 **Smart Resume** — SHA-256 validated checkpointing and sparse disk allocation allow instant pause, resume, and restart recovery.
+### ⚡ True Multi-Connection Bonding
+Plug in an Ethernet cable while connected to Wi-Fi, or turn on USB tethering with your phone's cellular data. Burst automatically detects every active adapter and aggregates their bandwidth simultaneously.
+
+### 🧲 Advanced Torrent & Magnet Downloader
+Built on the industry-standard `libtorrent` engine. Paste magnet links, drop `.torrent` files, and browse the full file tree to download only the files you want before downloading starts.
+
+### 📊 Real-Time Chunk Map & Speed Dashboard
+Watch your download progress live! Burst's interactive chunk map shows exactly which network adapter (Wi-Fi, Ethernet, or Mobile Data) is downloading each piece in real time.
+
+### 🌐 One-Click Browser Integration
+Download files directly from your favorite browser. Burst includes lightweight extensions for **Google Chrome, Microsoft Edge, Mozilla Firefox, and Zen Browser**.
+
+### 🔄 Reliable Pause & Resume
+Network drops or need to step away? Burst safely saves your progress with SHA-256 validation. Pause, resume, or restart your PC without losing downloaded data.
+
+### 🎨 Clean Dark Mode Interface
+Designed from the ground up for Windows with a fast, modern dark-mode interface, audio completion chimes, and system tray minimization.
 
 ---
 
-## 📥 Quick Start
+## 📥 How to Install & Use Burst
 
-### 1. Download & Install
-Download the latest Windows installer (`Burst_Setup.exe`) from the [Releases](https://github.com/SidhartSami/Burst/releases) page and run the setup wizard.
+### 1. Download
+Click below to download the official Windows installer:
 
-### 2. Connect Your Interfaces
-Connect your computer to two or more network links (e.g., your home Wi-Fi and an Ethernet cable, or Wi-Fi and a tethered phone hotspot). Burst detects all active adapters automatically.
+👉 **[Download Burst Setup (v2.0.0)](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe)**
 
-### 3. Start Downloading
-Paste any direct download link or magnet URI into Burst, or click **"Download with Burst"** from your web browser.
+### 2. Install
+Run `Burst_Setup_v2.0.0.exe` and follow the setup wizard. The installer sets up desktop shortcuts and configures Windows Firewall permissions automatically.
+
+### 3. Connect Your Networks & Download!
+1. Connect your PC to two or more connections (e.g. Wi-Fi + your phone's USB tethering hotspot, or Wi-Fi + Ethernet).
+2. Open Burst — you will see your active network adapters listed at the top.
+3. Paste any download URL, magnet link, or drop a `.torrent` file into the app, and click **Download**!
 
 ---
 
 ## 🌐 Browser Extensions
 
-Integrate Burst directly with your favorite browser:
-* **Chrome & Edge**: Install via the [Chrome Web Store](https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd).
-* **Firefox & Zen**: Load the unpacked extension from the installation directory (`extension-firefox/`) via `about:debugging`.
+Burst can capture your browser downloads with a single click:
+
+* **Chrome & Brave & Edge**: Install via the [Chrome Web Store](https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd) or enable during setup.
+* **Firefox & Zen Browser**: Enable during setup to register the companion extension.
 
 ---
 
-## 💻 CLI Integration
+## ❓ Frequently Asked Questions (FAQ)
 
-Burst includes a companion CLI for scriptable downloads and accelerating package installations:
+<details>
+<summary><strong>Do I need a special router or subscription?</strong></summary>
+<p>No! Burst runs completely on your local computer. It uses standard Windows networking sockets to split and request different parts of your files across your connected network interfaces.</p>
+</details>
 
-```bash
-# Accelerate pip package downloads across bonded interfaces
-burst-cli pip install torch torchvision
+<details>
+<summary><strong>How do I connect multiple internet connections on one laptop/PC?</strong></summary>
+<p>The easiest ways are:
+<ul>
+  <li>Connect to your home Wi-Fi, then plug in an Ethernet cable to your router.</li>
+  <li>Connect to your Wi-Fi, then connect your smartphone via USB cable and turn on <em>USB Tethering</em> (using your 4G/5G data).</li>
+  <li>Use an external USB Wi-Fi dongle to connect to two separate Wi-Fi networks at once.</li>
+</ul>
+</p>
+</details>
 
-# Direct file download
-burst-cli download https://example.com/large-dataset.zip
-```
+<details>
+<summary><strong>Does Burst support torrents and magnet links?</strong></summary>
+<p>Yes! Burst includes a full BitTorrent client with DHT, peer exchange, and an interactive file selector that lets you choose specific files to download.</p>
+</details>
 
----
+<details>
+<summary><strong>Can I pause downloads and resume them later?</strong></summary>
+<p>Yes. Both regular downloads and torrents can be paused and resumed at any time without losing progress.</p>
+</details>
 
-## 🛠️ Developer Setup
-
-```bash
-# 1. Clone repository
-git clone https://github.com/SidhartSami/Burst.git
-cd Burst
-
-# 2. Set up backend environment
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r backend/requirements.txt
-
-# 3. Build frontend
-cd frontend
-npm install
-npm run build
-cd ..
-
-# 4. Run application
-python backend/main.py
-
-# 5. Run test suite (95 tests)
-pytest -v
-```
-
----
-
-## 🏗️ Architecture
-
-| Component | Technology | Description |
-|---|---|---|
-| **Core Engine** | Python 3.11, `libtorrent 2.0`, `asyncio` | Socket-level interface binding, Range splitting, BitTorrent engine |
-| **API Server** | FastAPI, Uvicorn, WebSockets | Low-latency telemetry streaming (<15 KB batched payloads) |
-| **Desktop UI** | React, Tailwind CSS, PyWebView | Native desktop window with live sparklines & chunk grid |
-| **Integrations** | Native Messaging Host, Manifest V3 | Browser right-click interception and CLI pip wrapper |
+<details>
+<summary><strong>What are the system requirements?</strong></summary>
+<p>Windows 10 or Windows 11 (64-bit), and at least one active network connection (two or more recommended to take advantage of bandwidth aggregation).</p>
+</details>
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+Burst is licensed under the [MIT License](LICENSE). Free for personal and commercial use.
