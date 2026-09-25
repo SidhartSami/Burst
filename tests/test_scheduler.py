@@ -864,6 +864,60 @@ class TestScheduler(BaseHttpTest):
         self.assertIsNone(getattr(resumed, "_reconnect_wait_start", None))
         await self.manager.cancel_job(resumed.job_id)
 
+    # -----------------------------------------------------------------------
+    # Test ZM — Add interface succeeds during waiting and waiting_reconnect state
+    # -----------------------------------------------------------------------
+    async def test_zm_add_interface_during_waiting_state(self):
+        for test_status in ("waiting", "waiting_reconnect"):
+            job = DownloadJob(
+                job_id=f"test_zm_{test_status}",
+                url=f"{self.base_url}/test_zm.bin",
+                output_path=str(self.out_dir / f"zm_{test_status}.bin"),
+                expected_size=1024,
+                supports_ranges=True,
+                status=test_status,
+                error="All interfaces unavailable — waiting to reconnect (120s remaining, resumable)",
+            )
+            job._queue = asyncio.Queue()
+            job._chunk_files = {}
+            job._reconnect_wait_start = time.time() - 30.0
+            self.manager.jobs[job.job_id] = job
+
+            res = await self.manager.add_interface(job.job_id, {"ip_address": "127.0.0.1", "name": "Loopback"})
+            self.assertTrue(res.get("spawned") or res.get("reused"))
+            self.assertEqual(job.status, "downloading")
+            self.assertIsNone(job._reconnect_wait_start)
+            self.assertIsNone(job.error)
+            await self.manager.cancel_job(job.job_id)
+
+    # -----------------------------------------------------------------------
+    # Test ZN — Resume succeeds during waiting and waiting_reconnect state
+    # -----------------------------------------------------------------------
+    async def test_zn_resume_job_during_waiting_state(self):
+        for test_status in ("waiting", "waiting_reconnect"):
+            job = DownloadJob(
+                job_id=f"test_zn_{test_status}",
+                url=f"{self.base_url}/test_zn.bin",
+                output_path=str(self.out_dir / f"zn_{test_status}.bin"),
+                expected_size=1024,
+                supports_ranges=True,
+                status=test_status,
+                error="All interfaces unavailable — waiting to reconnect (120s remaining, resumable)",
+            )
+            job._queue = asyncio.Queue()
+            job._chunk_files = {}
+            job._reconnect_wait_start = time.time() - 30.0
+            job.progress["127.0.0.1"] = InterfaceProgress(name="L1", ip_address="127.0.0.1", chunk_start=0, chunk_end=1023)
+            self.manager.jobs[job.job_id] = job
+
+            res = await self.manager.resume_job(job.job_id)
+            self.assertEqual(res.get("status"), "resumed")
+            self.assertEqual(job.status, "downloading")
+            self.assertIsNone(job._reconnect_wait_start)
+            self.assertIsNone(job.error)
+            await self.manager.cancel_job(job.job_id)
+
 
 if __name__ == "__main__":
     unittest.main()
+

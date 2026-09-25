@@ -332,8 +332,18 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
     }
   }, [status.status, status.error, jid]);
 
+  const uniqueAvailableInterfaces = useMemo(() => {
+    const map = new Map();
+    (availableInterfaces || []).forEach(iface => {
+      if (!iface.exiting && iface.ip_address) {
+        map.set(iface.ip_address, iface);
+      }
+    });
+    return Array.from(map.values());
+  }, [availableInterfaces]);
+
   const activeIfacesList = useMemo(() => {
-    return availableInterfaces.filter(iface => {
+    return uniqueAvailableInterfaces.filter(iface => {
       if (status.type === "torrent") {
         return status.interface_ips?.includes(iface.ip_address) ?? (status.speeds && iface.ip_address in status.speeds);
       } else {
@@ -341,7 +351,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
         return !!live && live.status !== "excluded" && live.status !== "cancelled";
       }
     });
-  }, [availableInterfaces, status]);
+  }, [uniqueAvailableInterfaces, status]);
 
   const chartData = useMemo(() => {
     if (speedHistory.length === 0) return [];
@@ -424,7 +434,7 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 
       <div className="iface-pills" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
-          {availableInterfaces.map(iface => {
+          {uniqueAvailableInterfaces.map(iface => {
             let live = null;
             let isSelected = false;
 
@@ -988,7 +998,6 @@ export default function App() {
         const fresh = nextMap.get(oldItem.ip_address);
         if (!fresh) {
           if (!oldItem.exiting) merged.push({ ...oldItem, exiting: true, entering: false });
-          else merged.push(oldItem);
           continue;
         }
         merged.push({ ...oldItem, ...fresh, entering: false, exiting: false });
@@ -2047,7 +2056,14 @@ export default function App() {
                               headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ interface_ip: ip })
                             }).then(async r => {
-                              if (!r.ok) setToast(await r.text());
+                              if (!r.ok) {
+                                try {
+                                  const err = await r.json();
+                                  setToast(err.detail || JSON.stringify(err));
+                                } catch {
+                                  setToast(await r.text());
+                                }
+                              }
                             });
                           }}
                           onCancel={() => {

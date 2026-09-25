@@ -1247,9 +1247,13 @@ class DownloadManager:
         while not job.is_cancelled:
             # --- Check if this interface is excluded ---
             if prog.consecutive_failures >= max_failures:
+                active_alternatives = [
+                    alt_p for alt_ip, alt_p in job.progress.items()
+                    if alt_ip != ip and alt_p.status not in ("excluded", "failed", "cancelled")
+                ]
                 prog.status = "excluded"
                 prog.speed_mb_s = 0.0
-                cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
+                cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0) if active_alternatives else 3.0
                 prog._cooldown_until = time.time() + cooldown
                 job.worker_states[w_key]["status"] = "excluded"
                 break
@@ -1366,6 +1370,10 @@ class DownloadManager:
                 prog.record_outcome("success")
                 prog.last_success_time = time.time()
                 prog._last_progress_time = time.time()
+                if job.status in ("waiting", "waiting_reconnect"):
+                    job.status = "downloading"
+                    job.error = None
+                    job._reconnect_wait_start = None
 
                 # Update EWMA throughput
                 chunk_dur = max(time.time() - chunk.started_at, 0.001)
@@ -1459,17 +1467,18 @@ class DownloadManager:
                     or "10051" in clean_err_msg
                     or "10065" in clean_err_msg
                 )
-                if is_unreachable:
-                    prog.consecutive_failures = max_failures
-                    prog.status = "excluded"
-                    prog._cooldown_until = time.time() + float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
-                    prog.error = f"Unreachable network on {ip}"
-                    print(f"[WORKER] Interface {ip} has no route to host ({clean_err_msg}), excluding from job {job.job_id}")
-
                 active_alternatives = [
                     alt_p for alt_ip, alt_p in job.progress.items()
                     if alt_ip != ip and alt_p.status not in ("excluded", "failed", "cancelled")
                 ]
+
+                if is_unreachable:
+                    prog.consecutive_failures = max_failures
+                    prog.status = "excluded"
+                    cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0) if active_alternatives else 5.0
+                    prog._cooldown_until = time.time() + cooldown
+                    prog.error = f"Unreachable network on {ip}"
+                    print(f"[WORKER] Interface {ip} has no route to host ({clean_err_msg}), excluding from job {job.job_id}")
 
                 if (is_non_retryable_error(e) and not is_unreachable) or (job._chunk_failures[chunk_idx] > config.get("RETRY_ATTEMPTS") * 2 and not active_alternatives):
                     job.status = "failed"
@@ -1521,35 +1530,6 @@ class DownloadManager:
         if getattr(job, "_completion_event", None):
             job._completion_event.set()
 
-    async def remove_interface(self, job_id: str, ip: str) -> Dict[str, Any]:
-        job = self.get_job(job_id)
-        if not job:
-            raise ValueError("Job not found")
-        
-        prog = job.progress.get(ip)
-        if not prog or prog.status in ("excluded", "cancelled"):
-            return {"status": "already_removed"}
-
-        if job.status not in ("downloading", "waiting_reconnect", "paused"):
-             raise ValueError(f"Job is not in a state to remove interfaces (status={job.status})")            
-        prog.status = "excluded"
-        prog.speed_mb_s = 0.0
-        prog.current_chunk_idx = None
-        
-        # 2. Cancel the worker(s) if active
-        for key in list(job._workers.keys()):
-            if key == ip or key.startswith(f"{ip}_"):
-                task = job._workers[key]
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                del job._workers[key]
-            
-        print(f"[REMOVE_IFACE] Interface {ip} removed from job {job_id}")
-        return {"removed": True}
 
     def _find_best_alternate(self, job: DownloadJob, exclude_ip: str) -> Optional[str]:
         """Find the healthiest alternative interface for retry routing."""
@@ -1574,7 +1554,7 @@ class DownloadManager:
             raise ValueError("Job not found")
         if job._queue is None:
             raise ValueError(f"Job uses single-stream mode — cannot add interfaces (no queue)")
-        if job.status not in ("downloading", "waiting_reconnect", "paused"):
+        if job.status not in ("downloading", "waiting", "waiting_reconnect", "paused"):
             raise ValueError(f"Job is not active (status={job.status})")
         ip = interface["ip_address"]
 
@@ -1582,7 +1562,7 @@ class DownloadManager:
             # Interface already known — restart its worker if it died
             prog = job.progress[ip]
             existing_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
-            if existing_tasks:
+            if existing_tasks and prog.status not in ("excluded", "cancelled", "paused_slow"):
                 return {"reused": True}  # Already actively working
             # Reset state and respawn worker
             prog.status = "pending"
@@ -1597,90 +1577,101 @@ class DownloadManager:
             )
 
         # If the job was waiting for reconnect, resume it
-        if job.status == "waiting_reconnect":
+        if job.status in ("waiting", "waiting_reconnect"):
             job.status = "downloading"
             job.error = None
+            job._reconnect_wait_start = None
+            if getattr(job, "_completion_event", None):
+                job._completion_event.set()
 
-        # If queue is empty, steal work from the busiest interface by
-        # cancelling its worker, splitting its remaining range, and re-queuing
+        # If queue is empty, ensure incomplete chunks are queued or steal work from busiest interface
         if job._queue.empty():
-            print(f"[ADD_IFACE] Queue empty, looking for work to steal for {ip}...")
-            busiest_ip = None
-            busiest_remaining = -1
-            for other_ip, other_prog in job.progress.items():
-                if other_ip == ip:
-                    continue
-                if other_prog.status == "downloading" and other_prog.current_chunk_idx is not None:
-                    remaining = (other_prog.chunk_end - other_prog.chunk_start) - other_prog.downloaded
-                    if remaining > busiest_remaining:
-                        busiest_remaining = remaining
-                        busiest_ip = other_ip
+            incomplete = [
+                c for c in job.chunks.values()
+                if c.status != ChunkStatus.COMPLETE or not job._chunk_files[c.chunk_id].exists() or job._chunk_files[c.chunk_id].stat().st_size != c.expected_bytes
+            ]
+            if incomplete:
+                for c in incomplete:
+                    c.status = ChunkStatus.PENDING
+                    c.assigned_interface = None
+                    job._queue.put_nowait(c)
+            else:
+                print(f"[ADD_IFACE] Queue empty, looking for work to steal for {ip}...")
+                busiest_ip = None
+                busiest_remaining = -1
+                for other_ip, other_prog in job.progress.items():
+                    if other_ip == ip:
+                        continue
+                    if other_prog.status == "downloading" and other_prog.current_chunk_idx is not None:
+                        remaining = (other_prog.chunk_end - other_prog.chunk_start) - other_prog.downloaded
+                        if remaining > busiest_remaining:
+                            busiest_remaining = remaining
+                            busiest_ip = other_ip
+                
+                if busiest_ip:
+                    other_prog = job.progress[busiest_ip]
+                    chunk_idx = other_prog.current_chunk_idx
+                    print(f"[ADD_IFACE] Stealing from {busiest_ip} (chunk {chunk_idx}, remaining: {busiest_remaining} bytes)")
+                    
+                    # Cancel all busiest workers
+                    old_tasks = [t for k, t in job._workers.items() if (k == busiest_ip or k.startswith(f"{busiest_ip}_")) and not t.done()]
+                    for old_task in old_tasks:
+                        old_task.cancel()
+                        try:
+                            await old_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    for key in list(job._workers.keys()):
+                        if key == busiest_ip or key.startswith(f"{busiest_ip}_"):
+                            del job._workers[key]
+                    
+                    # Find the chunk range to split
+                    range_idx = -1
+                    for i, r in enumerate(job._ranges):
+                        if r[0] == chunk_idx:
+                            range_idx = i
+                            break
+                    
+                    if range_idx != -1:
+                        _, r_start, r_end = job._ranges[range_idx]
+                        # We use the full range since we can't easily resume partial chunks in current architecture
+                        mid = r_start + (r_end - r_start) // 2
+                        
+                        new_idx = job._total_chunks
+                        job._total_chunks += 1
+                        
+                        range_a = (chunk_idx, r_start, mid)
+                        range_b = (new_idx, mid + 1, r_end)
+                        
+                        print(f"[ADD_IFACE] Splitting chunk {chunk_idx} [{r_start}-{r_end}] -> [{r_start}-{mid}] and [{mid+1}-{r_end}] (new index {new_idx})")
+                        
+                        # Update ranges and files
+                        job._ranges[range_idx] = range_a
+                        job._ranges.insert(range_idx + 1, range_b)
+                        
+                        chunk_a = Chunk(chunk_id=chunk_idx, start=r_start, end=mid, status=ChunkStatus.PENDING)
+                        chunk_b = Chunk(chunk_id=new_idx, start=mid + 1, end=r_end, status=ChunkStatus.PENDING)
+                        job.chunks[chunk_idx] = chunk_a
+                        job.chunks[new_idx] = chunk_b
+                        
+                        # Put both back in queue
+                        job._queue.put_nowait(chunk_a)
+                        job._queue.put_nowait(chunk_b)
+                        
+                        # Reset both interface progresses to pending so workers restart
+                        other_prog.status = "pending"
+                        
+                        # Correct progress accounting
+                        downloaded_this_chunk = other_prog.downloaded - other_prog._bytes_at_start_of_chunk
+                        with self._thread_locks[job.job_id]:
+                            job.total_downloaded -= downloaded_this_chunk
+                        other_prog.downloaded = other_prog._bytes_at_start_of_chunk
+                        
+                        other_prog.current_chunk_idx = None
+                        
+                        # New interface is already pending from earlier logic
+                        print(f"[ADD_IFACE] Work redistributed. Queue size: {job._queue.qsize()}")
             
-            if busiest_ip:
-                other_prog = job.progress[busiest_ip]
-                chunk_idx = other_prog.current_chunk_idx
-                print(f"[ADD_IFACE] Stealing from {busiest_ip} (chunk {chunk_idx}, remaining: {busiest_remaining} bytes)")
-                
-                # Cancel all busiest workers
-                old_tasks = [t for k, t in job._workers.items() if (k == busiest_ip or k.startswith(f"{busiest_ip}_")) and not t.done()]
-                for old_task in old_tasks:
-                    old_task.cancel()
-                    try:
-                        await old_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                for key in list(job._workers.keys()):
-                    if key == busiest_ip or key.startswith(f"{busiest_ip}_"):
-                        del job._workers[key]
-                
-                # Find the chunk range to split
-                range_idx = -1
-                for i, r in enumerate(job._ranges):
-                    if r[0] == chunk_idx:
-                        range_idx = i
-                        break
-                
-                if range_idx != -1:
-                    _, r_start, r_end = job._ranges[range_idx]
-                    # We use the full range since we can't easily resume partial chunks in current architecture
-                    mid = r_start + (r_end - r_start) // 2
-                    
-                    new_idx = job._total_chunks
-                    job._total_chunks += 1
-                    
-                    range_a = (chunk_idx, r_start, mid)
-                    range_b = (new_idx, mid + 1, r_end)
-                    
-                    print(f"[ADD_IFACE] Splitting chunk {chunk_idx} [{r_start}-{r_end}] -> [{r_start}-{mid}] and [{mid+1}-{r_end}] (new index {new_idx})")
-                    
-                    # Update ranges and files
-                    job._ranges[range_idx] = range_a
-                    job._ranges.insert(range_idx + 1, range_b)
-                    
-                    temp_dir = Path(job.output_path).parent / f".burst_{job.job_id}"
-                    chunk_a = Chunk(chunk_id=chunk_idx, start=r_start, end=mid, status=ChunkStatus.PENDING)
-                    chunk_b = Chunk(chunk_id=new_idx, start=mid + 1, end=r_end, status=ChunkStatus.PENDING)
-                    job.chunks[chunk_idx] = chunk_a
-                    job.chunks[new_idx] = chunk_b
-                    
-                    # Put both back in queue
-                    job._queue.put_nowait(chunk_a)
-                    job._queue.put_nowait(chunk_b)
-                    
-                    # Reset both interface progresses to pending so workers restart
-                    other_prog.status = "pending"
-                    
-                    # Correct progress accounting
-                    downloaded_this_chunk = other_prog.downloaded - other_prog._bytes_at_start_of_chunk
-                    with self._thread_locks[job.job_id]:
-                        job.total_downloaded -= downloaded_this_chunk
-                    other_prog.downloaded = other_prog._bytes_at_start_of_chunk
-                    
-                    other_prog.current_chunk_idx = None
-                    
-                    # New interface is already pending from earlier logic
-                    print(f"[ADD_IFACE] Work redistributed. Queue size: {job._queue.qsize()}")
-        
         if job.status == "paused":
             print(f"[ADD_IFACE] Job is paused, just marking {ip} as pending")
             return {"added": True, "paused": True}
@@ -1692,6 +1683,8 @@ class DownloadManager:
             task_key = f"{ip}_{idx}" if num_workers > 1 else ip
             task = asyncio.create_task(self._worker(job, interface, job._queue, job._chunk_files))
             job._workers[task_key] = task
+        if getattr(job, "_completion_event", None):
+            job._completion_event.set()
         return {"spawned": True, "queue_size": job._queue.qsize()}
 
     async def remove_interface(self, job_id: str, ip: str) -> Dict[str, Any]:
@@ -1702,8 +1695,11 @@ class DownloadManager:
             return {"status": "not_in_job"}
 
         prog = job.progress[ip]
-        if prog.status == "excluded":
+        if prog.status in ("excluded", "cancelled"):
             return {"status": "already_excluded"}
+
+        if job.status not in ("downloading", "waiting", "waiting_reconnect", "paused"):
+            raise ValueError(f"Job is not in a state to remove interfaces (status={job.status})")
 
         # Cancel the worker(s)
         for key in list(job._workers.keys()):
@@ -1783,14 +1779,32 @@ class DownloadManager:
         job = self.get_job(job_id)
         if not job:
             raise ValueError("Job not found")
-        if job.status not in ("paused", "waiting_reconnect", "failed"):
+        if job.status not in ("paused", "waiting", "waiting_reconnect", "failed"):
             return {"status": "not_paused", "current": job.status}
         if job.status == "failed" and "resumable" not in (job.error or "").lower():
             return {"status": "cannot_resume", "reason": "Job failed non-resumably"}
 
         job.status = "downloading"
         job.error = None
-        
+        job._reconnect_wait_start = None
+        job.is_cancelled = False
+
+        # Ensure incomplete chunks are in the queue
+        if job._queue is not None and hasattr(job, "_chunk_files"):
+            incomplete = [
+                c for c in job.chunks.values()
+                if c.status != ChunkStatus.COMPLETE or not job._chunk_files[c.chunk_id].exists() or job._chunk_files[c.chunk_id].stat().st_size != c.expected_bytes
+            ]
+            while not job._queue.empty():
+                try:
+                    job._queue.get_nowait()
+                except Exception:
+                    break
+            for c in incomplete:
+                c.status = ChunkStatus.PENDING
+                c.assigned_interface = None
+                job._queue.put_nowait(c)
+
         # Respawn workers for all non-excluded interfaces (clear exclusion cooldown on explicit resume)
         spawned = 0
         for ip, prog in job.progress.items():
@@ -1806,7 +1820,10 @@ class DownloadManager:
                     task = asyncio.create_task(self._worker(job, iface_dict, job._queue, job._chunk_files))
                     job._workers[task_key] = task
                     spawned += 1
-        
+
+        if getattr(job, "_completion_event", None):
+            job._completion_event.set()
+
         return {"status": "resumed", "workers_spawned": spawned}
 
     async def cancel_job(self, job_id: str) -> Dict[str, Any]:
@@ -1986,16 +2003,22 @@ class DownloadManager:
                 for ip, prog in job.progress.items():
                     active_tasks = [t for k, t in job._workers.items() if (k == ip or k.startswith(f"{ip}_")) and not t.done()]
                     if not active_tasks and prog.status != "cancelled":
+                        active_alternatives = [
+                            alt_p for alt_ip, alt_p in job.progress.items()
+                            if alt_ip != ip and alt_p.status not in ("excluded", "failed", "cancelled")
+                        ]
+                        effective_cooldown = float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0) if active_alternatives else 3.0
+
                         if prog.status == "excluded" or prog.consecutive_failures >= max_failures:
                             if now >= prog._cooldown_until and prog._cooldown_until > 0:
                                 # Exclusion cooldown expired: restore to degraded state for probe attempt
                                 prog.status = "pending"
-                                prog.consecutive_failures = max_failures - 1
+                                prog.consecutive_failures = max(0, max_failures - 1)
                                 prog.error = None
                             else:
                                 if prog.status != "excluded":
                                     prog.status = "excluded"
-                                    prog._cooldown_until = now + float(config.get("EXCLUDED_INTERFACE_COOLDOWN") or 60.0)
+                                    prog._cooldown_until = now + effective_cooldown
                                 continue
                         if now < prog._cooldown_until:
                             continue
@@ -2010,6 +2033,11 @@ class DownloadManager:
                                 self._worker(job, iface_dict, job._queue, chunk_files)
                             )
                             job._workers[task_key] = new_task
+
+                        if job.status in ("waiting", "waiting_reconnect"):
+                            job.status = "downloading"
+                            job.error = None
+                            job._reconnect_wait_start = None
 
             # Tail racing: launch duplicate racer on idle healthy interface for straggler chunks
             # Trigger rule:
@@ -2060,6 +2088,11 @@ class DownloadManager:
 
             # Check completion
             all_done = all(w.done() for w in job._workers.values())
+            if not all_done:
+                job._reconnect_wait_start = None
+                if job.status in ("waiting", "waiting_reconnect"):
+                    job.status = "downloading"
+                    job.error = None
 
             if job._queue.empty() and all_done:
                 incomplete = [
@@ -2086,7 +2119,7 @@ class DownloadManager:
                 elapsed_wait = now - job._reconnect_wait_start
 
                 if elapsed_wait < reconnect_timeout:
-                    job.status = "waiting"
+                    job.status = "waiting_reconnect"
                     remaining_secs = int(reconnect_timeout - elapsed_wait)
                     job.error = f"All interfaces unavailable — waiting to reconnect ({remaining_secs}s remaining, resumable)"
                     await asyncio.sleep(0.2)
