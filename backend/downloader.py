@@ -1192,6 +1192,11 @@ class DownloadManager:
             progress.status = "cancelled"
         else:
             progress.status = "completed"
+            progress.speed_mb_s = 0.0
+            job.status = "completed"
+            job.finished_at = time.time()
+            if getattr(job, "_completion_event", None):
+                job._completion_event.set()
 
     # ------------------------------------------------------------------
     # Worker — grabs chunks from the shared queue with EWMA/health adaptive sizing
@@ -1911,10 +1916,35 @@ class DownloadManager:
             job._completion_event.set()
 
         monitor_task = self._job_tasks.get(job_id)
-        if (monitor_task is None or monitor_task.done()) and job.supports_ranges and job._ranges:
-            active_ifaces = [{"ip_address": ip, "name": p.name} for ip, p in job.progress.items() if p.status != "cancelled"]
-            if active_ifaces:
-                self._job_tasks[job_id] = asyncio.create_task(self._parallel_download(job, active_ifaces))
+        if (monitor_task is None or monitor_task.done()):
+            if job.supports_ranges and job._ranges:
+                active_ifaces = [{"ip_address": ip, "name": p.name} for ip, p in job.progress.items() if p.status != "cancelled"]
+                if active_ifaces:
+                    async def _run_resumed_parallel():
+                        try:
+                            await self._parallel_download(job, active_ifaces)
+                            if not job.is_cancelled and job.status not in ("failed", "paused"):
+                                job.status = "completed"
+                                job.finished_at = time.time()
+                        except Exception as e:
+                            job.status = "failed"
+                            job.error = str(e)
+                            job.finished_at = time.time()
+                    self._job_tasks[job_id] = asyncio.create_task(_run_resumed_parallel())
+            elif not job.supports_ranges:
+                active_ifaces = [{"ip_address": ip, "name": p.name} for ip, p in job.progress.items() if p.status != "cancelled"]
+                if active_ifaces:
+                    async def _run_resumed_single():
+                        try:
+                            await self._single_download(job, active_ifaces[0])
+                            if not job.is_cancelled and job.status not in ("failed", "paused"):
+                                job.status = "completed"
+                                job.finished_at = time.time()
+                        except Exception as e:
+                            job.status = "failed"
+                            job.error = str(e)
+                            job.finished_at = time.time()
+                    self._job_tasks[job_id] = asyncio.create_task(_run_resumed_single())
 
         return {"status": "resumed", "workers_spawned": spawned}
 
@@ -2190,7 +2220,21 @@ class DownloadManager:
                             job._workers[racer_ip] = racer_task
                             break
 
-            # Check completion
+            # Check completion:
+            # 1. Fast completion check: If all chunks are COMPLETE and verified on disk, download is finished!
+            incomplete = [
+                c for c in job.chunks.values()
+                if c.status != ChunkStatus.COMPLETE
+                or not chunk_files.get(c.chunk_id, Path("")).exists()
+                or chunk_files[c.chunk_id].stat().st_size != c.expected_bytes
+            ]
+            if len(job.chunks) > 0 and not incomplete:
+                # All chunks complete! Stop workers and proceed to merge immediately
+                for w in list(job._workers.values()):
+                    if not w.done():
+                        w.cancel()
+                break
+
             all_done = all(w.done() for w in job._workers.values())
             if not all_done:
                 job._reconnect_wait_start = None
@@ -2199,10 +2243,6 @@ class DownloadManager:
                     job.error = None
 
             if job._queue.empty() and all_done:
-                incomplete = [
-                    c for c in job.chunks.values()
-                    if c.status != ChunkStatus.COMPLETE or not chunk_files[c.chunk_id].exists() or chunk_files[c.chunk_id].stat().st_size != c.expected_bytes
-                ]
                 if not incomplete:
                     break
                 else:
@@ -2249,6 +2289,10 @@ class DownloadManager:
                 await asyncio.sleep(0.05)
 
         if not job.is_cancelled and job.status not in ("failed", "paused"):
+            job.status = "merging"
+            if getattr(job, "_completion_event", None):
+                job._completion_event.set()
+
             # Important Safety Rule 16: Verify all chunks complete + exact byte count before merge
             for c in job.chunks.values():
                 part_f = job._chunk_files[c.chunk_id]
@@ -2275,6 +2319,15 @@ class DownloadManager:
                 temp_dir.rmdir()
             except OSError:
                 pass
+
+            job.status = "completed"
+            job.finished_at = time.time()
+            for prog in job.progress.values():
+                if prog.status != "cancelled":
+                    prog.status = "completed"
+                    prog.speed_mb_s = 0.0
+            if getattr(job, "_completion_event", None):
+                job._completion_event.set()
 
     async def _download_range(self, job: DownloadJob, interface: Dict[str, str],
                               byte_range: Tuple[int, int], output_file: Path, worker_id: uuid.UUID,

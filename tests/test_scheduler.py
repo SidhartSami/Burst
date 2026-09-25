@@ -968,6 +968,35 @@ class TestScheduler(BaseHttpTest):
         self.assertEqual(d["status"], "waiting_reconnect")
         self.assertEqual(d["waiting_remaining_s"], 0.0)
 
+    # -----------------------------------------------------------------------
+    # Test ZQ — Resumed job completes immediately when all chunks finished and transitions to completed
+    # -----------------------------------------------------------------------
+    async def test_zq_resumed_job_completes_and_sets_status(self):
+        url = f"{self.base_url}/test_zq.bin"
+        dest = self.out_dir / "test_zq.bin"
+        job = await self.manager.create_job(url, str(dest), self.iface)
+        # Wait until download starts
+        for _ in range(50):
+            if job.status == "downloading":
+                break
+            await asyncio.sleep(0.02)
+        # Pause
+        await self.manager.pause_job(job.job_id)
+        self.assertEqual(job.status, "paused")
+
+        # Resume job via manager.resume_job
+        res = await self.manager.resume_job(job.job_id)
+        self.assertEqual(res["status"], "resumed")
+
+        # Wait for the monitor task
+        task = self.manager._job_tasks[job.job_id]
+        await task
+
+        self.assertEqual(job.status, "completed")
+        self.assertIsNotNone(job.finished_at)
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.stat().st_size, len(TEST_DATA))
+
 
 if __name__ == "__main__":
     unittest.main()

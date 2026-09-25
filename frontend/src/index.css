@@ -1044,6 +1044,7 @@ input[type=number] {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .setting-input-wrap input {
@@ -1230,7 +1231,9 @@ input[type=number] {
 .setting-unit {
   font-size: 12px;
   color: var(--text-muted);
-  width: 40px;
+  min-width: 40px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .settings-section-title {

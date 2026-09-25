@@ -2761,7 +2761,7 @@ export default function App() {
                             const raw = Number(e.target.value) * divisor;
                             setAppSettings(prev => ({ ...prev, [key]: raw }));
                           }} />
-                          <span className="setting-unit">{unit}</span>
+                          <span className="setting-unit" style={{ whiteSpace: 'nowrap' }}>{unit}</span>
                         </div>
                       </label>
                     );
