@@ -1,9 +1,93 @@
 // Burst Extension — background.js
-// Intercepts downloads and magnet links, routes them to Burst via native messaging.
+// Minimal extension: icon status (orange/gray).
+// Intercepts ONLY magnet links and .torrent files.
+// All other files (PDFs, documents, media, executables, web pages, etc.) download normally in browser.
+// No popup, no settings, no dropdown.
 
 const NATIVE_HOST = "com.burst.download.manager";
+const API_BASE = "http://127.0.0.1:59284";
 
-// ── Native messaging ──────────────────────────────────────────────────────────
+const actionApi = chrome.action || (typeof browser !== "undefined" && browser.action);
+
+// ── Status & Icon Management ──────────────────────────────────────────────────
+
+let isBurstOnline = false;
+
+function setIconStatus(online) {
+  isBurstOnline = online;
+  const suffix = online ? "_orange.png" : "_gray.png";
+  const iconPaths = {
+    16: `icons/icon16${suffix}`,
+    32: `icons/icon32${suffix}`,
+    48: `icons/icon48${suffix}`,
+    128: `icons/icon128${suffix}`,
+  };
+
+  if (actionApi && actionApi.setIcon) {
+    actionApi.setIcon({ path: iconPaths });
+  }
+  if (actionApi && actionApi.setTitle) {
+    actionApi.setTitle({
+      title: online
+        ? "Burst is running"
+        : "Burst is offline (open Burst to connect)",
+    });
+  }
+}
+
+async function checkBurstStatus() {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch(`${API_BASE}/settings`, {
+      method: "GET",
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      setIconStatus(true);
+      return true;
+    }
+  } catch (err) {
+    // Backend not responding
+  }
+  setIconStatus(false);
+  return false;
+}
+
+// Check status on startup and install
+chrome.runtime.onStartup.addListener(() => checkBurstStatus());
+
+chrome.runtime.onInstalled.addListener(() => {
+  checkBurstStatus();
+  setupContextMenu();
+});
+
+// Periodic alarm to keep status fresh
+chrome.alarms.create("burst-status-check", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "burst-status-check") checkBurstStatus();
+});
+
+setInterval(checkBurstStatus, 10000);
+checkBurstStatus();
+
+// ── Toolbar Icon Click ────────────────────────────────────────────────────────
+// No popup or dropdown: clicking icon brings Burst window to front if running
+if (actionApi && actionApi.onClicked) {
+  actionApi.onClicked.addListener(async () => {
+    const online = await checkBurstStatus();
+    if (online) {
+      try {
+        await fetch(`${API_BASE}/show`, { method: "POST" });
+      } catch (e) {}
+    } else {
+      notify("Burst is Offline", "Open the Burst application to connect.", true);
+    }
+  });
+}
+
+// ── Native Messaging ──────────────────────────────────────────────────────────
 
 function sendToBurst(url) {
   return new Promise((resolve, reject) => {
@@ -21,44 +105,74 @@ function sendToBurst(url) {
   });
 }
 
-// ── Download interception ─────────────────────────────────────────────────────
+// ── Download Interception (Torrent & Magnet ONLY) ─────────────────────────────
+// We ONLY intercept magnet links and .torrent files.
+// PDFs and other files are NEVER interrupted — browser handles them as normal.
 
-chrome.downloads.onCreated.addListener(async (downloadItem) => {
-  // Check if Burst interception is enabled
-  const { burstEnabled } = await chrome.storage.local.get({ burstEnabled: true });
-  if (!burstEnabled) return;
+function isTorrentOrMagnet(downloadItem) {
+  const rawUrl = downloadItem.finalUrl || downloadItem.url || "";
+  const urlLower = rawUrl.toLowerCase().trim();
 
-  const url = downloadItem.url;
+  // Magnet link
+  if (urlLower.startsWith("magnet:")) return true;
 
-  // Ignore blob and data URLs since Burst cannot download them outside the browser context
-  if (url.startsWith("blob:") || url.startsWith("data:")) return;
-
-  // Only intercept real file downloads, not page navigations
-  const isFileDownload =
-    downloadItem.filename ||
-    /\.(zip|rar|7z|tar|gz|exe|msi|iso|apk|dmg|bin|torrent)(\?|$)/i.test(url);
-
-  if (!isFileDownload) return;
-
-  // Cancel the browser's own download
-  chrome.downloads.cancel(downloadItem.id);
-  chrome.downloads.erase({ id: downloadItem.id });
-
+  // URL ends with .torrent (ignoring query/hash)
   try {
-    const result = await sendToBurst(url);
-    if (result.success) {
-      notify("Download started in Burst", url.split("/").pop()?.split("?")[0] || url);
-    } else {
-      notify("Burst Error", result.error || "Unknown error", true);
+    const parsed = new URL(rawUrl);
+    if (parsed.pathname.toLowerCase().endsWith(".torrent")) {
+      return true;
     }
-  } catch (err) {
-    notify("Burst Error", `Could not reach Burst: ${err}`, true);
+  } catch (e) {
+    if (urlLower.split(/[?#]/)[0].endsWith(".torrent")) {
+      return true;
+    }
   }
+
+  // Filename suggested by browser ends with .torrent
+  if (downloadItem.filename && downloadItem.filename.toLowerCase().endsWith(".torrent")) {
+    return true;
+  }
+
+  // MIME type is torrent
+  if (downloadItem.mime && downloadItem.mime.toLowerCase() === "application/x-bittorrent") {
+    return true;
+  }
+
+  return false;
+}
+
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  if (!isBurstOnline || !isTorrentOrMagnet(downloadItem)) {
+    // NOT a torrent/magnet or Burst is offline — allow browser to download normally
+    suggest();
+    return;
+  }
+
+  // Cancel the browser download and send to Burst instead
+  chrome.downloads.cancel(downloadItem.id, () => {
+    chrome.downloads.erase({ id: downloadItem.id });
+  });
+
+  const url = downloadItem.finalUrl || downloadItem.url;
+  sendToBurst(url)
+    .then((result) => {
+      if (result && result.success) {
+        setIconStatus(true);
+        const name = downloadItem.filename || url.split("/").pop()?.split("?")[0] || "torrent";
+        notify("Torrent queued in Burst", name);
+      } else {
+        notify("Burst Error", result?.error || "Unknown error", true);
+      }
+    })
+    .catch((err) => {
+      setIconStatus(false);
+      notify("Burst Error", `Could not reach Burst: ${err}`, true);
+    });
 });
 
-// ── Context menu — right-click any link ──────────────────────────────────────
+// ── Context Menu — right-click any link ──────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(() => {
+function setupContextMenu() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "burst-download",
@@ -66,23 +180,27 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["link"],
     });
   });
-});
+}
 
 chrome.contextMenus.onClicked.addListener(async (info) => {
-  const url = info.linkUrl;
+  const url = info.linkUrl || info.srcUrl;
   if (!url) return;
 
   try {
     const result = await sendToBurst(url);
-    if (result.success) {
+    if (result && result.success) {
+      setIconStatus(true);
       const isTorrent = url.startsWith("magnet:") || url.includes(".torrent");
       const label = isTorrent ? "Torrent queued in Burst" : "Download started in Burst";
-      const detail = isTorrent ? "Magnet link sent" : (url.split("/").pop()?.split("?")[0] || url);
+      const detail = isTorrent
+        ? "Magnet link sent"
+        : (url.split("/").pop()?.split("?")[0] || url);
       notify(label, detail);
     } else {
-      notify("Burst Error", result.error || "Unknown error", true);
+      notify("Burst Error", result?.error || "Unknown error", true);
     }
   } catch (err) {
+    setIconStatus(false);
     notify("Burst Error", `Could not reach Burst: ${err}`, true);
   }
 });
@@ -92,33 +210,30 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 function notify(title, message, isError = false) {
   chrome.notifications.create({
     type: "basic",
-    iconUrl: isError ? "icons/icon48.png" : "icons/icon48.png",
+    iconUrl: isError ? "icons/icon48_gray.png" : "icons/icon48_orange.png",
     title,
     message: message.length > 80 ? message.slice(0, 80) + "…" : message,
     priority: isError ? 2 : 0,
   });
 }
 
-// ── Messages from popup ───────────────────────────────────────────────────────
+// ── Messages from content scripts (magnet links) ─────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "SEND_URL") {
     sendToBurst(msg.url)
-      .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ success: false, error: err }));
-    return true; // keep channel open for async
+      .then((result) => {
+        setIconStatus(true);
+        sendResponse(result);
+      })
+      .catch((err) => {
+        sendResponse({ success: false, error: err });
+      });
+    return true;
   }
 
   if (msg.type === "CHECK_STATUS") {
-    chrome.runtime.sendNativeMessage(
-      NATIVE_HOST,
-      { url: "BURST_INTERNAL_CHECK" },
-      (response) => {
-        // Any response (even an error about __ping__) means the host is alive
-        const alive = !chrome.runtime.lastError;
-        sendResponse({ alive });
-      }
-    );
+    checkBurstStatus().then((alive) => sendResponse({ alive }));
     return true;
   }
 });

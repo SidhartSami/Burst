@@ -18,6 +18,7 @@ PrivilegesRequired=admin
 ChangesEnvironment=yes
 UsedUserAreasWarning=no
 WizardStyle=modern
+DisableWelcomePage=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

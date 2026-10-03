@@ -1,35 +1,37 @@
 {
   "manifest_version": 3,
   "name": "Burst Download Manager",
-  "version": "2.0.0",
-  "description": "Send downloads and magnet links to Burst for maximum bandwidth bonding.",
+  "version": "2.1.1",
+  "description": "Sends magnet links and torrent files to Burst for fast downloading.",
   "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "16": "icons/icon16_orange.png",
+    "32": "icons/icon32_orange.png",
+    "48": "icons/icon48_orange.png",
+    "128": "icons/icon128_orange.png"
   },
-
   "permissions": [
-    "downloads",
-    "downloads.open",
     "nativeMessaging",
     "contextMenus",
-    "storage",
-    "notifications"
+    "notifications",
+    "alarms",
+    "downloads"
   ],
-
+  "host_permissions": [
+    "http://127.0.0.1:59284/*",
+    "http://localhost:59284/*"
+  ],
   "background": {
     "scripts": ["background.js"]
   },
-
   "action": {
-    "default_popup": "popup/popup.html",
     "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png"
-    }
+      "16": "icons/icon16_gray.png",
+      "32": "icons/icon32_gray.png",
+      "48": "icons/icon48_gray.png",
+      "128": "icons/icon128_gray.png"
+    },
+    "default_title": "Burst Download Manager"
   },
-
   "browser_specific_settings": {
     "gecko": {
       "id": "burst@sidhartsami.com",
@@ -38,7 +40,6 @@
       }
     }
   },
-
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
