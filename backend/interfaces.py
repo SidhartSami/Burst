@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from ipaddress import ip_address, ip_network
 from typing import Dict, List, Optional
 
+import platform
 import psutil
 
 
@@ -78,8 +79,12 @@ def get_active_interfaces() -> List[NetworkInterface]:
             continue
 
         lowered = name.lower()
-        if any(key in lowered for key in VIRTUAL_KEYWORDS):
-            continue
+        if platform.system() == "Windows":
+            if any(key in lowered for key in VIRTUAL_KEYWORDS):
+                continue
+        else:
+            if any(key in lowered for key in VIRTUAL_KEYWORDS) or lowered == "lo":
+                continue
 
         ip = _ipv4_from_addresses(iface_addrs)
         if not ip:

@@ -1,0 +1,18 @@
+# Linux dependencies for Burst
+fastapi
+uvicorn
+pywebview[gtk3]
+pystray
+pyperclip
+psutil
+aiohttp
+requests
+websockets
+APScheduler
+pydantic
+python-multipart
+pillow
+pygame
+beautifulsoup4
+lxml
+tzlocal
