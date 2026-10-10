@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/logo.png" width="96" height="96" alt="Burst Logo">
   <h1>Burst</h1>
-  <p><strong>Open-source multi-connection download accelerator for Windows and Linux.</strong><br>
+  <p><strong>Open-source multi-connection download accelerator for Windows, Linux, and macOS.</strong><br>
   Combine your Wi-Fi, Ethernet, and Mobile Hotspot into one aggregated, ultra-fast connection.</p>
 
   <p>
