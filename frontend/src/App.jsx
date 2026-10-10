@@ -1957,6 +1957,7 @@ export default function App() {
                     className="extension-btn chrome"
                     onClick={() => {
                       window.open('https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb', '_blank');
+                      completeOnboarding();
                     }}
                   >
                     <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
@@ -1968,6 +1969,7 @@ export default function App() {
                     className="extension-btn firefox"
                     onClick={() => {
                       window.open('https://addons.mozilla.org/en-US/firefox/addon/burst-download-manager/', '_blank');
+                      completeOnboarding();
                     }}
                   >
                     <span style={{ width: '20px', height: '20px', display: 'inline-flex', flexShrink: 0 }}>
@@ -1976,13 +1978,6 @@ export default function App() {
                     Add to Firefox / Zen
                   </button>
                 </div>
-                <button
-                  className="onboarding-start-btn"
-                  style={{ marginBottom: '12px' }}
-                  onClick={completeOnboarding}
-                >
-                  Continue to Burst →
-                </button>
                 <button
                   className="onboarding-skip"
                   onClick={completeOnboarding}
