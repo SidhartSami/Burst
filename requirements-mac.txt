@@ -1,0 +1,19 @@
+# macOS dependencies for Burst
+fastapi
+uvicorn
+pydantic
+python-multipart
+pywebview[cocoa]
+pystray
+psutil
+aiohttp
+requests
+websockets
+libtorrent
+APScheduler
+tzlocal
+beautifulsoup4
+lxml
+pyobjc-core
+pyobjc-framework-Cocoa
+pyobjc-framework-AppKit

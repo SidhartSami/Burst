@@ -1,0 +1,78 @@
+name: Build macOS Package
+
+on:
+  push:
+    branches:
+      - mac
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build macOS DMG
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements-mac.txt'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-mac.txt
+          pip install pyinstaller
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build React frontend
+        working-directory: frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --windowed \
+            --name Burst-Mac \
+            --paths backend \
+            --add-data "frontend/dist:frontend/dist" \
+            --add-data "assets:assets" \
+            --add-data "complete.wav:." \
+            --hidden-import uvicorn \
+            --hidden-import uvicorn.logging \
+            --hidden-import uvicorn.loops \
+            --hidden-import uvicorn.protocols \
+            --hidden-import uvicorn.lifespans \
+            --hidden-import fastapi \
+            --hidden-import pystray \
+            --hidden-import PIL \
+            --hidden-import apscheduler \
+            --hidden-import tzlocal \
+            launch_mac.py
+
+      - name: Create DMG using hdiutil
+        run: |
+          mkdir -p dist/dmg
+          if [ -d "dist/Burst-Mac.app" ]; then
+            cp -r dist/Burst-Mac.app dist/dmg/
+          elif [ -f "dist/Burst-Mac" ]; then
+            mkdir -p dist/dmg/Burst-Mac.app/Contents/MacOS
+            cp dist/Burst-Mac dist/dmg/Burst-Mac.app/Contents/MacOS/Burst-Mac
+            chmod +x dist/dmg/Burst-Mac.app/Contents/MacOS/Burst-Mac
+          fi
+          hdiutil create -volname Burst -srcfolder dist/dmg -ov -format UDZO dist/Burst-Mac.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Burst-Mac.dmg
+          path: dist/Burst-Mac.dmg

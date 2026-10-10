@@ -150,6 +150,9 @@ if platform.system() == "Windows":
 
         _monitor_enabled = False
 
+elif platform.system() == "Darwin":
+    from clipboard_mac import start_clipboard_monitor, get_clipboard_text  # noqa: F401
+    start_monitor = start_clipboard_monitor
 else:
     from clipboard_linux import start_clipboard_monitor, get_clipboard_text  # noqa: F401
     start_monitor = start_clipboard_monitor
