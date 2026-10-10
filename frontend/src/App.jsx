@@ -3,6 +3,7 @@ import { ResponsiveContainer, AreaChart, Area } from "recharts";
 import { friendlyError } from "./utils/errors";
 import SchedulePicker from "./components/SchedulePicker";
 import TorrentAddModal, { cleanReleaseTitle } from "./TorrentAddModal";
+import ExtensionsPopover from "./components/ExtensionsPopover";
 import {
   AlertTriangle,
   AlertCircle,
@@ -34,7 +35,8 @@ import {
   Clock,
   Video,
   Music,
-  Loader
+  Loader,
+  Puzzle
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -720,6 +722,13 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
 export default function App() {
   const [activeTab, setActiveTab] = useState("active");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isExtensionsOpen, setIsExtensionsOpen] = useState(false);
+  const extensionsTriggerRef = useRef(null);
+
+  useEffect(() => {
+    setIsExtensionsOpen(false);
+  }, [activeTab]);
+
   const [themeMode, setThemeMode] = useState(() => localStorage.getItem("burst_theme_mode") || "dark");
   const isDarkMode = themeMode === "dark" || (themeMode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
 
@@ -2046,6 +2055,17 @@ export default function App() {
             <button className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title="Settings">
               <Settings size={16} /> {!isSidebarCollapsed && "Settings"}
             </button>
+            <button
+              ref={extensionsTriggerRef}
+              type="button"
+              className={`nav-item ${isExtensionsOpen ? 'active' : ''}`}
+              onClick={() => setIsExtensionsOpen(prev => !prev)}
+              title="Extensions"
+              aria-expanded={isExtensionsOpen}
+              aria-haspopup="dialog"
+            >
+              <Puzzle size={16} /> {!isSidebarCollapsed && "Extensions"}
+            </button>
           </div>
 
           {!isSidebarCollapsed && (
@@ -3131,6 +3151,15 @@ export default function App() {
         onConfirm={handleConfirmTorrentModal}
         onCancel={handleCancelTorrentModal}
         onBrowsePath={handleBrowsePath}
+      />
+
+      <ExtensionsPopover
+        isOpen={isExtensionsOpen}
+        onClose={() => setIsExtensionsOpen(false)}
+        triggerRef={extensionsTriggerRef}
+        chromeSvg={CHROME_SVG}
+        firefoxSvg={FIREFOX_SVG}
+        onToast={setToast}
       />
     </div>
   );

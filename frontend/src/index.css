@@ -3224,3 +3224,154 @@ gap: 6px;
   font-size: 13px;
   font-weight: 600;
 }
+
+/* ==========================================================================
+   Browser Extension Popover Menu
+   ========================================================================== */
+
+.extensions-popover-panel {
+  width: 300px;
+  min-width: 280px;
+  max-width: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-sizing: border-box;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
+  animation: extensionsPopoverIn 140ms ease-out;
+  transform-origin: left top;
+}
+
+.dark .extensions-popover-panel {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+@keyframes extensionsPopoverIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .extensions-popover-panel {
+    animation: none;
+  }
+}
+
+.extensions-popover-header {
+  display: flex;
+  flex-direction: column;
+}
+
+.extensions-popover-title {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--text);
+}
+
+.extensions-popover-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+.extensions-popover-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
+}
+
+.extensions-popover-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.extensions-popover-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 54px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  box-sizing: border-box;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.extensions-popover-option:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+.extensions-popover-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.extensions-popover-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.extensions-popover-option-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.extensions-popover-option-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  flex: 1;
+  min-width: 0;
+}
+
+.extensions-popover-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--text);
+}
+
+.extensions-popover-option-subtitle {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--text-muted);
+}
+
+.extensions-popover-option-ext {
+  color: var(--text-muted);
+  opacity: 0.6;
+  flex-shrink: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.extensions-popover-option:hover:not(:disabled) .extensions-popover-option-ext {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.extensions-popover-footer {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--text-muted);
+  text-align: left;
+}
