@@ -3081,55 +3081,6 @@ export default function App() {
                     );
                   })}
 
-                  <div className="settings-section-title">Browser Extensions</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 14px', flex: 1, justifyContent: 'center' }}
-                        onClick={() => window.open('https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb', '_blank')}
-                      >
-                        <span style={{ width: '16px', height: '16px', display: 'inline-flex', flexShrink: 0 }}>
-                          {CHROME_SVG}
-                        </span>
-                        Chrome / Edge Extension
-                      </button>
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 14px', flex: 1, justifyContent: 'center' }}
-                        onClick={() => window.open('https://addons.mozilla.org/en-US/firefox/addon/burst-download-manager/', '_blank')}
-                      >
-                        <span style={{ width: '16px', height: '16px', display: 'inline-flex', flexShrink: 0 }}>
-                          {FIREFOX_SVG}
-                        </span>
-                        Firefox / Zen Extension
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="settings-section-title">Setup & Walkthrough</div>
-                  <label className="setting-row">
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                      Onboarding Guide
-                      <InfoTooltip text="Re-run the first-time setup guide and browser extension installer" />
-                    </span>
-                    <div className="setting-input-wrap">
-                      <button
-                        type="button"
-                        className="btn secondary"
-                        style={{ padding: '6px 12px', fontSize: '12px' }}
-                        onClick={() => {
-                          setOnboardingStep(1);
-                          setShowOnboarding(true);
-                        }}
-                      >
-                        Reopen Setup Guide
-                      </button>
-                    </div>
-                  </label>
-
                   <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
                     Burst v2.0.0
                   </div>
