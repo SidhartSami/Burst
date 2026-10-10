@@ -38,12 +38,11 @@ Most download managers are limited to a single physical internet connection. Eve
 ## Demo
 
 <div align="center">
-  <video src="assets/demo.mp4" width="100%" controls></video>
+  <img src="assets/demo.gif" width="100%" alt="Burst Demo Video — Real-time Multi-Interface Bonding">
   <p>
-    <a href="assets/demo.mp4"><strong>▶ Watch Demo Video (assets/demo.mp4)</strong></a> &nbsp;&bull;&nbsp;
-    <a href="https://sidhartsami.github.io/getburst/"><strong>🌐 Live Interactive Demo on getburst.app</strong></a>
+    <em>Real-time multi-interface bonding, dynamic chunk map, and BitTorrent selective file picking in action.</em><br>
+    <sub>HD video file: <a href="assets/demo.mp4">assets/demo.mp4</a> &bull; Interactive website demo: <a href="https://sidhartsami.github.io/getburst/">getburst.app</a></sub>
   </p>
-  <p><em>Real-time multi-interface bonding, dynamic chunk map, and BitTorrent selective file picking in action.</em></p>
 </div>
 
 ---
