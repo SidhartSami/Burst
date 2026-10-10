@@ -60,7 +60,7 @@ chrome.runtime.onStartup.addListener(() => checkBurstStatus());
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") {
-    chrome.tabs.create({ url: "https://sidhartsami.github.io/getburst/?ref=extension" });
+    chrome.tabs.create({ url: "https://sidhartsami.github.io/getburst/welcome" });
   }
   checkBurstStatus();
   setupContextMenu();
