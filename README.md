@@ -1,27 +1,23 @@
 <div align="center">
-  <img src="assets/logo.png" width="120" height="120" alt="Burst Logo">
+  <img src="assets/logo.png" width="96" height="96" alt="Burst Logo">
   <h1>Burst</h1>
-  <p><strong>Combine your Wi-Fi, Ethernet, and Mobile Hotspot into one ultra-fast download connection.</strong></p>
+  <p><strong>Open-source multi-connection download accelerator for Windows and Linux.</strong><br>
+  Combine your Wi-Fi, Ethernet, and Mobile Hotspot into one aggregated, ultra-fast connection.</p>
 
   <p>
-    <a href="https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe">
-      <img src="https://img.shields.io/badge/Download-Burst%20for%20Windows%20(v2.0.0)-f97316?style=for-the-badge&logo=windows&logoColor=white" alt="Download Burst for Windows">
-    </a>
-    <a href="https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage">
-      <img src="https://img.shields.io/badge/Download-Burst%20for%20Linux%20AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download Burst for Linux">
-    </a>
+    <a href="https://sidhartsami.github.io/getburst/"><strong>Official Website</strong></a> &nbsp;&bull;&nbsp;
+    <a href="https://github.com/SidhartSami/Burst/releases/latest"><strong>Download Releases</strong></a> &nbsp;&bull;&nbsp;
+    <a href="#key-features"><strong>Features</strong></a> &nbsp;&bull;&nbsp;
+    <a href="#browser-extensions"><strong>Extensions</strong></a> &nbsp;&bull;&nbsp;
+    <a href="#quick-start"><strong>Quick Start</strong></a> &nbsp;&bull;&nbsp;
+    <a href="#building-from-source"><strong>Build from Source</strong></a>
   </p>
 
-  [![Version](https://img.shields.io/badge/Version-v2.0.0-f97316.svg)](https://github.com/SidhartSami/Burst/releases)
-  [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-0078D6.svg)](https://github.com/SidhartSami/Burst/releases)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-  [![Free & Open Source](https://img.shields.io/badge/Free%20%26-Open%20Source-22c55e.svg)](https://github.com/SidhartSami/Burst)
-
   <p>
-    <a href="https://github.com/SidhartSami/Burst/stargazers"><img src="https://img.shields.io/github/stars/SidhartSami/Burst?style=social" alt="GitHub stars"></a>
-    <a href="https://github.com/SidhartSami/Burst/network/members"><img src="https://img.shields.io/github/forks/SidhartSami/Burst?style=social" alt="GitHub forks"></a>
-    <a href="https://github.com/SidhartSami/Burst/issues"><img src="https://img.shields.io/github/issues/SidhartSami/Burst?color=orange" alt="Open issues"></a>
-    <a href="https://github.com/SidhartSami/Burst/graphs/contributors"><img src="https://img.shields.io/github/contributors/SidhartSami/Burst?color=blue" alt="Contributors"></a>
+    <a href="https://github.com/SidhartSami/Burst/releases/latest"><img src="https://img.shields.io/github/v/release/SidhartSami/Burst?color=f97316&label=Version" alt="Latest Version"></a>
+    <a href="https://github.com/SidhartSami/Burst/releases"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-0078D6" alt="Platforms"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e.svg" alt="MIT License"></a>
+    <a href="https://github.com/SidhartSami/Burst/stargazers"><img src="https://img.shields.io/github/stars/SidhartSami/Burst?color=f97316&style=flat" alt="GitHub Stars"></a>
   </p>
 </div>
 
@@ -29,120 +25,146 @@
 
 ## What is Burst?
 
-Have you ever wished you could combine your home Wi-Fi and your phone's 5G mobile hotspot to download files twice as fast?
+Most download managers are limited to a single physical internet connection. Even if your computer is plugged into Ethernet and simultaneously connected to high-speed Wi-Fi or a 5G mobile hotspot, standard software only utilizes one interface at a time.
 
-**Burst** is a free, community-driven download accelerator for Windows and Linux that bonds all your available internet connections together. When you download a file or torrent, Burst divides it into pieces and downloads them simultaneously across your **Wi-Fi, Ethernet cable, and USB/Hotspot connections**, combining their speeds into one powerful stream.
+**Burst** changes that. It bonds all available network interfaces into a unified pipe, parallelizing HTTP downloads and BitTorrent traffic across your **Wi-Fi, Ethernet, USB tethering, and cellular hotspots** simultaneously.
 
-Burst is built fully in the open — the engine, the scheduler, the reliability logic, and the roadmap all live in this repository. Issues, pull requests, and forks are welcome.
-
-* No expensive hardware required.
-* No paid VPNs or remote bonding subscriptions.
-* 100% free, MIT-licensed, and open source.
+* **No paid hardware** or specialized bonding routers required.
+* **No remote proxy subscriptions** or third-party VPN accounts needed.
+* **100% free, MIT-licensed, and open source** with zero telemetry.
 
 ---
 
 ## Demo
 
 <div align="center">
-  <video src="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4" width="100%" controls></video>
-
+  <video src="assets/demo.mp4" width="100%" controls></video>
   <p>
-    <a href="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4">
-      <img src="https://img.shields.io/badge/▶%20Play%20Demo%20Video-demo.mp4-f97316?style=for-the-badge&logo=youtube&logoColor=white" alt="Play Demo Video">
-    </a>
-    <a href="https://sidhartsami.github.io/getburst/">
-      <img src="https://img.shields.io/badge/🌐%20Interactive%20Website-getburst.app-0078D6?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Visit getburst.app">
-    </a>
+    <a href="assets/demo.mp4"><strong>▶ Watch Demo Video (assets/demo.mp4)</strong></a> &nbsp;&bull;&nbsp;
+    <a href="https://sidhartsami.github.io/getburst/"><strong>🌐 Live Interactive Demo on getburst.app</strong></a>
   </p>
-
-  <p>
-    <em>Multi-interface bonding, live speed dashboard, and accelerated download engine in action.</em><br>
-    <sub>Direct link: <a href="assets/demo.mp4">assets/demo.mp4</a> &bull; Release asset: <a href="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4">v2.0.0/demo.mp4</a></sub>
-  </p>
+  <p><em>Real-time multi-interface bonding, dynamic chunk map, and BitTorrent selective file picking in action.</em></p>
 </div>
+
+---
+
+## Downloads & Platform Support
+
+Burst is distributed as native standalone executables with zero runtime dependencies.
+
+| Platform | Format | Architecture | Direct Download |
+| :--- | :--- | :--- | :--- |
+| **Windows** | Setup Installer (`.exe`) | Windows 10 / 11 (64-bit) | [**Burst_Setup_v2.0.0.exe**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe) |
+| **Linux** | Portable AppImage (`.AppImage`) | Ubuntu 22.04+, Debian, Fedora, Arch (64-bit) | [**Burst-Linux.AppImage**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage) |
+
+> 🍎 **macOS Support**: Currently under active development for macOS Monterey+ (Universal / Apple Silicon & Intel). Track progress in the [Roadmap](#roadmap--help-wanted).
 
 ---
 
 ## Key Features
 
-### <img src="https://api.iconify.design/ph/link-bold.svg?color=%23f97316" width="20" valign="middle"> True Multi-Connection Bonding
-Plug in an Ethernet cable while connected to Wi-Fi, or turn on USB tethering with your phone's cellular data. Burst automatically detects every active adapter and aggregates their bandwidth simultaneously.
+### ⚡ True Multi-Connection Bonding
+Plug in an Ethernet cable while connected to Wi-Fi, or enable USB tethering from your smartphone. Burst dynamically detects every healthy network adapter, assigns distinct sockets, and aggregates their bandwidth simultaneously.
 
-### <img src="https://api.iconify.design/ph/magnet-bold.svg?color=%23f97316" width="20" valign="middle"> Advanced Torrent & Magnet Downloader
-Built on the industry-standard `libtorrent` engine. Paste magnet links, drop `.torrent` files, and browse the full file tree to download only the files you want before downloading starts.
+### 🧲 Advanced BitTorrent & Magnet Engine
+Built directly on top of `libtorrent`. Paste magnet links or drop `.torrent` files into the window to inspect metadata, browse file hierarchies, and selectively prioritize or exclude individual files before downloading begins.
 
-### <img src="https://api.iconify.design/ph/chart-bar-bold.svg?color=%23f97316" width="20" valign="middle"> Real-Time Chunk Map & Speed Dashboard
-Watch your download progress live! Burst's interactive chunk map shows exactly which network adapter (Wi-Fi, Ethernet, or Mobile Data) is downloading each piece in real time.
+### 📊 Real-Time Chunk Map & Observability
+Observe download progress live. Burst features an interactive visual chunk map color-coded by network interface, giving you instant visual feedback on which connection downloaded which piece.
 
-### <img src="https://api.iconify.design/ph/globe-bold.svg?color=%23f97316" width="20" valign="middle"> One-Click Browser Integration
-Download files directly from your favorite browser. Burst includes lightweight extensions for **Google Chrome, Microsoft Edge, Mozilla Firefox, and Zen Browser**.
+### 🧩 Browser Extension Auto-Capture
+Capture downloads directly from your favorite browser. Lightweight companion extensions automatically intercept downloads and route them into Burst's accelerated bonding engine.
 
-### <img src="https://api.iconify.design/ph/arrows-clockwise-bold.svg?color=%23f97316" width="20" valign="middle"> Reliable Pause & Resume
-Network drops or need to step away? Burst safely saves your progress with SHA-256 validation. Pause, resume, or restart your PC without losing downloaded data.
+### 🛡️ Adaptive Schedulers & Work Stealing
+* **Dynamic EWMA Chunk Sizing**: Automatically tunes chunk requests (256 KB to 8 MB) based on each adapter's real-time Exponential Weighted Moving Average throughput.
+* **Sub-Chunk Work Stealing**: High-speed adapters steal unstarted chunks from slower or congested adapters to eliminate stragglers.
+* **Tail Racing**: Detects lagging chunks and dispatches duplicate racer tasks on idle interfaces. The first to verify claims the chunk, cancelling losing tasks with zero corruption.
 
-### <img src="https://api.iconify.design/ph/moon-bold.svg?color=%23f97316" width="20" valign="middle"> Clean Dark Mode Interface
-Designed from the ground up for Windows with a fast, modern dark-mode interface, audio completion chimes, and system tray minimization.
+### 💾 Safe Pause, Resume & Integrity Checks
+Pause and resume downloads anytime. Chunks are validated with SHA-256 integrity checks, and progress is continuously persisted to disk, protecting your downloads against sudden network drops or power outages.
 
 ---
 
-## How to Install & Use Burst
+## Quick Start
 
-### 1. Download
-Click below to download the latest release for your platform:
-
-* **Windows**: **[Download Burst Setup (v2.0.0)](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe)** (`.exe` installer)
-* **Linux**: **[Download Burst-Linux.AppImage](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage)** (portable AppImage)
-
-### 2. Install & Run
+### 1. Installation
 
 #### Windows
-Run `Burst_Setup_v2.0.0.exe` and follow the setup wizard. The installer sets up desktop shortcuts and configures Windows Firewall permissions automatically.
+Download [**Burst_Setup_v2.0.0.exe**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe) and run the installer. The wizard configures desktop shortcuts and automatically registers Windows Firewall rules.
 
-#### Linux (Ubuntu, Debian, Fedora, Arch, WSL2)
-Download `Burst-Linux.AppImage`, make it executable, and run it:
+#### Linux
+Download [**Burst-Linux.AppImage**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage), make it executable, and launch:
 ```bash
 chmod +x Burst-Linux.AppImage
 ./Burst-Linux.AppImage
 ```
 
-### 3. Connect Your Networks & Download
-1. Connect your PC to two or more connections (e.g. Wi-Fi + your phone's USB tethering hotspot, or Wi-Fi + Ethernet).
-2. Open Burst — you will see your active network adapters listed at the top.
-3. Paste any download URL, magnet link, or drop a `.torrent` file into the app, and click **Download**.
+### 2. Connect Your Interfaces
+Connect your computer to two or more network sources:
+* **Option A**: Home Wi-Fi + Ethernet cable plugged into your router.
+* **Option B**: Wi-Fi + Smartphone connected via USB cable with **USB Tethering** enabled.
+* **Option C**: Built-in Wi-Fi + USB Wi-Fi adapter connected to a secondary network.
+
+### 3. Start Accelerating
+Open Burst — active adapters will appear in the top interface bar. Paste any download URL, magnet link, or drop a `.torrent` file to begin downloading at full speed.
 
 ---
 
 ## Browser Extensions
 
-Burst can capture your browser downloads with a single click:
+Capture browser downloads seamlessly with the official Burst companion extension:
 
-* **Chrome & Brave & Edge**: Install via the [Chrome Web Store](https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb) or enable during setup.
-* **Firefox & Zen Browser**: Enable during setup to register the companion extension.
+| Browser | Installation Method |
+| :--- | :--- |
+| **Google Chrome / Brave / Opera / Vivaldi** | [**Chrome Web Store**](https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb) or load unpacked `extension-chrome.zip` |
+| **Microsoft Edge** | Install from Chrome Web Store or enable during setup |
+| **Mozilla Firefox / Zen Browser / Floorp** | Load temporary add-on via `about:debugging` using `extension-firefox.zip` |
 
----
-
-## Roadmap / Help Wanted
-
-These are the areas where contributions would help most:
-
-* ✅ **Linux support** — Completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
-* **macOS support** — interface detection/binding via `networksetup`, packaging (.dmg / app bundle).
-* **Tail racing tuning** — currently experimental and off by default; benchmarking on real asymmetric networks would help decide whether it ships on by default.
-* **Localization** — UI translations.
-
-If any of this interests you, open an issue to say what you're picking up before starting, so effort isn't duplicated.
+*Pre-packaged extension bundles are available on the [Releases page](https://github.com/SidhartSami/Burst/releases).*
 
 ---
 
-## Contributing
+## Building from Source
 
-Contributions of all sizes are welcome — bug reports, docs fixes, feature ideas, and pull requests.
+### Prerequisites
+* **Python 3.11+**
+* **Node.js 18+** & npm (for the React/Vite frontend)
 
-1. Check open [issues](https://github.com/SidhartSami/Burst/issues) or the Roadmap above for something to work on.
-2. Fork the repo and create a feature branch.
-3. Open a pull request describing what changed and why.
+### Clone & Setup
 
-If you find Burst useful, starring the repo helps others discover it too.
+```bash
+# Clone the repository
+git clone https://github.com/SidhartSami/Burst.git
+cd Burst
+
+# Build the React frontend
+cd frontend
+npm install
+npm run build
+cd ..
+
+# Install Python backend dependencies
+# For Windows:
+pip install -r requirements.txt
+
+# For Linux:
+pip install -r requirements-linux.txt
+
+# Run Burst
+python launch_linux.py   # Linux
+python run_burst.py      # Windows
+```
+
+---
+
+## Roadmap & Help Wanted
+
+* ✅ **Linux Support** — Fully completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
+* 🔄 **macOS Support** — In progress (`window_mac.py`, `clipboard_mac.py`, Cocoa GUI, and DMG CI pipeline).
+* 🧪 **Tail-Racing Benchmarks** — Evaluating racing heuristics on heavily asymmetric network setups (e.g. 100 Mbps fiber vs. 5 Mbps cellular).
+* 🌍 **Localization (i18n)** — Community translations for the UI.
+
+Contributions of all kinds are welcome! Check out the [open issues](https://github.com/SidhartSami/Burst/issues) or submit a pull request.
 
 ---
 
@@ -150,46 +172,41 @@ If you find Burst useful, starring the repo helps others discover it too.
 
 <details>
 <summary><strong>Do I need a special router or subscription?</strong></summary>
-<p>No! Burst runs completely on your local computer. It uses standard Windows networking sockets to split and request different parts of your files across your connected network interfaces.</p>
+<p>No. Burst runs 100% locally on your machine. It binds standard OS networking sockets directly to each physical network interface.</p>
 </details>
 
 <details>
-<summary><strong>How do I connect multiple internet connections on one laptop/PC?</strong></summary>
-<p>The easiest ways are:
+<summary><strong>How do I connect multiple internet connections?</strong></summary>
+<p>The simplest methods are:
 <ul>
-  <li>Connect to your home Wi-Fi, then plug in an Ethernet cable to your router.</li>
-  <li>Connect to your Wi-Fi, then connect your smartphone via USB cable and turn on <em>USB Tethering</em> (using your 4G/5G data).</li>
-  <li>Use an external USB Wi-Fi dongle to connect to two separate Wi-Fi networks at once.</li>
+  <li>Connect to Wi-Fi, then plug in an Ethernet cable to your router.</li>
+  <li>Connect to Wi-Fi, then plug your phone in via USB and enable <strong>USB Tethering</strong> (using mobile data).</li>
+  <li>Plug in an external USB Wi-Fi adapter to connect to a second Wi-Fi network.</li>
 </ul>
 </p>
 </details>
 
 <details>
 <summary><strong>Does Burst support torrents and magnet links?</strong></summary>
-<p>Yes! Burst includes a full BitTorrent client with DHT, peer exchange, and an interactive file selector that lets you choose specific files to download.</p>
+<p>Yes. Burst includes a full BitTorrent client with DHT metadata resolution, peer exchange, and an interactive file selector.</p>
 </details>
 
 <details>
 <summary><strong>Can I pause downloads and resume them later?</strong></summary>
-<p>Yes. Both regular downloads and torrents can be paused and resumed at any time without losing progress.</p>
+<p>Yes. All HTTP and torrent downloads support pause and resume with SHA-256 chunk integrity validation.</p>
 </details>
 
 <details>
-<summary><strong>What are the system requirements?</strong></summary>
-<p>Windows 10 or Windows 11 (64-bit), and at least one active network connection (two or more recommended to take advantage of bandwidth aggregation).</p>
-</details>
-
-<details>
-<summary><strong>Is macOS or Linux supported?</strong></summary>
-<p>Windows and Linux (via portable AppImage) are both officially supported! macOS support is currently under development (see Roadmap above).</p>
+<summary><strong>Which operating systems are supported?</strong></summary>
+<p>Windows 10/11 (64-bit) and Linux (Ubuntu 22.04+, Debian, Fedora, Arch) are fully supported. macOS support is currently under active development.</p>
 </details>
 
 ---
 
 ## License
 
-Burst is licensed under the [MIT License](LICENSE). Free for personal and commercial use.
+Burst is open source under the [MIT License](LICENSE). Free for personal and commercial use.
 
 <div align="center">
-  <sub>Built by <a href="https://github.com/SidhartSami">Sidhart Sami</a> and contributors.</sub>
+  <sub>Maintained by <a href="https://github.com/SidhartSami">Sidhart Sami</a> and contributors &bull; <a href="https://sidhartsami.github.io/getburst/">Website</a> &bull; <a href="https://github.com/SidhartSami/Burst">GitHub</a></sub>
 </div>
