@@ -15,7 +15,7 @@
 
   <p>
     <a href="https://github.com/SidhartSami/Burst/releases/latest"><img src="https://img.shields.io/github/v/release/SidhartSami/Burst?color=f97316&label=Version" alt="Latest Version"></a>
-    <a href="https://github.com/SidhartSami/Burst/releases"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-0078D6" alt="Platforms"></a>
+    <a href="https://github.com/SidhartSami/Burst/releases"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6" alt="Platforms"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e.svg" alt="MIT License"></a>
     <a href="https://github.com/SidhartSami/Burst/stargazers"><img src="https://img.shields.io/github/stars/SidhartSami/Burst?color=f97316&style=flat" alt="GitHub Stars"></a>
   </p>
@@ -55,8 +55,7 @@ Burst is distributed as native standalone executables with zero runtime dependen
 | :--- | :--- | :--- | :--- |
 | **Windows** | Setup Installer (`.exe`) | Windows 10 / 11 (64-bit) | [**Burst_Setup_v2.0.0.exe**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe) |
 | **Linux** | Portable AppImage (`.AppImage`) | Ubuntu 22.04+, Debian, Fedora, Arch (64-bit) | [**Burst-Linux.AppImage**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage) |
-
-> **macOS Support**: Currently under active development for macOS Monterey+ (Universal / Apple Silicon & Intel). Track progress in the [Roadmap](#roadmap--help-wanted).
+| **macOS** | Disk Image (`.dmg`) | macOS 12 Monterey+ (Apple Silicon & Intel) | [**Burst-Mac.dmg**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Mac.dmg) |
 
 ---
 
@@ -97,6 +96,11 @@ Download [**Burst-Linux.AppImage**](https://github.com/SidhartSami/Burst/release
 chmod +x Burst-Linux.AppImage
 ./Burst-Linux.AppImage
 ```
+
+#### macOS (macOS 12 Monterey+ · Apple Silicon & Intel)
+1. Download [**Burst-Mac.dmg**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Mac.dmg) and open the disk image.
+2. Drag **Burst** into your **Applications** folder.
+3. On first launch, **right-click (or Control-click) Burst &rarr; Open** to bypass macOS Gatekeeper (since this community release is unsigned).
 
 ### 2. Connect Your Interfaces
 Connect your computer to two or more network sources:
@@ -159,7 +163,7 @@ python run_burst.py      # Windows
 ## Roadmap & Help Wanted
 
 * **Linux Support** — Completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
-* **macOS Support** — In progress (`window_mac.py`, `clipboard_mac.py`, Cocoa GUI, and DMG CI pipeline).
+* **macOS Support** — Completed in v2.0.0 (Native Cocoa backend, Apple Silicon & Intel DMG package).
 * **Tail-Racing Benchmarks** — Evaluating racing heuristics on heavily asymmetric network setups.
 * **Localization (i18n)** — Community translations for the UI.
 
@@ -197,7 +201,7 @@ Contributions of all kinds are welcome! Check out the [open issues](https://gith
 
 <details>
 <summary><strong>Which operating systems are supported?</strong></summary>
-<p>Windows 10/11 (64-bit) and Linux (Ubuntu 22.04+, Debian, Fedora, Arch) are fully supported. macOS support is currently under active development.</p>
+<p>Windows 10/11 (64-bit), Linux (Ubuntu, Debian, Fedora, Arch via AppImage), and macOS 12 Monterey+ (Apple Silicon & Intel via DMG) are all officially supported.</p>
 </details>
 
 ---
