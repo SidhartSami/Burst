@@ -22,8 +22,8 @@ DisableWelcomePage=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "chromeext"; Description: "Enable Chrome/Edge Integration"; GroupDescription: "Browser Extensions:"; Flags: unchecked
-Name: "firefoxext"; Description: "Enable Firefox/Zen Integration"; GroupDescription: "Browser Extensions:"; Flags: unchecked
+Name: "chromeext"; Description: "Enable Chrome/Edge Integration (Native Messaging Host)"; GroupDescription: "Browser Extensions:"
+Name: "firefoxext"; Description: "Enable Firefox/Zen Integration (Native Messaging Host)"; GroupDescription: "Browser Extensions:"
 
 [Files]
 ; This grabs the EXE you just built with PyInstaller
@@ -37,9 +37,6 @@ Source: "backend\native_host.py";           DestDir: "{app}"; Flags: ignoreversi
 Source: "backend\native_host.bat";          DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\com.burst.download.manager.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "backend\com.burst.download.manager.firefox.json"; DestDir: "{app}"; Flags: ignoreversion
-; Package the extensions so they are automatically unpacked for the user to load
-Source: "extension-chrome\*"; DestDir: "{app}\extension-chrome"; Excludes: "*.pem"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "extension-firefox\*"; DestDir: "{app}\extension-firefox"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; -- Chrome Native Messaging Host --
@@ -89,7 +86,14 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""B
 Filename: "{app}\Burst.exe"; Description: "{cm:LaunchProgram,Burst}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
+Filename: "{cmd}"; Parameters: "/C taskkill /F /IM Burst.exe /T >nul 2>&1"; Flags: runhidden
+Filename: "{cmd}"; Parameters: "/C taskkill /F /IM native_host.exe /T >nul 2>&1"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Burst"""; Flags: runhidden
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{localappdata}\Burst"
+Type: filesandordirs; Name: "{userappdata}\Burst"
 
 
 [Code]
@@ -192,5 +196,11 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     RemovePath(ExpandConstant('{app}'));
+  end;
+  if CurUninstallStep = usPostUninstall then
+  begin
+    DelTree(ExpandConstant('{app}'), True, True, True);
+    DelTree(ExpandConstant('{localappdata}\Burst'), True, True, True);
+    DelTree(ExpandConstant('{userappdata}\Burst'), True, True, True);
   end;
 end;
