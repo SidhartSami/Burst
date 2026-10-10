@@ -5,6 +5,7 @@ import asyncio
 import time
 import sys
 import os
+import platform
 import ctypes
 
 # Set explicit AppUserModelID so Windows groups notifications under "Burst" and displays the correct name
@@ -169,94 +170,111 @@ async def history_saver_loop():
 # ---------------------------------------------------------------------------
 # Windows Taskbar Progress Bar Overlay (ITaskbarList3)
 # ---------------------------------------------------------------------------
-import ctypes
-from ctypes import HRESULT, c_void_p, c_ulonglong, c_int, WINFUNCTYPE, POINTER
+if platform.system() == "Windows":
+    import ctypes
+    from ctypes import HRESULT, c_void_p, c_ulonglong, c_int, WINFUNCTYPE, POINTER
 
-class GUID(ctypes.Structure):
-    _fields_ = [
-        ("Data1", ctypes.c_ulong),
-        ("Data2", ctypes.c_ushort),
-        ("Data3", ctypes.c_ushort),
-        ("Data4", ctypes.c_ubyte * 8)
-    ]
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_ulong),
+            ("Data2", ctypes.c_ushort),
+            ("Data3", ctypes.c_ushort),
+            ("Data4", ctypes.c_ubyte * 8)
+        ]
 
-class TaskbarProgress:
-    TBPF_NOPROGRESS = 0
-    TBPF_INDETERMINATE = 1
-    TBPF_NORMAL = 2
-    TBPF_ERROR = 4
-    TBPF_PAUSED = 8
+    class TaskbarProgress:
+        TBPF_NOPROGRESS = 0
+        TBPF_INDETERMINATE = 1
+        TBPF_NORMAL = 2
+        TBPF_ERROR = 4
+        TBPF_PAUSED = 8
 
-    def __init__(self):
-        self.taskbar = None
-        self.hwnd = None
-        if os.name != "nt":
-            return
-        try:
-            ctypes.windll.ole32.CoInitialize(None)
-            CLSID_TaskbarList = GUID(0x56FDF344, 0xFD6D, 0x11D0, (ctypes.c_ubyte * 8)(0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
-            IID_ITaskbarList3 = GUID(0xEA1AFB91, 0x9C28, 0x4B86, (ctypes.c_ubyte * 8)(0xA6, 0xE9, 0x9E, 0x99, 0x02, 0x5D, 0x98, 0x77))
-            
-            self.taskbar = c_void_p()
-            hr = ctypes.windll.ole32.CoCreateInstance(
-                ctypes.byref(CLSID_TaskbarList),
-                None,
-                1,  # CLSCTX_INPROC_SERVER
-                ctypes.byref(IID_ITaskbarList3),
-                ctypes.byref(self.taskbar)
-            )
-            if hr != 0:
-                self.taskbar = None
-        except Exception as e:
-            print(f"[TASKBAR] Init error: {e}", flush=True)
+        def __init__(self):
+            self.taskbar = None
+            self.hwnd = None
+            if os.name != "nt":
+                return
+            try:
+                ctypes.windll.ole32.CoInitialize(None)
+                CLSID_TaskbarList = GUID(0x56FDF344, 0xFD6D, 0x11D0, (ctypes.c_ubyte * 8)(0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+                IID_ITaskbarList3 = GUID(0xEA1AFB91, 0x9C28, 0x4B86, (ctypes.c_ubyte * 8)(0xA6, 0xE9, 0x9E, 0x99, 0x02, 0x5D, 0x98, 0x77))
+                
+                self.taskbar = c_void_p()
+                hr = ctypes.windll.ole32.CoCreateInstance(
+                    ctypes.byref(CLSID_TaskbarList),
+                    None,
+                    1,  # CLSCTX_INPROC_SERVER
+                    ctypes.byref(IID_ITaskbarList3),
+                    ctypes.byref(self.taskbar)
+                )
+                if hr != 0:
+                    self.taskbar = None
+            except Exception as e:
+                print(f"[TASKBAR] Init error: {e}", flush=True)
 
-    def _get_hwnd(self):
-        if not self.hwnd:
-            global window_ref
-            if window_ref and hasattr(window_ref, "native") and window_ref.native:
-                try:
-                    self.hwnd = int(window_ref.native.Handle)
-                except Exception:
-                    pass
-            # Fallback for dev mode/closed windows
+        def _get_hwnd(self):
             if not self.hwnd:
-                try:
-                    self.hwnd = ctypes.windll.user32.FindWindowW(None, "Burst")
-                except Exception:
-                    pass
-        return self.hwnd
+                global window_ref
+                if window_ref and hasattr(window_ref, "native") and window_ref.native:
+                    try:
+                        self.hwnd = int(window_ref.native.Handle)
+                    except Exception:
+                        pass
+                # Fallback for dev mode/closed windows
+                if not self.hwnd:
+                    try:
+                        self.hwnd = ctypes.windll.user32.FindWindowW(None, "Burst")
+                    except Exception:
+                        pass
+            return self.hwnd
 
-    def set_progress(self, completed: int, total: int):
-        if not self.taskbar:
-            return
-        hwnd = self._get_hwnd()
-        if not hwnd:
-            return
-        try:
-            # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
-            vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
-            func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[9]
-            prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_ulonglong, c_ulonglong)
-            func = prototype(func_ptr)
-            func(self.taskbar, hwnd, completed, total)
-        except Exception as e:
-            print(f"[TASKBAR] SetProgressValue error: {e}", flush=True)
+        def set_progress(self, completed: int, total: int):
+            if not self.taskbar:
+                return
+            hwnd = self._get_hwnd()
+            if not hwnd:
+                return
+            try:
+                # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
+                vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
+                func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[9]
+                prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_ulonglong, c_ulonglong)
+                func = prototype(func_ptr)
+                func(self.taskbar, hwnd, completed, total)
+            except Exception as e:
+                print(f"[TASKBAR] SetProgressValue error: {e}", flush=True)
 
-    def set_state(self, state: int):
-        if not self.taskbar:
-            return
-        hwnd = self._get_hwnd()
-        if not hwnd:
-            return
-        try:
-            # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
-            vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
-            func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[10]
-            prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_int)
-            func = prototype(func_ptr)
-            func(self.taskbar, hwnd, state)
-        except Exception as e:
-            print(f"[TASKBAR] SetProgressState error: {e}", flush=True)
+        def set_state(self, state: int):
+            if not self.taskbar:
+                return
+            hwnd = self._get_hwnd()
+            if not hwnd:
+                return
+            try:
+                # ITaskbarList3 vtable: 0-2 IUnknown, 3-7 ITaskbarList, 8 ITaskbarList2, 9=SetProgressValue, 10=SetProgressState
+                vtable = ctypes.cast(self.taskbar, POINTER(c_void_p))[0]
+                func_ptr = ctypes.cast(vtable, POINTER(c_void_p))[10]
+                prototype = WINFUNCTYPE(HRESULT, c_void_p, c_void_p, c_int)
+                func = prototype(func_ptr)
+                func(self.taskbar, hwnd, state)
+            except Exception as e:
+                print(f"[TASKBAR] SetProgressState error: {e}", flush=True)
+else:
+    class TaskbarProgress:
+        TBPF_NOPROGRESS = 0
+        TBPF_INDETERMINATE = 1
+        TBPF_NORMAL = 2
+        TBPF_ERROR = 4
+        TBPF_PAUSED = 8
+
+        def __init__(self):
+            pass
+
+        def set_progress(self, completed: int, total: int):
+            pass
+
+        def set_state(self, state: int):
+            pass
 
 async def taskbar_update_loop():
     if os.name != "nt":
