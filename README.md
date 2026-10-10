@@ -7,10 +7,13 @@
     <a href="https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe">
       <img src="https://img.shields.io/badge/Download-Burst%20for%20Windows%20(v2.0.0)-f97316?style=for-the-badge&logo=windows&logoColor=white" alt="Download Burst for Windows">
     </a>
+    <a href="https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage">
+      <img src="https://img.shields.io/badge/Download-Burst%20for%20Linux%20AppImage-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download Burst for Linux">
+    </a>
   </p>
 
   [![Version](https://img.shields.io/badge/Version-v2.0.0-f97316.svg)](https://github.com/SidhartSami/Burst/releases)
-  [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-0078D6.svg)](https://www.microsoft.com/windows)
+  [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-0078D6.svg)](https://github.com/SidhartSami/Burst/releases)
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
   [![Free & Open Source](https://img.shields.io/badge/Free%20%26-Open%20Source-22c55e.svg)](https://github.com/SidhartSami/Burst)
 
@@ -28,7 +31,7 @@
 
 Have you ever wished you could combine your home Wi-Fi and your phone's 5G mobile hotspot to download files twice as fast?
 
-**Burst** is a free, community-driven download accelerator for Windows that bonds all your available internet connections together. When you download a file or torrent, Burst divides it into pieces and downloads them simultaneously across your **Wi-Fi, Ethernet cable, and USB/Hotspot connections**, combining their speeds into one powerful stream.
+**Burst** is a free, community-driven download accelerator for Windows and Linux that bonds all your available internet connections together. When you download a file or torrent, Burst divides it into pieces and downloads them simultaneously across your **Wi-Fi, Ethernet cable, and USB/Hotspot connections**, combining their speeds into one powerful stream.
 
 Burst is built fully in the open — the engine, the scheduler, the reliability logic, and the roadmap all live in this repository. Issues, pull requests, and forks are welcome.
 
@@ -85,12 +88,22 @@ Designed from the ground up for Windows with a fast, modern dark-mode interface,
 ## How to Install & Use Burst
 
 ### 1. Download
-Click below to download the official Windows installer:
+Click below to download the latest release for your platform:
 
-**[Download Burst Setup (v2.0.0)](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe)**
+* **Windows**: **[Download Burst Setup (v2.0.0)](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe)** (`.exe` installer)
+* **Linux**: **[Download Burst-Linux.AppImage](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage)** (portable AppImage)
 
-### 2. Install
+### 2. Install & Run
+
+#### Windows
 Run `Burst_Setup_v2.0.0.exe` and follow the setup wizard. The installer sets up desktop shortcuts and configures Windows Firewall permissions automatically.
+
+#### Linux (Ubuntu, Debian, Fedora, Arch, WSL2)
+Download `Burst-Linux.AppImage`, make it executable, and run it:
+```bash
+chmod +x Burst-Linux.AppImage
+./Burst-Linux.AppImage
+```
 
 ### 3. Connect Your Networks & Download
 1. Connect your PC to two or more connections (e.g. Wi-Fi + your phone's USB tethering hotspot, or Wi-Fi + Ethernet).
@@ -110,10 +123,10 @@ Burst can capture your browser downloads with a single click:
 
 ## Roadmap / Help Wanted
 
-Burst is Windows-only today. These are the areas where contributions would help most:
+These are the areas where contributions would help most:
 
-* **macOS support** — interface detection/binding via `networksetup`, packaging.
-* **Linux support** — interface binding via `SO_BINDTODEVICE`, packaging (AppImage/deb).
+* ✅ **Linux support** — Completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
+* **macOS support** — interface detection/binding via `networksetup`, packaging (.dmg / app bundle).
 * **Tail racing tuning** — currently experimental and off by default; benchmarking on real asymmetric networks would help decide whether it ships on by default.
 * **Localization** — UI translations.
 
@@ -168,7 +181,7 @@ If you find Burst useful, starring the repo helps others discover it too.
 
 <details>
 <summary><strong>Is macOS or Linux supported?</strong></summary>
-<p>Not yet — Burst is currently Windows-only. See the Roadmap section above; contributions for macOS/Linux support are welcome.</p>
+<p>Windows and Linux (via portable AppImage) are both officially supported! macOS support is currently under development (see Roadmap above).</p>
 </details>
 
 ---
