@@ -41,10 +41,7 @@ export function openStoreUrl(url, onToast) {
   }
 
   try {
-    const opened = window.open(url, "_blank", "noopener,noreferrer");
-    if (!opened && onToast) {
-      onToast("Could not open browser. Please check browser pop-up permissions.");
-    }
+    window.open(url, "_blank");
   } catch (err) {
     console.error("Failed to open extension store URL:", err);
     if (onToast) onToast("Failed to open browser store link.");
