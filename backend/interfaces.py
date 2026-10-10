@@ -82,6 +82,9 @@ def get_active_interfaces() -> List[NetworkInterface]:
         if platform.system() == "Windows":
             if any(key in lowered for key in VIRTUAL_KEYWORDS):
                 continue
+        elif platform.system() == "Darwin":
+            if any(key in lowered for key in VIRTUAL_KEYWORDS) or lowered.startswith("lo") or lowered.startswith("utun"):
+                continue
         else:
             if any(key in lowered for key in VIRTUAL_KEYWORDS) or lowered == "lo":
                 continue
