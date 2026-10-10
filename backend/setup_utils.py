@@ -161,6 +161,7 @@ def setup_native_host():
     
     # Hardcoded stable extension ID locked by manifest key
     allowed_origins = [
+        "chrome-extension://dgikbcilhfjcdaemdnadnokpmfejhcjb/",
         "chrome-extension://pblmhjepeacmfphcnaaekefjnipfkcfd/"
     ]
     

@@ -103,7 +103,7 @@ Run `Burst_Setup_v2.0.0.exe` and follow the setup wizard. The installer sets up 
 
 Burst can capture your browser downloads with a single click:
 
-* **Chrome & Brave & Edge**: Install via the [Chrome Web Store](https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd) or enable during setup.
+* **Chrome & Brave & Edge**: Install via the [Chrome Web Store](https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb) or enable during setup.
 * **Firefox & Zen Browser**: Enable during setup to register the companion extension.
 
 ---

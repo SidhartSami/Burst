@@ -58,7 +58,10 @@ async function checkBurstStatus() {
 // Check status on startup and install
 chrome.runtime.onStartup.addListener(() => checkBurstStatus());
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install") {
+    chrome.tabs.create({ url: "https://sidhartsami.github.io/burst-website/" });
+  }
   checkBurstStatus();
   setupContextMenu();
 });

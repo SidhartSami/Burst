@@ -122,6 +122,7 @@ begin
         '  "path": "' + EscapedPath + '",' + #13#10 +
         '  "type": "stdio",' + #13#10 +
         '  "allowed_origins": [' + #13#10 +
+        '    "chrome-extension://dgikbcilhfjcdaemdnadnokpmfejhcjb/",' + #13#10 +
         '    "chrome-extension://pblmhjepeacmfphcnaaekefjnipfkcfd/"' + #13#10 +
         '  ],' + #13#10 +
         '  "allowed_extensions": [' + #13#10 +

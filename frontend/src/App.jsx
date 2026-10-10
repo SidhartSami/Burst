@@ -1956,7 +1956,7 @@ export default function App() {
                   <button
                     className="extension-btn chrome"
                     onClick={() => {
-                      window.open('https://chrome.google.com/webstore/detail/burst/pblmhjepeacmfphcnaaekefjnipfkcfd', '_blank');
+                      window.open('https://chromewebstore.google.com/detail/burst-download-manager/dgikbcilhfjcdaemdnadnokpmfejhcjb', '_blank');
                       completeOnboarding();
                     }}
                   >
