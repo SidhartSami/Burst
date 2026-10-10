@@ -56,30 +56,30 @@ Burst is distributed as native standalone executables with zero runtime dependen
 | **Windows** | Setup Installer (`.exe`) | Windows 10 / 11 (64-bit) | [**Burst_Setup_v2.0.0.exe**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst_Setup_v2.0.0.exe) |
 | **Linux** | Portable AppImage (`.AppImage`) | Ubuntu 22.04+, Debian, Fedora, Arch (64-bit) | [**Burst-Linux.AppImage**](https://github.com/SidhartSami/Burst/releases/latest/download/Burst-Linux.AppImage) |
 
-> 🍎 **macOS Support**: Currently under active development for macOS Monterey+ (Universal / Apple Silicon & Intel). Track progress in the [Roadmap](#roadmap--help-wanted).
+> **macOS Support**: Currently under active development for macOS Monterey+ (Universal / Apple Silicon & Intel). Track progress in the [Roadmap](#roadmap--help-wanted).
 
 ---
 
 ## Key Features
 
-### ⚡ True Multi-Connection Bonding
+### <img src="https://api.iconify.design/ph/link-bold.svg?color=%2371717a" width="20" valign="middle"> True Multi-Connection Bonding
 Plug in an Ethernet cable while connected to Wi-Fi, or enable USB tethering from your smartphone. Burst dynamically detects every healthy network adapter, assigns distinct sockets, and aggregates their bandwidth simultaneously.
 
-### 🧲 Advanced BitTorrent & Magnet Engine
+### <img src="https://api.iconify.design/ph/magnet-bold.svg?color=%2371717a" width="20" valign="middle"> Advanced BitTorrent & Magnet Engine
 Built directly on top of `libtorrent`. Paste magnet links or drop `.torrent` files into the window to inspect metadata, browse file hierarchies, and selectively prioritize or exclude individual files before downloading begins.
 
-### 📊 Real-Time Chunk Map & Observability
+### <img src="https://api.iconify.design/ph/chart-bar-bold.svg?color=%2371717a" width="20" valign="middle"> Real-Time Chunk Map & Observability
 Observe download progress live. Burst features an interactive visual chunk map color-coded by network interface, giving you instant visual feedback on which connection downloaded which piece.
 
-### 🧩 Browser Extension Auto-Capture
+### <img src="https://api.iconify.design/ph/globe-bold.svg?color=%2371717a" width="20" valign="middle"> Browser Extension Auto-Capture
 Capture downloads directly from your favorite browser. Lightweight companion extensions automatically intercept downloads and route them into Burst's accelerated bonding engine.
 
-### 🛡️ Adaptive Schedulers & Work Stealing
+### <img src="https://api.iconify.design/ph/cpu-bold.svg?color=%2371717a" width="20" valign="middle"> Adaptive Schedulers & Work Stealing
 * **Dynamic EWMA Chunk Sizing**: Automatically tunes chunk requests (256 KB to 8 MB) based on each adapter's real-time Exponential Weighted Moving Average throughput.
 * **Sub-Chunk Work Stealing**: High-speed adapters steal unstarted chunks from slower or congested adapters to eliminate stragglers.
 * **Tail Racing**: Detects lagging chunks and dispatches duplicate racer tasks on idle interfaces. The first to verify claims the chunk, cancelling losing tasks with zero corruption.
 
-### 💾 Safe Pause, Resume & Integrity Checks
+### <img src="https://api.iconify.design/ph/arrows-clockwise-bold.svg?color=%2371717a" width="20" valign="middle"> Safe Pause, Resume & Integrity Checks
 Pause and resume downloads anytime. Chunks are validated with SHA-256 integrity checks, and progress is continuously persisted to disk, protecting your downloads against sudden network drops or power outages.
 
 ---
@@ -158,10 +158,10 @@ python run_burst.py      # Windows
 
 ## Roadmap & Help Wanted
 
-* ✅ **Linux Support** — Fully completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
-* 🔄 **macOS Support** — In progress (`window_mac.py`, `clipboard_mac.py`, Cocoa GUI, and DMG CI pipeline).
-* 🧪 **Tail-Racing Benchmarks** — Evaluating racing heuristics on heavily asymmetric network setups (e.g. 100 Mbps fiber vs. 5 Mbps cellular).
-* 🌍 **Localization (i18n)** — Community translations for the UI.
+* **Linux Support** — Completed in v2.0.0 (GTK3 pywebview, multi-interface bonding, AppImage distribution).
+* **macOS Support** — In progress (`window_mac.py`, `clipboard_mac.py`, Cocoa GUI, and DMG CI pipeline).
+* **Tail-Racing Benchmarks** — Evaluating racing heuristics on heavily asymmetric network setups.
+* **Localization (i18n)** — Community translations for the UI.
 
 Contributions of all kinds are welcome! Check out the [open issues](https://github.com/SidhartSami/Burst/issues) or submit a pull request.
 
