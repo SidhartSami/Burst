@@ -8,8 +8,12 @@ on:
 
 jobs:
   build:
-    name: Build macOS DMG
-    runs-on: macos-13
+    name: Build macOS DMG (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-13, macos-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
@@ -74,5 +78,6 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Burst-Mac.dmg
+          name: Burst-Mac-${{ matrix.os }}.dmg
           path: dist/Burst-Mac.dmg
+          overwrite: true
