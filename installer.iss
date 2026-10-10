@@ -22,8 +22,6 @@ DisableWelcomePage=no
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "chromeext"; Description: "Enable Chrome/Edge Integration (Native Messaging Host)"; GroupDescription: "Browser Extensions:"
-Name: "firefoxext"; Description: "Enable Firefox/Zen Integration (Native Messaging Host)"; GroupDescription: "Browser Extensions:"
 
 [Files]
 ; This grabs the EXE you just built with PyInstaller
@@ -40,24 +38,24 @@ Source: "backend\com.burst.download.manager.firefox.json"; DestDir: "{app}"; Fla
 
 [Registry]
 ; -- Chrome Native Messaging Host --
-Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey; Tasks: chromeext
-Root: HKLM; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey; Tasks: chromeext
+Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey
 
 ; -- Edge Native Messaging Host --
-Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey; Tasks: chromeext
-Root: HKLM; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey; Tasks: chromeext
+Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.json"; Flags: uninsdeletekey
 
 ; -- Firefox/Zen Native Messaging Host (HKCU) --
-Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKCU; Subkey: "Software\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKCU; Subkey: "Software\Wow6432Node\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKCU; Subkey: "Software\Wow6432Node\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
+Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Wow6432Node\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Wow6432Node\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
 
 ; -- Firefox/Zen Native Messaging Host (HKLM) --
-Root: HKLM; Subkey: "Software\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKLM; Subkey: "Software\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKLM; Subkey: "Software\Wow6432Node\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
-Root: HKLM; Subkey: "Software\Wow6432Node\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey; Tasks: firefoxext
+Root: HKLM; Subkey: "Software\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Wow6432Node\Mozilla\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Wow6432Node\Zen\NativeMessagingHosts\com.burst.download.manager"; ValueType: string; ValueData: "{app}\com.burst.download.manager.firefox.json"; Flags: uninsdeletekey
 
 ; -- Magnet Protocol Handler --
 Root: HKCR; Subkey: "magnet"; ValueType: string; ValueData: "URL:Magnet Protocol"; Flags: uninsdeletekey
@@ -117,39 +115,33 @@ begin
     FirefoxManifestPath := ExpandConstant('{app}\com.burst.download.manager.firefox.json');
     EscapedPath := EscapeJsonPath(ExpandConstant('{app}\native_host.exe'));
     
-    if WizardIsTaskSelected('chromeext') then
-    begin
-      ManifestContent := 
-        '{' + #13#10 +
-        '  "name": "com.burst.download.manager",' + #13#10 +
-        '  "description": "Burst Download Manager Native Messaging Host",' + #13#10 +
-        '  "path": "' + EscapedPath + '",' + #13#10 +
-        '  "type": "stdio",' + #13#10 +
-        '  "allowed_origins": [' + #13#10 +
-        '    "chrome-extension://dgikbcilhfjcdaemdnadnokpmfejhcjb/",' + #13#10 +
-        '    "chrome-extension://pblmhjepeacmfphcnaaekefjnipfkcfd/"' + #13#10 +
-        '  ],' + #13#10 +
-        '  "allowed_extensions": [' + #13#10 +
-        '    "burst@sidhartsami.com"' + #13#10 +
-        '  ]' + #13#10 +
-        '}';
-      SaveStringToFile(ManifestPath, ManifestContent, False);
-    end;
+    ManifestContent := 
+      '{' + #13#10 +
+      '  "name": "com.burst.download.manager",' + #13#10 +
+      '  "description": "Burst Download Manager Native Messaging Host",' + #13#10 +
+      '  "path": "' + EscapedPath + '",' + #13#10 +
+      '  "type": "stdio",' + #13#10 +
+      '  "allowed_origins": [' + #13#10 +
+      '    "chrome-extension://dgikbcilhfjcdaemdnadnokpmfejhcjb/",' + #13#10 +
+      '    "chrome-extension://pblmhjepeacmfphcnaaekefjnipfkcfd/"' + #13#10 +
+      '  ],' + #13#10 +
+      '  "allowed_extensions": [' + #13#10 +
+      '    "burst@sidhartsami.com"' + #13#10 +
+      '  ]' + #13#10 +
+      '}';
+    SaveStringToFile(ManifestPath, ManifestContent, False);
 
-    if WizardIsTaskSelected('firefoxext') then
-    begin
-      FirefoxManifestContent :=
-        '{' + #13#10 +
-        '  "name": "com.burst.download.manager",' + #13#10 +
-        '  "description": "Burst Download Manager Native Messaging Host",' + #13#10 +
-        '  "path": "' + EscapedPath + '",' + #13#10 +
-        '  "type": "stdio",' + #13#10 +
-        '  "allowed_extensions": [' + #13#10 +
-        '    "burst@sidhartsami.com"' + #13#10 +
-        '  ]' + #13#10 +
-        '}';
-      SaveStringToFile(FirefoxManifestPath, FirefoxManifestContent, False);
-    end;
+    FirefoxManifestContent :=
+      '{' + #13#10 +
+      '  "name": "com.burst.download.manager",' + #13#10 +
+      '  "description": "Burst Download Manager Native Messaging Host",' + #13#10 +
+      '  "path": "' + EscapedPath + '",' + #13#10 +
+      '  "type": "stdio",' + #13#10 +
+      '  "allowed_extensions": [' + #13#10 +
+      '    "burst@sidhartsami.com"' + #13#10 +
+      '  ]' + #13#10 +
+      '}';
+    SaveStringToFile(FirefoxManifestPath, FirefoxManifestContent, False);
     
     // Create burst-cli.bat alias
     // We just pass through all arguments (%*) without adding an extra 'pip' 
