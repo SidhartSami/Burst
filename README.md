@@ -43,23 +43,23 @@ Burst is built fully in the open — the engine, the scheduler, the reliability 
 
 ## Demo
 
-<!--
-  TODO: Add your recorded demo here.
-  Easiest options:
-  1) Drop an .mp4 into a new GitHub Issue/PR comment box — GitHub will host it and give you
-     a user-content URL. Use that URL as the link target below.
-  2) Convert the clip to a short looping GIF and reference it directly with an <img> tag —
-     GIFs autoplay inline in the README, which usually gets more attention than a static
-     thumbnail people have to click.
--->
+<div align="center">
+  <video src="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4" width="100%" controls></video>
 
-<p align="center">
-  <a href="VIDEO_URL_HERE">
-    <img src="assets/demo-thumbnail.png" alt="Watch the Burst demo" width="720">
-  </a>
-</p>
+  <p>
+    <a href="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4">
+      <img src="https://img.shields.io/badge/▶%20Play%20Demo%20Video-demo.mp4-f97316?style=for-the-badge&logo=youtube&logoColor=white" alt="Play Demo Video">
+    </a>
+    <a href="https://sidhartsami.github.io/getburst/">
+      <img src="https://img.shields.io/badge/🌐%20Interactive%20Website-getburst.app-0078D6?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Visit getburst.app">
+    </a>
+  </p>
 
-<p align="center"><em>Click to watch: multi-interface bonding, live speed dashboard, and torrent file selection in action.</em></p>
+  <p>
+    <em>Multi-interface bonding, live speed dashboard, and accelerated download engine in action.</em><br>
+    <sub>Direct link: <a href="assets/demo.mp4">assets/demo.mp4</a> &bull; Release asset: <a href="https://github.com/SidhartSami/Burst/releases/download/v2.0.0/demo.mp4">v2.0.0/demo.mp4</a></sub>
+  </p>
+</div>
 
 ---
 
