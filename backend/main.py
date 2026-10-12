@@ -124,11 +124,6 @@ class BatchDownloadRequest(BaseModel):
     output_path: str
 
 
-class ChecksumRequest(BaseModel):
-    file_path: str = Field(min_length=1)
-    expected: str = Field(min_length=1)
-    algorithm: Optional[str] = None
-
 
 class FileDeleteRequest(BaseModel):
     file_path: str = Field(min_length=1)
@@ -1016,64 +1011,6 @@ async def toggle_proxy(req: ProxyToggleRequest) -> Dict[str, Any]:
     return turbo_proxy.get_status()
 
 
-
-def _calculate_hash(file_path: str, expected: str, algorithm: Optional[str] = None) -> dict:
-    import os
-    import hashlib
-    if not file_path or not isinstance(file_path, str) or not os.path.exists(file_path):
-        return {"match": False, "actual": "", "algorithm": "", "error": "File not found"}
-
-    expected_clean = expected.strip().lower()
-    algo = algorithm
-    if not algo:
-        length = len(expected_clean)
-        if length == 32:
-            algo = "md5"
-        elif length == 40:
-            algo = "sha1"
-        elif length == 64:
-            algo = "sha256"
-        else:
-            return {
-                "match": False,
-                "actual": "",
-                "algorithm": "",
-                "error": "Unsupported expected hash length. Must be MD5 (32 chars), SHA1 (40 chars), or SHA256 (64 chars)."
-            }
-
-    algo_lower = algo.lower()
-    if algo_lower not in ("md5", "sha1", "sha256"):
-        return {"match": False, "actual": "", "algorithm": algo, "error": f"Unsupported algorithm: {algo}. Supported: md5, sha1, sha256"}
-
-    try:
-        if algo_lower == "md5":
-            hasher = hashlib.md5()
-        elif algo_lower == "sha1":
-            hasher = hashlib.sha1()
-        else:
-            hasher = hashlib.sha256()
-
-        with open(file_path, "rb") as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                hasher.update(chunk)
-
-        actual_hash = hasher.hexdigest().lower()
-        return {
-            "match": actual_hash == expected_clean,
-            "actual": actual_hash,
-            "algorithm": algo_lower,
-            "error": None
-        }
-    except Exception as e:
-        return {"match": False, "actual": "", "algorithm": algo_lower, "error": str(e)}
-
-
-@app.post("/verify-checksum")
-async def verify_checksum(req: ChecksumRequest):
-    return await asyncio.to_thread(_calculate_hash, req.file_path, req.expected, req.algorithm)
 
 
 @app.delete("/file")

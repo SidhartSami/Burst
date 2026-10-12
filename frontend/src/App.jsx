@@ -31,7 +31,6 @@ import {
   ChevronUp,
   Layers,
   ArrowLeft,
-  Shield,
   Clock,
   Video,
   Music,
@@ -747,11 +746,7 @@ export default function App() {
   const [activeJobs, setActiveJobs] = useState([]);
   const [expandedGraphs, setExpandedGraphs] = useState({});
   const hasShownGraphHintRef = useRef(false);
-  const [activeVerifyJobId, setActiveVerifyJobId] = useState(null);
-  const [checksumValue, setChecksumValue] = useState("");
-  const [verificationLoading, setVerificationLoading] = useState(false);
-  const [verificationResult, setVerificationResult] = useState(null);
-  const [verificationError, setVerificationError] = useState(null);
+
 
   // Schedule state
   const [scheduleUrl, setScheduleUrl] = useState("");
@@ -1682,104 +1677,6 @@ export default function App() {
   };
 
 
-  const isValidHash = (str) => {
-    const clean = str.trim();
-    if (!/^[0-9a-fA-F]+$/.test(clean)) return false;
-    return [32, 40, 64].includes(clean.length);
-  };
-
-  const handleVerify = async (item) => {
-    const hash = checksumValue.trim();
-    if (!hash) return;
-
-    if (!isValidHash(hash)) {
-      setVerificationError("That doesn't look like a valid hash");
-      setVerificationResult(null);
-      return;
-    }
-
-    setVerificationError(null);
-    setVerificationResult(null);
-    setVerificationLoading(true);
-
-    try {
-      const resp = await fetch(`${API_BASE}/verify-checksum`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_path: item.path,
-          expected: hash
-        })
-      });
-      const data = await resp.json();
-      if (!resp.ok || data.error) {
-        if (data.error === "File not found") {
-          setVerificationError("File no longer exists at original path");
-        } else {
-          setVerificationError(data.error || "Verification failed");
-        }
-      } else {
-        setVerificationResult(data);
-      }
-    } catch (err) {
-      setVerificationError("Connection error — could not verify hash");
-    } finally {
-      setVerificationLoading(false);
-    }
-  };
-
-  const handleReDownload = async (item) => {
-    try {
-      const isTorrent = item.type === "torrent" || (item.url && item.url.startsWith("magnet:"));
-      const endpoint = isTorrent ? `${API_BASE}/torrent/start` : `${API_BASE}/download`;
-      const effectiveIps = selectedIps.length > 0 ? selectedIps : renderedInterfaces.map(i => i.ip_address);
-      const body = isTorrent
-        ? { magnet_uri: item.url, output_path: item.path, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits }
-        : { url: item.url, output_path: item.path, interface_ips: effectiveIps, bandwidth_limits: bandwidthLimits };
-
-      const resp = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.detail || "Failed to start");
-      
-      if (data.job_id) {
-        setActiveJobs(prev => {
-          if (prev.includes(data.job_id)) return prev;
-          return [...prev, data.job_id];
-        });
-        setToast(`Queued re-download for ${item.filename}`);
-        setActiveVerifyJobId(null); // Close the drawer
-        setActiveTab("active");
-      }
-    } catch (err) {
-      console.error("[Re-download Exception Debug]:", err);
-      setToast(friendlyError(err.message || "Failed to restart download"));
-    }
-  };
-
-  const handleDeleteFile = async (item) => {
-    try {
-      const resp = await fetch(`${API_BASE}/file`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: item.path })
-      });
-      const data = await resp.json();
-      if (!resp.ok || !data.success) {
-        setToast(data.error || "Failed to delete file");
-      } else {
-        setToast(`Deleted file ${item.filename} successfully`);
-        setActiveVerifyJobId(null); // Close the drawer
-      }
-    } catch (err) {
-      console.error("[Delete File Exception Debug]:", err);
-      setToast("Failed to connect to delete endpoint");
-    }
-  };
-
   // ---- Schedule helpers ----
 
   const formatScheduleTime = (isoStr) => {
@@ -2603,33 +2500,23 @@ export default function App() {
                           <button
                             onClick={() => handleResumeFromHistory(item)}
                             style={{
-                              background: 'var(--surface-2)',
-                              border: '1px solid var(--border)',
+                              background: 'none',
+                              border: 'none',
                               cursor: 'pointer',
                               color: 'var(--text-muted)',
-                              padding: '4px 9px',
-                              borderRadius: '6px',
-                              display: 'inline-flex',
+                              padding: '6px',
+                              display: 'flex',
                               alignItems: 'center',
-                              gap: '5px',
-                              fontSize: '11px',
-                              fontWeight: 500,
+                              justifyContent: 'center',
                               alignSelf: 'center',
-                              transition: 'all 0.15s ease',
+                              transition: 'color 0.2s ease',
                               marginLeft: '8px'
                             }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.color = 'var(--text)';
-                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.2)';
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.color = 'var(--text-muted)';
-                              e.currentTarget.style.borderColor = 'var(--border)';
-                            }}
-                            title="Retry / Re-download with Burst"
+                            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                            title="Retry download with Burst"
                           >
-                            <RotateCcw size={12} />
-                            <span>Retry</span>
+                            <RotateCcw size={18} />
                           </button>
                         )}
                         <button
@@ -2651,158 +2538,7 @@ export default function App() {
                         >
                           <FolderOpen size={18} />
                         </button>
-                        {item.status !== 'failed' && (
-                          <button
-                            onClick={() => {
-                              setChecksumValue("");
-                              setVerificationResult(null);
-                              setVerificationError(null);
-                              setVerificationLoading(false);
-                              setActiveVerifyJobId(prev => prev === item.id ? null : item.id);
-                            }}
-                            style={{
-                              background: 'none',
-                              border: 'none',
-                              cursor: 'pointer',
-                              color: activeVerifyJobId === item.id ? 'var(--accent)' : 'var(--text-muted)',
-                              padding: '6px',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              alignSelf: 'center',
-                              transition: 'color 0.2s ease',
-                              marginLeft: '4px'
-                            }}
-                            title="Verify Checksum"
-                          >
-                            <Shield size={18} />
-                          </button>
-                        )}
                       </div>
-
-                      {activeVerifyJobId === item.id && (
-                        <div className="slide-in" style={{
-                          background: 'var(--surface-2)',
-                          border: '1px solid var(--border)',
-                          borderTop: 'none',
-                          borderRadius: '0 0 10px 10px',
-                          padding: '16px',
-                          marginTop: '-13px',
-                          marginBottom: '12px',
-                          fontSize: '13px',
-                          boxSizing: 'border-box'
-                        }}>
-                          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                            <input
-                              type="text"
-                              placeholder="Paste MD5, SHA1, or SHA256 hash"
-                              value={checksumValue}
-                              onChange={(e) => {
-                                setChecksumValue(e.target.value);
-                                setVerificationError(null);
-                                setVerificationResult(null);
-                              }}
-                              disabled={verificationLoading}
-                              style={{
-                                flex: 1,
-                                background: 'var(--bg)',
-                                border: '1px solid var(--border)',
-                                borderRadius: '6px',
-                                color: 'var(--text)',
-                                padding: '8px 12px',
-                                fontSize: '13px',
-                                outline: 'none',
-                              }}
-                            />
-                            <button
-                              className="btn-secondary"
-                              onClick={() => handleVerify(item)}
-                              disabled={verificationLoading || !checksumValue.trim()}
-                              style={{
-                                height: '34px',
-                                padding: '0 16px',
-                                borderRadius: '6px',
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                flexShrink: 0
-                              }}
-                            >
-                              {verificationLoading && (
-                                <div className="spinner-small" style={{ width: '12px', height: '12px', borderWidth: '2px' }} />
-                              )}
-                              Verify
-                            </button>
-                          </div>
-
-                          {verificationError && (
-                            <div style={{ color: 'var(--danger)', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
-                              <AlertCircle size={14} />
-                              {verificationError}
-                            </div>
-                          )}
-
-                          {verificationResult && (
-                            <div style={{ marginTop: '12px' }}>
-                              {verificationResult.match ? (
-                                <div style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
-                                  <CheckCircle2 size={14} />
-                                  Hash matches — file is intact ({verificationResult.algorithm.toUpperCase()})
-                                </div>
-                              ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                  <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 500 }}>
-                                    <AlertTriangle size={14} />
-                                    Hash mismatch — file may be corrupted
-                                  </div>
-                                  <div style={{
-                                    fontSize: '11px',
-                                    color: 'var(--text-muted)',
-                                    background: 'var(--bg)',
-                                    padding: '8px 10px',
-                                    borderRadius: '4px',
-                                    border: '1px solid var(--border)',
-                                    fontFamily: '"JetBrains Mono", monospace',
-                                    wordBreak: 'break-all',
-                                    marginTop: '4px'
-                                  }}>
-                                    <span style={{ fontWeight: 600 }}>Actual hash:</span> {verificationResult.actual}
-                                  </div>
-                                  <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
-                                    <button
-                                      className="btn-secondary"
-                                      onClick={() => handleReDownload(item)}
-                                      style={{
-                                        height: '32px',
-                                        padding: '0 12px',
-                                        fontSize: '12px',
-                                        borderRadius: '6px'
-                                      }}
-                                    >
-                                      Re-download
-                                    </button>
-                                    <button
-                                      className="btn-secondary"
-                                      onClick={() => handleDeleteFile(item)}
-                                      style={{
-                                        height: '32px',
-                                        padding: '0 12px',
-                                        fontSize: '12px',
-                                        borderRadius: '6px',
-                                        color: 'var(--danger)',
-                                        borderColor: 'rgba(220, 38, 38, 0.2)'
-                                      }}
-                                    >
-                                      Delete file
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -3159,113 +2895,66 @@ export default function App() {
                     );
                   })}
 
-                  <div className="settings-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span>Network Adapters & Speed Limits</span>
-                    <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-muted)' }}>
-                      {renderedInterfaces.length} active
-                    </span>
-                  </div>
+                  <div className="settings-section-title">Network Adapters & Speed Limits</div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
-                    {renderedInterfaces.length === 0 ? (
-                      <div style={{ padding: '12px 14px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                        No network adapters detected.
-                      </div>
-                    ) : (
-                      renderedInterfaces.map((iface) => {
-                        const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces);
-                        const limitBytes = bandwidthLimits[iface.ip_address];
-                        return (
-                          <div
-                            key={iface.ip_address}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              padding: '10px 14px',
-                              background: 'var(--surface)',
-                              border: '1px solid var(--border)',
-                              borderRadius: '8px',
-                              transition: 'border-color 0.15s ease'
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                              <div
-                                style={{
-                                  width: '8px',
-                                  height: '8px',
-                                  borderRadius: '50%',
-                                  background: tone.dot,
-                                  boxShadow: `0 0 6px ${tone.dot}66`,
-                                  flexShrink: 0
-                                }}
-                              />
-                              <div>
-                                <div style={{ fontWeight: 500, fontSize: '13px', color: 'var(--text)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  {iface.name || iface.ip_address}
-                                  <span style={{
-                                    fontSize: '10px',
-                                    padding: '1px 6px',
-                                    borderRadius: '4px',
-                                    background: 'var(--surface-2)',
-                                    color: 'var(--text-muted)',
-                                    fontWeight: 400
-                                  }}>
-                                    {shortName(iface.name, iface.interface_type)}
-                                  </span>
-                                </div>
-                                <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace', marginTop: '2px' }}>
-                                  {iface.ip_address}
-                                </div>
-                              </div>
-                            </div>
+                  {renderedInterfaces.length === 0 ? (
+                    <div className="setting-row" style={{ color: 'var(--text-muted)' }}>
+                      <span>No active network adapters detected</span>
+                    </div>
+                  ) : (
+                    renderedInterfaces.map((iface) => {
+                      const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces);
+                      const limitBytes = bandwidthLimits[iface.ip_address];
+                      const speedStr = iface.speed_mb_s ? `${iface.speed_mb_s.toFixed(1)} MB/s` : "0.0 MB/s";
+                      return (
+                        <div key={iface.ip_address} className="setting-row">
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div
+                              style={{
+                                width: '7px',
+                                height: '7px',
+                                borderRadius: '50%',
+                                background: tone.dot,
+                                flexShrink: 0
+                              }}
+                            />
+                            <span style={{ fontWeight: 500, color: 'var(--text)' }}>
+                              {shortName(iface.name, iface.interface_type)}
+                            </span>
+                            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                              ({iface.ip_address})
+                            </span>
+                          </span>
 
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                              {limitBytes ? (
-                                <span style={{
-                                  fontSize: '11px',
-                                  color: 'var(--accent)',
-                                  fontWeight: 500,
-                                  background: 'rgba(255, 136, 0, 0.1)',
-                                  padding: '2px 8px',
-                                  borderRadius: '6px',
-                                  border: '1px solid rgba(255, 136, 0, 0.25)'
-                                }}>
-                                  Max {(limitBytes / 1024 / 1024).toFixed(1)} MB/s
-                                </span>
-                              ) : (
-                                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                                  Unlimited
-                                </span>
-                              )}
-                              <button
-                                className="btn-small"
-                                style={{
-                                  padding: '3px 10px',
-                                  fontSize: '11px',
-                                  borderRadius: '6px',
-                                  border: '1px solid var(--border)',
-                                  background: 'transparent',
-                                  color: 'var(--text)',
-                                  cursor: 'pointer'
-                                }}
-                                onClick={() => {
-                                  setPromptData({
-                                    title: `Set bandwidth limit for ${shortName(iface.name, iface.interface_type)} (MB/s)`,
-                                    hint: "Enter 0 to remove the limit (unlimited speed).",
-                                    ip: iface.ip_address,
-                                    value: limitBytes ? (limitBytes / 1024 / 1024).toString() : ""
-                                  });
-                                }}
-                              >
-                                {limitBytes ? "Change Limit" : "Set Limit"}
-                              </button>
-                            </div>
+                          <div className="setting-input-wrap" style={{ gap: '12px' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                              {speedStr}
+                            </span>
+                            <span style={{
+                              fontSize: '11px',
+                              color: limitBytes ? 'var(--accent)' : 'var(--text-muted)',
+                              fontWeight: limitBytes ? 500 : 400
+                            }}>
+                              {limitBytes ? `Limit: ${(limitBytes / 1024 / 1024).toFixed(1)} MB/s` : "Unlimited"}
+                            </span>
+                            <button
+                              className="btn-small"
+                              onClick={() => {
+                                setPromptData({
+                                  title: `Set bandwidth limit for ${shortName(iface.name, iface.interface_type)} (MB/s)`,
+                                  hint: "Enter 0 to remove the limit (unlimited speed).",
+                                  ip: iface.ip_address,
+                                  value: limitBytes ? (limitBytes / 1024 / 1024).toString() : ""
+                                });
+                              }}
+                            >
+                              {limitBytes ? "Change" : "Set Limit"}
+                            </button>
                           </div>
-                        );
-                      })
-                    )}
-                  </div>
+                        </div>
+                      );
+                    })
+                  )}
 
                   <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
                     Burst v2.0.0
