@@ -2438,15 +2438,39 @@ export default function App() {
                                 {item.url && (
                                   <button
                                     onClick={() => handleResumeFromHistory(item)}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', padding: '2px', display: 'flex', alignItems: 'center' }}
-                                    title="Re-download / Resume"
+                                    style={{
+                                      background: 'none',
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                      color: 'var(--text-muted)',
+                                      padding: '2px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      transition: 'color 0.2s ease'
+                                    }}
+                                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text)'; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                                    title="Retry download with Burst"
                                   >
-                                    <Play size={12} />
+                                    <RotateCcw size={12} />
                                   </button>
                                 )}
                                 <button
                                   onClick={() => handleOpenFolder(item.path)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px', display: 'flex', alignItems: 'center' }}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    color: 'var(--text-muted)',
+                                    padding: '2px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    transition: 'color 0.2s ease'
+                                  }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text)'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
                                   title="Open download folder"
                                 >
                                   <FolderOpen size={12} />
@@ -2905,7 +2929,6 @@ export default function App() {
                     renderedInterfaces.map((iface) => {
                       const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces);
                       const limitBytes = bandwidthLimits[iface.ip_address];
-                      const speedStr = iface.speed_mb_s ? `${iface.speed_mb_s.toFixed(1)} MB/s` : "0.0 MB/s";
                       return (
                         <div key={iface.ip_address} className="setting-row">
                           <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -2927,9 +2950,6 @@ export default function App() {
                           </span>
 
                           <div className="setting-input-wrap" style={{ gap: '12px' }}>
-                            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                              {speedStr}
-                            </span>
                             <span style={{
                               fontSize: '11px',
                               color: limitBytes ? 'var(--accent)' : 'var(--text-muted)',
