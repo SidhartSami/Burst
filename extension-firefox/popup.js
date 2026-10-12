@@ -39,6 +39,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  const proxyErrorEl = document.getElementById("proxyError");
+
+  function checkProxyPermissionAndConflicts() {
+    if (!chrome.proxy || !chrome.proxy.settings) {
+      if (proxyErrorEl) {
+        proxyErrorEl.style.display = "block";
+        proxyErrorEl.textContent = "⚠️ Extension proxy permission pending: Open chrome://extensions and click the Reload button on Burst.";
+      }
+      return;
+    }
+
+    chrome.proxy.settings.get({ incognito: false }, (details) => {
+      if (details && details.levelOfControl === "controlled_by_other_extensions") {
+        if (proxyErrorEl) {
+          proxyErrorEl.style.display = "block";
+          proxyErrorEl.textContent = "⚠️ Another extension (e.g. VPN or adblocker) is controlling your browser proxy. Please disable it to allow Burst to bond connections.";
+        }
+      } else {
+        chrome.storage.local.get(["proxyError"], (stored) => {
+          if (stored && stored.proxyError) {
+            if (proxyErrorEl) {
+              proxyErrorEl.style.display = "block";
+              proxyErrorEl.textContent = `⚠️ Proxy setup: ${stored.proxyError}`;
+            }
+          } else if (proxyErrorEl) {
+            proxyErrorEl.style.display = "none";
+          }
+        });
+      }
+    });
+  }
+
   // Load saved Turbo Stream preference
   chrome.storage.local.get(["turboStreamEnabled", "turboStreamMode"], (res) => {
     const isEnabled = !!res.turboStreamEnabled;
@@ -49,6 +81,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       turboCard.classList.add("active");
       if (refreshHint) refreshHint.style.display = "block";
     }
+    checkProxyPermissionAndConflicts();
   });
 
   if (modeVideo) {
@@ -83,7 +116,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     chrome.storage.local.set({ turboStreamEnabled: isEnabled, turboStreamMode: currentMode });
-    chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: isEnabled, mode: currentMode });
+    chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: isEnabled, mode: currentMode }, () => {
+      setTimeout(checkProxyPermissionAndConflicts, 250);
+    });
   });
 
   // Open App Button

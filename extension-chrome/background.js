@@ -298,18 +298,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function enableTurboStreamProxy(mode = "video") {
   if (!chrome.proxy || !chrome.proxy.settings) return;
 
-  let pacData;
+  let proxyConfig;
   if (mode === "all") {
-    pacData = `
-      function FindProxyForURL(url, host) {
-        if (shExpMatch(host, "127.0.0.1") || shExpMatch(host, "localhost")) {
-          return "DIRECT";
-        }
-        return "PROXY 127.0.0.1:59285; DIRECT";
+    proxyConfig = {
+      mode: "fixed_servers",
+      rules: {
+        singleProxy: {
+          scheme: "http",
+          host: "127.0.0.1",
+          port: 59285
+        },
+        bypassList: ["<local>", "127.0.0.1:59284", "localhost:59284"]
       }
-    `;
+    };
   } else {
-    pacData = `
+    const pacData = `
       function FindProxyForURL(url, host) {
         if (
           dnsDomainIs(host, ".googlevideo.com") || host === "googlevideo.com" ||
@@ -333,15 +336,22 @@ function enableTurboStreamProxy(mode = "video") {
         return "DIRECT";
       }
     `;
+    proxyConfig = {
+      mode: "pac_script",
+      pacScript: { data: pacData }
+    };
   }
 
   chrome.proxy.settings.set(
-    { value: { mode: "pac_script", pacScript: { data: pacData } }, scope: "regular" },
+    { value: proxyConfig, scope: "regular" },
     () => {
       if (chrome.runtime.lastError) {
-        console.error("[BURST PROXY] Error setting proxy:", chrome.runtime.lastError);
+        const err = chrome.runtime.lastError.message;
+        console.error("[BURST PROXY] Error setting proxy:", err);
+        chrome.storage.local.set({ proxyError: err });
       } else {
         console.log(`[BURST PROXY] Turbo Stream Proxy active (${mode}) on 127.0.0.1:59285`);
+        chrome.storage.local.remove(["proxyError"]);
         if (actionApi && actionApi.setBadgeText) {
           actionApi.setBadgeText({ text: mode === "all" ? "⚡ALL" : "⚡ON" });
           actionApi.setBadgeBackgroundColor({ color: "#ff8800" });
