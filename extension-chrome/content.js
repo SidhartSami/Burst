@@ -22,11 +22,11 @@ function isDownloadableLink(anchor) {
 function createBurstBadge(targetUrl) {
   const badge = document.createElement("span");
   badge.className = "burst-download-badge";
-  badge.textContent = "⚡ Burst";
+  badge.innerHTML = '<span style="color: #ff8800; margin-right: 3px; font-size: 11px;">⚡</span><span style="color: #e4e4e7; font-weight: 500;">Burst</span>';
   badge.title = "Download with Burst Multi-WAN Acceleration";
   badge.setAttribute("data-burst-url", targetUrl);
 
-  // Styling
+  // Subtle, neutral styling that looks native on any website
   Object.assign(badge.style, {
     display: "inline-flex",
     alignItems: "center",
@@ -35,27 +35,30 @@ function createBurstBadge(targetUrl) {
     padding: "1px 7px",
     fontSize: "11px",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    fontWeight: "600",
-    color: "#ffffff",
-    background: "linear-gradient(135deg, #ff6b00 0%, #ff8800 100%)",
-    borderRadius: "10px",
+    lineHeight: "15px",
+    background: "#1e1e24",
+    border: "1px solid rgba(255, 136, 0, 0.35)",
+    borderRadius: "6px",
     cursor: "pointer",
     verticalAlign: "middle",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
-    transition: "transform 0.15s ease, background 0.15s ease",
+    boxShadow: "0 1px 2px rgba(0, 0, 0, 0.2)",
+    transition: "all 0.15s ease",
     userSelect: "none",
-    lineHeight: "16px",
     zIndex: "9999",
   });
 
   badge.addEventListener("mouseenter", () => {
-    badge.style.transform = "scale(1.08)";
-    badge.style.boxShadow = "0 2px 5px rgba(255, 107, 0, 0.4)";
+    badge.style.background = "#2a2a32";
+    badge.style.borderColor = "#ff8800";
+    badge.style.transform = "translateY(-1px)";
+    badge.style.boxShadow = "0 2px 6px rgba(255, 136, 0, 0.25)";
   });
 
   badge.addEventListener("mouseleave", () => {
-    badge.style.transform = "scale(1)";
-    badge.style.boxShadow = "0 1px 3px rgba(0,0,0,0.25)";
+    badge.style.background = "#1e1e24";
+    badge.style.borderColor = "rgba(255, 136, 0, 0.35)";
+    badge.style.transform = "translateY(0)";
+    badge.style.boxShadow = "0 1px 2px rgba(0, 0, 0, 0.2)";
   });
 
   badge.addEventListener("click", (e) => {
@@ -63,21 +66,19 @@ function createBurstBadge(targetUrl) {
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const originalText = badge.textContent;
-    badge.textContent = "⚡ Sending...";
-    badge.style.background = "#3b82f6";
+    const originalHtml = badge.innerHTML;
+    badge.innerHTML = '<span style="color: #60a5fa; margin-right: 3px;">⚡</span><span style="color: #60a5fa; font-weight: 500;">Sending...</span>';
+    badge.style.borderColor = "#3b82f6";
 
     chrome.runtime.sendMessage({ type: "SEND_URL", url: targetUrl }, (response) => {
-      if (response && response.success) {
-        badge.textContent = "⚡ Sent!";
-        badge.style.background = "#10b981";
-      } else {
-        badge.textContent = "⚡ Sent to Burst";
-        badge.style.background = "#ff8800";
-      }
+      badge.innerHTML = '<span style="color: #34d399; margin-right: 3px;">✓</span><span style="color: #34d399; font-weight: 500;">Sent to Burst</span>';
+      badge.style.borderColor = "#10b981";
+      badge.style.background = "#18261e";
+
       setTimeout(() => {
-        badge.textContent = originalText;
-        badge.style.background = "linear-gradient(135deg, #ff6b00 0%, #ff8800 100%)";
+        badge.innerHTML = originalHtml;
+        badge.style.borderColor = "rgba(255, 136, 0, 0.35)";
+        badge.style.background = "#1e1e24";
       }, 2500);
     });
   });

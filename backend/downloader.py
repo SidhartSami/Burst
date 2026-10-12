@@ -566,7 +566,7 @@ class DownloadJob:
         return {
             "job_id": self.job_id, "url": self.url,
             "output_path": self.output_path,
-            "expected_size": self.expected_size,
+            "expected_size": self.expected_size if self.expected_size > 0 else (self.total_downloaded if self.status == "completed" else 0),
             "remaining_bytes": rem_bytes,
             "supports_ranges": self.supports_ranges,
             "status": self.status,
@@ -1174,7 +1174,12 @@ class DownloadManager:
                 if job.expected_size > 0 and temp_out.stat().st_size != job.expected_size:
                     temp_out.unlink(missing_ok=True)
                     raise ValueError(f"Single download size mismatch: expected {job.expected_size}, got {temp_out.stat().st_size}")
+                actual_size = temp_out.stat().st_size
                 os.replace(temp_out, out_path)
+                if job.expected_size <= 0:
+                    job.expected_size = actual_size
+                if job.total_downloaded <= 0:
+                    job.total_downloaded = actual_size
 
         try:
             temp_out.unlink(missing_ok=True)
@@ -1195,6 +1200,8 @@ class DownloadManager:
             progress.speed_mb_s = 0.0
             job.status = "completed"
             job.finished_at = time.time()
+            if job.expected_size <= 0 and job.total_downloaded > 0:
+                job.expected_size = job.total_downloaded
             if getattr(job, "_completion_event", None):
                 job._completion_event.set()
 

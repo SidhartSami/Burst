@@ -718,8 +718,9 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
           </span>
         ) : (
           <span>
-            {pct.toFixed(1)}% • {formatBytes(safeDownloaded)} / {formatBytes(status.expected_size)}
-            {status.resume_confidence && status.resume_confidence !== 'high' ? ` • Confidence: ${status.resume_confidence}` : ''}
+            {status.status === 'completed'
+              ? `${formatBytes(safeDownloaded || status.expected_size)} • Completed`
+              : `${pct.toFixed(1)}% • ${formatBytes(safeDownloaded)} / ${formatBytes(status.expected_size > 0 ? status.expected_size : safeDownloaded)}`}
             {(status.total_retries > 0 || status.total_stalls > 0) ? ` • Retries: ${status.total_retries || 0} / Stalls: ${status.total_stalls || 0}` : ''}
           </span>
         )}
