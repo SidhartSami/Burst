@@ -16,11 +16,13 @@
     "alarms",
     "downloads",
     "proxy",
-    "storage"
+    "storage",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "http://127.0.0.1:59284/*",
-    "http://localhost:59284/*"
+    "http://localhost:59284/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"

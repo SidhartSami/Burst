@@ -9,26 +9,81 @@ document.addEventListener("DOMContentLoaded", async () => {
   const netCount = document.getElementById("netCount");
   const btnOpenApp = document.getElementById("btnOpenApp");
 
+  const modeVideo = document.getElementById("modeVideo");
+  const modeAll = document.getElementById("modeAll");
+  const refreshHint = document.getElementById("refreshHint");
+  let currentMode = "video";
+
+  function updateModeUI(mode) {
+    currentMode = mode;
+    if (mode === "all") {
+      modeAll.style.background = "rgba(255, 136, 0, 0.15)";
+      modeAll.style.borderColor = "var(--accent)";
+      modeAll.style.color = "var(--accent)";
+      modeAll.style.fontWeight = "600";
+
+      modeVideo.style.background = "var(--surface-2)";
+      modeVideo.style.borderColor = "var(--border)";
+      modeVideo.style.color = "var(--text-muted)";
+      modeVideo.style.fontWeight = "400";
+    } else {
+      modeVideo.style.background = "rgba(255, 136, 0, 0.15)";
+      modeVideo.style.borderColor = "var(--accent)";
+      modeVideo.style.color = "var(--accent)";
+      modeVideo.style.fontWeight = "600";
+
+      modeAll.style.background = "var(--surface-2)";
+      modeAll.style.borderColor = "var(--border)";
+      modeAll.style.color = "var(--text-muted)";
+      modeAll.style.fontWeight = "400";
+    }
+  }
+
   // Load saved Turbo Stream preference
-  chrome.storage.local.get(["turboStreamEnabled"], (res) => {
+  chrome.storage.local.get(["turboStreamEnabled", "turboStreamMode"], (res) => {
     const isEnabled = !!res.turboStreamEnabled;
+    currentMode = res.turboStreamMode || "video";
     turboToggle.checked = isEnabled;
+    updateModeUI(currentMode);
     if (isEnabled) {
       turboCard.classList.add("active");
+      if (refreshHint) refreshHint.style.display = "block";
     }
   });
+
+  if (modeVideo) {
+    modeVideo.addEventListener("click", () => {
+      updateModeUI("video");
+      chrome.storage.local.set({ turboStreamMode: "video" });
+      if (turboToggle.checked) {
+        chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: true, mode: "video" });
+      }
+    });
+  }
+
+  if (modeAll) {
+    modeAll.addEventListener("click", () => {
+      updateModeUI("all");
+      chrome.storage.local.set({ turboStreamMode: "all" });
+      if (turboToggle.checked) {
+        chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: true, mode: "all" });
+      }
+    });
+  }
 
   // Handle Turbo Stream Toggle
   turboToggle.addEventListener("change", () => {
     const isEnabled = turboToggle.checked;
     if (isEnabled) {
       turboCard.classList.add("active");
+      if (refreshHint) refreshHint.style.display = "block";
     } else {
       turboCard.classList.remove("active");
+      if (refreshHint) refreshHint.style.display = "none";
     }
 
-    chrome.storage.local.set({ turboStreamEnabled: isEnabled });
-    chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: isEnabled });
+    chrome.storage.local.set({ turboStreamEnabled: isEnabled, turboStreamMode: currentMode });
+    chrome.runtime.sendMessage({ type: "SET_TURBO_STREAM", enabled: isEnabled, mode: currentMode });
   });
 
   // Open App Button

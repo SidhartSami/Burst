@@ -262,7 +262,7 @@
     <div class="card-top">
       <div class="card-title-group">
         <span style="color: var(--accent); font-size: 13px;">⚡</span>
-        <span class="card-title">Turbo Video Stream</span>
+        <span class="card-title">Turbo Multi-Network Boost</span>
       </div>
       <label class="switch">
         <input type="checkbox" id="turboToggle">
@@ -270,7 +270,18 @@
       </label>
     </div>
     <div class="card-subtitle">
-      Bonds Wi-Fi & 5G Hotspot for lag-free 4K/8K YouTube, Twitch & streaming video.
+      Bonds Wi-Fi, Ethernet & USB Tethering for lag-free 4K/8K streaming & downloads.
+    </div>
+    <div id="modeWrap" style="display: flex; gap: 6px; margin-top: 10px;">
+      <button type="button" id="modeVideo" class="mode-btn" style="flex: 1; padding: 5px 8px; font-size: 11px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; transition: all 0.15s ease;">
+        🎬 Video Streams
+      </button>
+      <button type="button" id="modeAll" class="mode-btn" style="flex: 1; padding: 5px 8px; font-size: 11px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); cursor: pointer; transition: all 0.15s ease;">
+        🌐 All Traffic
+      </button>
+    </div>
+    <div id="refreshHint" style="display: none; font-size: 10px; color: var(--accent); margin-top: 8px; line-height: 1.4;">
+      ⚡ Active! Refresh your video tab or open a new video to start bonding.
     </div>
   </div>
 

@@ -97,6 +97,21 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected_1, selected_3)
         self.assertNotEqual(selected_1, selected_2)
 
+    async def test_plain_http_forwarding(self):
+        """Test plain HTTP GET request forwarding through the proxy."""
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy_port)
+        http_req = f"GET http://127.0.0.1:{self.target_port}/video.m3u8 HTTP/1.1\r\nHost: 127.0.0.1:{self.target_port}\r\n\r\n"
+        writer.write(http_req.encode())
+        await writer.drain()
+
+        # Target echoes back "ECHO:GET /video.m3u8 ..."
+        echo_resp = await reader.read(10)
+        self.assertTrue(echo_resp.startswith(b"ECHO:GET"))
+
+        writer.close()
+        await writer.wait_closed()
+
 
 if __name__ == "__main__":
     unittest.main()
+

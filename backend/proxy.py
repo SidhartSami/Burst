@@ -150,11 +150,17 @@ class TurboStreamProxy:
 
             method, target = parts[0].upper(), parts[1]
 
-            # Read and discard HTTP headers until empty line
+            # Read headers
+            headers_list = []
+            host_header = ""
             while True:
                 line = await asyncio.wait_for(client_reader.readline(), timeout=5.0)
                 if not line or line in (b"\r\n", b"\n", b""):
                     break
+                headers_list.append(line)
+                decoded_line = line.decode("latin1", errors="replace").strip()
+                if decoded_line.lower().startswith("host:"):
+                    host_header = decoded_line.split(":", 1)[1].strip()
 
             if method == "CONNECT":
                 # Handle HTTPS CONNECT tunneling
@@ -178,10 +184,44 @@ class TurboStreamProxy:
                 await self._tunnel(client_reader, client_writer, remote_reader, remote_writer, bound_ip)
 
             else:
-                # Handle plain HTTP request
-                client_writer.write(b"HTTP/1.1 501 Not Implemented\r\n\r\n")
-                await client_writer.drain()
-                client_writer.close()
+                # Handle plain HTTP forwarding (GET http://... or GET /path with Host)
+                target_host = host_header
+                port = 80
+                path = target
+
+                if target.startswith("http://"):
+                    without_proto = target[7:]
+                    slash_idx = without_proto.find("/")
+                    host_part = without_proto[:slash_idx] if slash_idx != -1 else without_proto
+                    path = without_proto[slash_idx:] if slash_idx != -1 else "/"
+                    if ":" in host_part:
+                        target_host, port_str = host_part.rsplit(":", 1)
+                        port = int(port_str)
+                    else:
+                        target_host = host_part
+                elif ":" in target_host:
+                    target_host, port_str = target_host.rsplit(":", 1)
+                    port = int(port_str)
+
+                if not target_host:
+                    client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                    await client_writer.drain()
+                    client_writer.close()
+                    return
+
+                bound_ip = await self._select_next_interface()
+                remote_reader, remote_writer = await self._connect_remote(target_host, port, bound_ip)
+
+                # Send request line + preserved headers
+                http_ver = parts[2] if len(parts) > 2 else "HTTP/1.1"
+                remote_writer.write(f"{method} {path} {http_ver}\r\n".encode("latin1"))
+                for h in headers_list:
+                    remote_writer.write(h)
+                remote_writer.write(b"\r\n")
+                await remote_writer.drain()
+
+                self._record_target(target_host, port, bound_ip)
+                await self._tunnel(client_reader, client_writer, remote_reader, remote_writer, bound_ip)
 
         except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError):
             pass

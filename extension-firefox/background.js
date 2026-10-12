@@ -1,4 +1,4 @@
-// Burst Extension (Firefox) — background.js
+// Burst Extension — background.js
 // Minimal extension: icon status (orange/gray).
 // Intercepts ONLY magnet links and .torrent files.
 // All other files (PDFs, documents, media, executables, web pages, etc.) download normally in browser.
@@ -7,7 +7,7 @@
 const NATIVE_HOST = "com.burst.download.manager";
 const API_BASE = "http://127.0.0.1:59284";
 
-const actionApi = (typeof browser !== "undefined" && browser.action) || chrome.action;
+const actionApi = chrome.action || (typeof browser !== "undefined" && browser.action);
 
 // ── Status & Icon Management ──────────────────────────────────────────────────
 
@@ -173,9 +173,10 @@ function isTorrentOrMagnet(downloadItem) {
   return false;
 }
 
-chrome.downloads.onCreated.addListener((downloadItem) => {
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   if (!isBurstOnline || !isTorrentOrMagnet(downloadItem)) {
-    // NOT a torrent/magnet or Burst is offline — let Firefox handle it normally
+    // NOT a torrent/magnet or Burst is offline — allow browser to download normally
+    suggest();
     return;
   }
 
@@ -269,12 +270,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "SET_TURBO_STREAM") {
+    const mode = msg.mode || "video";
     if (msg.enabled) {
-      enableTurboStreamProxy();
+      enableTurboStreamProxy(mode);
     } else {
       disableTurboStreamProxy();
     }
-    sendResponse({ success: true, enabled: msg.enabled });
+    // Sync with Burst backend
+    fetch(`${API_BASE}/proxy/toggle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!msg.enabled }),
+    }).catch(() => {});
+
+    sendResponse({ success: true, enabled: msg.enabled, mode });
     return true;
   }
 
@@ -286,47 +295,111 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ── Turbo Stream Proxy Controller ─────────────────────────────────────────────
 
-function enableTurboStreamProxy() {
-  const proxyApi = chrome.proxy || (typeof browser !== "undefined" && browser.proxy);
-  if (!proxyApi || !proxyApi.settings) return;
-  const pacData = `
-    function FindProxyForURL(url, host) {
-      if (shExpMatch(host, "*.googlevideo.com") || host === "googlevideo.com" ||
-          shExpMatch(host, "*.ttvnw.net") || shExpMatch(host, "*.twitch.tv") ||
-          shExpMatch(host, "*.nflxvideo.net")) {
+function enableTurboStreamProxy(mode = "video") {
+  if (!chrome.proxy || !chrome.proxy.settings) return;
+
+  let pacData;
+  if (mode === "all") {
+    pacData = `
+      function FindProxyForURL(url, host) {
+        if (shExpMatch(host, "127.0.0.1") || shExpMatch(host, "localhost")) {
+          return "DIRECT";
+        }
         return "PROXY 127.0.0.1:59285; DIRECT";
       }
-      return "DIRECT";
-    }
-  `;
-  proxyApi.settings.set(
+    `;
+  } else {
+    pacData = `
+      function FindProxyForURL(url, host) {
+        if (
+          dnsDomainIs(host, ".googlevideo.com") || host === "googlevideo.com" ||
+          dnsDomainIs(host, ".youtube.com") || host === "youtube.com" ||
+          dnsDomainIs(host, ".ytimg.com") || host === "ytimg.com" ||
+          dnsDomainIs(host, ".ggpht.com") || host === "ggpht.com" ||
+          dnsDomainIs(host, ".twitch.tv") || host === "twitch.tv" ||
+          dnsDomainIs(host, ".ttvnw.net") || host === "ttvnw.net" ||
+          dnsDomainIs(host, ".jtvnw.net") || host === "jtvnw.net" ||
+          dnsDomainIs(host, ".netflix.com") || host === "netflix.com" ||
+          dnsDomainIs(host, ".nflxvideo.net") || host === "nflxvideo.net" ||
+          dnsDomainIs(host, ".nflxext.com") || host === "nflxext.com" ||
+          dnsDomainIs(host, ".vimeo.com") || host === "vimeo.com" ||
+          dnsDomainIs(host, ".dailymotion.com") || host === "dailymotion.com" ||
+          shExpMatch(url, "*videoplayback*") ||
+          shExpMatch(url, "*.m3u8*") ||
+          shExpMatch(url, "*.mpd*")
+        ) {
+          return "PROXY 127.0.0.1:59285; DIRECT";
+        }
+        return "DIRECT";
+      }
+    `;
+  }
+
+  chrome.proxy.settings.set(
     { value: { mode: "pac_script", pacScript: { data: pacData } }, scope: "regular" },
     () => {
-      console.log("[BURST PROXY] Turbo Stream Proxy active on 127.0.0.1:59285");
-      if (actionApi && actionApi.setBadgeText) {
-        actionApi.setBadgeText({ text: "⚡ON" });
-        actionApi.setBadgeBackgroundColor({ color: "#ff8800" });
+      if (chrome.runtime.lastError) {
+        console.error("[BURST PROXY] Error setting proxy:", chrome.runtime.lastError);
+      } else {
+        console.log(`[BURST PROXY] Turbo Stream Proxy active (${mode}) on 127.0.0.1:59285`);
+        if (actionApi && actionApi.setBadgeText) {
+          actionApi.setBadgeText({ text: mode === "all" ? "⚡ALL" : "⚡ON" });
+          actionApi.setBadgeBackgroundColor({ color: "#ff8800" });
+        }
       }
     }
   );
+
+  // Strip Alt-Svc response headers so Chrome does NOT bypass the proxy via UDP QUIC
+  if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
+    chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: [
+        {
+          id: 59285,
+          priority: 1,
+          action: {
+            type: "modifyHeaders",
+            responseHeaders: [{ header: "alt-svc", operation: "remove" }]
+          },
+          condition: {
+            urlFilter: "*",
+            resourceTypes: ["xmlhttprequest", "media", "main_frame", "sub_frame", "other"]
+          }
+        }
+      ],
+      removeRuleIds: [59285]
+    }).catch((e) => console.debug("[BURST PROXY] declarativeNetRequest not available:", e));
+  }
 }
 
 function disableTurboStreamProxy() {
-  const proxyApi = chrome.proxy || (typeof browser !== "undefined" && browser.proxy);
-  if (!proxyApi || !proxyApi.settings) return;
-  proxyApi.settings.clear({ scope: "regular" }, () => {
+  if (!chrome.proxy || !chrome.proxy.settings) return;
+  chrome.proxy.settings.clear({ scope: "regular" }, () => {
     console.log("[BURST PROXY] Turbo Stream Proxy cleared.");
     if (actionApi && actionApi.setBadgeText) {
       actionApi.setBadgeText({ text: "" });
     }
   });
+
+  if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
+    chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [59285]
+    }).catch(() => {});
+  }
+
+  fetch(`${API_BASE}/proxy/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: false }),
+  }).catch(() => {});
 }
 
 // Restore proxy status on browser startup if user had enabled it
 if (chrome.storage && chrome.storage.local) {
-  chrome.storage.local.get(["turboStreamEnabled"], (res) => {
+  chrome.storage.local.get(["turboStreamEnabled", "turboStreamMode"], (res) => {
     if (res && res.turboStreamEnabled) {
-      enableTurboStreamProxy();
+      enableTurboStreamProxy(res.turboStreamMode || "video");
     }
   });
 }
+
