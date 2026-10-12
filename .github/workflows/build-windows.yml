@@ -1,0 +1,76 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows EXE & Inno Setup Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements.txt'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build React frontend
+        working-directory: frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller Burst.spec --noconfirm --clean
+          pyinstaller native_host.spec --noconfirm --clean
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress
+
+      - name: Compile Inno Setup Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Package browser extensions
+        run: |
+          python package_extensions.py
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Burst-Windows-Setup
+          path: Output/Burst_Setup_v*.exe
+          if-no-files-found: error
+
+      - name: Upload Extensions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Burst-Browser-Extensions
+          path: |
+            extension-chrome.zip
+            extension-firefox.zip
+          if-no-files-found: error

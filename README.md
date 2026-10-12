@@ -59,27 +59,48 @@ Burst is distributed as native standalone executables with zero runtime dependen
 
 ---
 
+## Comparison: Burst vs. Plexo vs. Traditional Tools
+
+| Capability | Burst | Plexo | Traditional (IDM / FDM / aria2) |
+| :--- | :---: | :---: | :---: |
+| **Multi-WAN Interface Bonding** | ✅ **Yes** (Wi-Fi + Ethernet + 5G) | ✅ Yes | ❌ No (Single interface only) |
+| **Pre-Built 1-Click Installers** | ✅ **Yes** (Windows `.exe`, Mac `.dmg`, Linux `.AppImage`) | ❌ No (Source build only) | ⚠️ Platform dependent |
+| **Browser Companion Extension** | ✅ **Yes** (1-click `⚡ Burst` badge on `.zip`/`.exe`/`.iso`) | ❌ No extension | ⚠️ Basic intercept only |
+| **Smart Interface Advisor** | ✅ **Yes** (Subnet & shared gateway collision warnings) | ❌ No (Silently underperforms) | ❌ No |
+| **Per-Interface Speedtest** | ✅ **Yes** (Live Mbps & ping benchmarking) | ❌ No | ❌ No |
+| **Persistent History & Resume** | ✅ **Yes** (1-click resume across app crashes/reboots) | ❌ No persistent history | ⚠️ Varies |
+| **BitTorrent & Magnet Bonding** | ✅ **Yes** (libtorrent engine with file selective picking) | ❌ No (HTTP only) | ⚠️ FDM only |
+| **Off-Peak Scheduler** | ✅ **Yes** (APScheduler with time triggers) | ❌ No | ⚠️ IDM only |
+| **Per-Download Interface Pinning** | ✅ **Yes** (Allocate specific network adapters per job) | ❌ No (Global only) | ❌ No |
+| **Open Source & Telemetry-Free** | ✅ **100% Free MIT** | ✅ MIT | ❌ Paid / Ad-supported |
+
+---
+
 ## Key Features
 
-### <img src="https://api.iconify.design/ph/link-bold.svg?color=%2371717a" width="20" valign="middle"> True Multi-Connection Bonding
-Plug in an Ethernet cable while connected to Wi-Fi, or enable USB tethering from your smartphone. Burst dynamically detects every healthy network adapter, assigns distinct sockets, and aggregates their bandwidth simultaneously.
+### <img src="https://api.iconify.design/ph/link-bold.svg?color=%2371717a" width="20" valign="middle"> True Multi-Connection Bonding & Interface Pinning
+Plug in an Ethernet cable while connected to Wi-Fi, or enable USB tethering from your smartphone. Burst dynamically detects healthy network adapters, assigns distinct sockets, and aggregates their bandwidth. Pin specific interfaces per download to conserve metered connections.
+
+### <img src="https://api.iconify.design/ph/warning-bold.svg?color=%2371717a" width="20" valign="middle"> Smart Interface Advisor (Network Collision Detection)
+Plugging Wi-Fi and Ethernet into the same home router won't increase your speed because both share one ISP bottleneck. Burst detects subnet and gateway collisions, warning you in real-time and recommending mobile tethering or secondary networks for a true 2x speedup.
+
+### <img src="https://api.iconify.design/ph/speedometer-bold.svg?color=%2371717a" width="20" valign="middle"> On-Demand Per-Interface Speed Benchmarking
+Measure individual throughput and ping latency on each network adapter before starting large downloads. Know instantly if your secondary connection adds meaningful bandwidth.
+
+### <img src="https://api.iconify.design/ph/puzzle-piece-bold.svg?color=%2371717a" width="20" valign="middle"> Browser Extension 2.0 (Link Sniffer & 1-Click Badges)
+Companion extensions for Chrome and Firefox detect direct download links (`.zip`, `.exe`, `.iso`, `.tar`, `.mp4`) and inject a sleek `⚡ Burst` badge. Click the badge to route the file through bonded acceleration without interrupting normal browsing.
 
 ### <img src="https://api.iconify.design/ph/magnet-bold.svg?color=%2371717a" width="20" valign="middle"> Advanced BitTorrent & Magnet Engine
 Built directly on top of `libtorrent`. Paste magnet links or drop `.torrent` files into the window to inspect metadata, browse file hierarchies, and selectively prioritize or exclude individual files before downloading begins.
 
+### <img src="https://api.iconify.design/ph/arrows-clockwise-bold.svg?color=%2371717a" width="20" valign="middle"> 1-Click History Resume & Crash Recovery
+Downloads persist atomic chunk checkpoints. If Burst closes mid-download or the machine reboots, unfinished downloads recover cleanly. The History view provides 1-click re-downloading and native file manager reveal.
+
+### <img src="https://api.iconify.design/ph/clock-bold.svg?color=%2371717a" width="20" valign="middle"> Off-Peak Download Scheduler
+Queue heavy files for overnight downloads when your bandwidth is free. Set scheduled times directly from the add dialog or active download cards.
+
 ### <img src="https://api.iconify.design/ph/chart-bar-bold.svg?color=%2371717a" width="20" valign="middle"> Real-Time Chunk Map & Observability
 Observe download progress live. Burst features an interactive visual chunk map color-coded by network interface, giving you instant visual feedback on which connection downloaded which piece.
-
-### <img src="https://api.iconify.design/ph/globe-bold.svg?color=%2371717a" width="20" valign="middle"> Browser Extension Auto-Capture
-Capture downloads directly from your favorite browser. Lightweight companion extensions automatically intercept downloads and route them into Burst's accelerated bonding engine.
-
-### <img src="https://api.iconify.design/ph/cpu-bold.svg?color=%2371717a" width="20" valign="middle"> Adaptive Schedulers & Work Stealing
-* **Dynamic EWMA Chunk Sizing**: Automatically tunes chunk requests (256 KB to 8 MB) based on each adapter's real-time Exponential Weighted Moving Average throughput.
-* **Sub-Chunk Work Stealing**: High-speed adapters steal unstarted chunks from slower or congested adapters to eliminate stragglers.
-* **Tail Racing**: Detects lagging chunks and dispatches duplicate racer tasks on idle interfaces. The first to verify claims the chunk, cancelling losing tasks with zero corruption.
-
-### <img src="https://api.iconify.design/ph/arrows-clockwise-bold.svg?color=%2371717a" width="20" valign="middle"> Safe Pause, Resume & Integrity Checks
-Pause and resume downloads anytime. Chunks are validated with SHA-256 integrity checks, and progress is continuously persisted to disk, protecting your downloads against sudden network drops or power outages.
 
 ---
 
