@@ -36,7 +36,8 @@ import {
   Video,
   Music,
   Loader,
-  Puzzle
+  Puzzle,
+  RotateCcw
 } from "lucide-react";
 
 const API_BASE = (window.location.port === "5173" || window.location.port === "4173")
@@ -2602,21 +2603,33 @@ export default function App() {
                           <button
                             onClick={() => handleResumeFromHistory(item)}
                             style={{
-                              background: 'none',
-                              border: 'none',
+                              background: 'var(--surface-2)',
+                              border: '1px solid var(--border)',
                               cursor: 'pointer',
-                              color: 'var(--accent)',
-                              padding: '6px',
-                              display: 'flex',
+                              color: 'var(--text-muted)',
+                              padding: '4px 9px',
+                              borderRadius: '6px',
+                              display: 'inline-flex',
                               alignItems: 'center',
-                              justifyContent: 'center',
+                              gap: '5px',
+                              fontSize: '11px',
+                              fontWeight: 500,
                               alignSelf: 'center',
-                              transition: 'color 0.2s ease',
+                              transition: 'all 0.15s ease',
                               marginLeft: '8px'
                             }}
-                            title="Re-download / Resume with Burst"
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.color = 'var(--text)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.color = 'var(--text-muted)';
+                              e.currentTarget.style.borderColor = 'var(--border)';
+                            }}
+                            title="Retry / Re-download with Burst"
                           >
-                            <Play size={18} />
+                            <RotateCcw size={12} />
+                            <span>Retry</span>
                           </button>
                         )}
                         <button
