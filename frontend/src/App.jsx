@@ -3146,54 +3146,112 @@ export default function App() {
                     );
                   })}
 
-                  <div className="settings-section-title">Network Adapters & Limits</div>
-                  <div style={{ marginTop: '8px', border: '1px solid var(--border)', borderRadius: '6px', overflow: 'hidden' }}>
-                    <table className="conn-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                      <thead>
-                        <tr style={{ fontSize: '11px', color: 'var(--text-muted)', textAlign: 'left', borderBottom: '1px solid var(--border)', background: 'var(--surface-2)' }}>
-                          <th style={{ padding: '8px 12px' }}>Interface</th>
-                          <th style={{ padding: '8px 12px' }}>IP Address</th>
-                          <th style={{ padding: '8px 12px', textAlign: 'right' }}>Bandwidth Limit</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {renderedInterfaces.map((iface) => (
-                          <tr className="conn-row" key={iface.ip_address} style={{ borderBottom: '1px solid var(--border)' }}>
-                            <td style={{ padding: '8px 12px' }}>
-                              <div className="conn-name" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces).dot }} />
-                                <div>
-                                  <div style={{ fontWeight: 500 }}>{iface.name || iface.ip_address}</div>
-                                  <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
+                  <div className="settings-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>Network Adapters & Speed Limits</span>
+                    <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-muted)' }}>
+                      {renderedInterfaces.length} active
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '6px' }}>
+                    {renderedInterfaces.length === 0 ? (
+                      <div style={{ padding: '12px 14px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                        No network adapters detected.
+                      </div>
+                    ) : (
+                      renderedInterfaces.map((iface) => {
+                        const tone = toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces);
+                        const limitBytes = bandwidthLimits[iface.ip_address];
+                        return (
+                          <div
+                            key={iface.ip_address}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '10px 14px',
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border)',
+                              borderRadius: '8px',
+                              transition: 'border-color 0.15s ease'
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <div
+                                style={{
+                                  width: '8px',
+                                  height: '8px',
+                                  borderRadius: '50%',
+                                  background: tone.dot,
+                                  boxShadow: `0 0 6px ${tone.dot}66`,
+                                  flexShrink: 0
+                                }}
+                              />
+                              <div>
+                                <div style={{ fontWeight: 500, fontSize: '13px', color: 'var(--text)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  {iface.name || iface.ip_address}
+                                  <span style={{
+                                    fontSize: '10px',
+                                    padding: '1px 6px',
+                                    borderRadius: '4px',
+                                    background: 'var(--surface-2)',
+                                    color: 'var(--text-muted)',
+                                    fontWeight: 400
+                                  }}>
+                                    {shortName(iface.name, iface.interface_type)}
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace', marginTop: '2px' }}>
+                                  {iface.ip_address}
                                 </div>
                               </div>
-                            </td>
-                            <td style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace', padding: '8px 12px' }}>
-                              {iface.ip_address}
-                            </td>
-                            <td style={{ padding: '8px 12px' }}>
-                              <div className="conn-actions" style={{ justifyContent: 'flex-end', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                {bandwidthLimits[iface.ip_address] && (
-                                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                                    {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s
-                                  </span>
-                                )}
-                                <button className="btn-small" onClick={() => {
-                                  setPromptData({
-                                    title: "Set bandwidth limit (MB/s)",
-                                    hint: "Enter 0 to remove the limit (unlimited).",
-                                    ip: iface.ip_address,
-                                    value: bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024).toString() : ""
-                                  });
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              {limitBytes ? (
+                                <span style={{
+                                  fontSize: '11px',
+                                  color: 'var(--accent)',
+                                  fontWeight: 500,
+                                  background: 'rgba(255, 136, 0, 0.1)',
+                                  padding: '2px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid rgba(255, 136, 0, 0.25)'
                                 }}>
-                                  {bandwidthLimits[iface.ip_address] ? "Change" : "Set limit"}
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                                  Max {(limitBytes / 1024 / 1024).toFixed(1)} MB/s
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                  Unlimited
+                                </span>
+                              )}
+                              <button
+                                className="btn-small"
+                                style={{
+                                  padding: '3px 10px',
+                                  fontSize: '11px',
+                                  borderRadius: '6px',
+                                  border: '1px solid var(--border)',
+                                  background: 'transparent',
+                                  color: 'var(--text)',
+                                  cursor: 'pointer'
+                                }}
+                                onClick={() => {
+                                  setPromptData({
+                                    title: `Set bandwidth limit for ${shortName(iface.name, iface.interface_type)} (MB/s)`,
+                                    hint: "Enter 0 to remove the limit (unlimited speed).",
+                                    ip: iface.ip_address,
+                                    value: limitBytes ? (limitBytes / 1024 / 1024).toString() : ""
+                                  });
+                                }}
+                              >
+                                {limitBytes ? "Change Limit" : "Set Limit"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
 
                   <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '24px', textAlign: 'center' }}>
