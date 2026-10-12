@@ -735,6 +735,8 @@ export default function App() {
   const [interfaces, setInterfaces] = useState([]);
   const [renderedInterfaces, setRenderedInterfaces] = useState([]);
   const [selectedIps, setSelectedIps] = useState([]);
+  const [advisor, setAdvisor] = useState(null);
+  const [speedtestRunning, setSpeedtestRunning] = useState(false);
   const [url, setUrl] = useState("");
   const [outputPath, setOutputPath] = useState(() => {
     const saved = localStorage.getItem("burst_default_path") || "C:/Burst-Downloads/";
@@ -1161,6 +1163,7 @@ export default function App() {
       if (!resp.ok) return;
       const data = await resp.json();
       const fresh = data.interfaces || [];
+      if (data.advisor) setAdvisor(data.advisor);
       setInterfaces(fresh);
       mergeInterfacesForUi(fresh);
 
@@ -1175,14 +1178,66 @@ export default function App() {
       const resp = await fetch(`${API_BASE}/speedtest`, { method: "POST" });
       const data = await resp.json();
       if (!resp.ok) return;
+      if (data.advisor) setAdvisor(data.advisor);
       setRenderedInterfaces((prev) =>
         prev.map((iface) => {
           const found = (data.results || []).find((r) => r.ip_address === iface.ip_address);
           if (!found) return iface;
-          return { ...iface, speed_mb_s: found.speed_mb_s };
+          return {
+            ...iface,
+            speed_mb_s: found.speed_mb_s,
+            speed_mbps: found.speed_mbps,
+            ping_ms: found.ping_ms
+          };
         })
       );
     } catch { }
+  };
+
+  const runManualSpeedtest = async () => {
+    if (speedtestRunning) return;
+    setSpeedtestRunning(true);
+    try {
+      const resp = await fetch(`${API_BASE}/speedtest`, { method: "POST" });
+      const data = await resp.json();
+      if (resp.ok) {
+        if (data.advisor) setAdvisor(data.advisor);
+        setRenderedInterfaces((prev) =>
+          prev.map((iface) => {
+            const found = (data.results || []).find((r) => r.ip_address === iface.ip_address);
+            if (!found) return iface;
+            return {
+              ...iface,
+              speed_mb_s: found.speed_mb_s,
+              speed_mbps: found.speed_mbps,
+              ping_ms: found.ping_ms
+            };
+          })
+        );
+        const combined = data.combined_speed_mbps || (data.combined_speed_mb_s ? (data.combined_speed_mb_s * 8).toFixed(1) : 0);
+        setToast(`Speed benchmark complete: ${combined} Mbps combined throughput`);
+      } else {
+        setToast("Speed benchmark failed to run.");
+      }
+    } catch (err) {
+      setToast("Speed benchmark network error.");
+    } finally {
+      setSpeedtestRunning(false);
+    }
+  };
+
+  const toggleInterfaceSelection = (ip) => {
+    setSelectedIps((prev) => {
+      if (prev.includes(ip)) {
+        if (prev.length <= 1) {
+          setToast("At least one interface must remain enabled.");
+          return prev;
+        }
+        return prev.filter((item) => item !== ip);
+      } else {
+        return [...prev, ip];
+      }
+    });
   };
 
   useEffect(() => {
@@ -2844,39 +2899,124 @@ export default function App() {
 
           {activeTab === 'connections' && (
             <div className="content-body">
-              <div className="section-label">Interfaces</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <div className="section-label" style={{ marginBottom: '2px' }}>Network Interfaces & Topology Advisor</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Monitor interface throughput, detect shared gateway bottlenecks, and toggle interfaces.
+                  </div>
+                </div>
+                <button
+                  className="btn-primary-small"
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: speedtestRunning ? 'not-allowed' : 'pointer' }}
+                  onClick={runManualSpeedtest}
+                  disabled={speedtestRunning}
+                  id="run-speedtest-btn"
+                >
+                  {speedtestRunning ? <Loader size={14} className="animate-spin" /> : <Zap size={14} />}
+                  {speedtestRunning ? "Benchmarking Networks..." : "Run Speed Benchmark"}
+                </button>
+              </div>
+
+              {advisor && (
+                <div style={{
+                  padding: '14px 16px',
+                  borderRadius: '10px',
+                  marginBottom: '20px',
+                  border: advisor.severity === 'warning'
+                    ? '1px solid rgba(245, 158, 11, 0.4)'
+                    : advisor.severity === 'success'
+                      ? '1px solid rgba(16, 185, 129, 0.4)'
+                      : '1px solid rgba(59, 130, 246, 0.4)',
+                  background: advisor.severity === 'warning'
+                    ? 'rgba(245, 158, 11, 0.08)'
+                    : advisor.severity === 'success'
+                      ? 'rgba(16, 185, 129, 0.08)'
+                      : 'rgba(59, 130, 246, 0.08)',
+                  display: 'flex',
+                  gap: '12px',
+                  alignItems: 'flex-start'
+                }}>
+                  {advisor.severity === 'warning' ? (
+                    <AlertTriangle size={20} color="#f59e0b" style={{ flexShrink: 0, marginTop: '2px' }} />
+                  ) : advisor.severity === 'success' ? (
+                    <CheckCircle2 size={20} color="#10b981" style={{ flexShrink: 0, marginTop: '2px' }} />
+                  ) : (
+                    <AlertCircle size={20} color="#3b82f6" style={{ flexShrink: 0, marginTop: '2px' }} />
+                  )}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '4px', color: advisor.severity === 'warning' ? '#f59e0b' : advisor.severity === 'success' ? '#10b981' : '#3b82f6' }}>
+                      {advisor.title}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text)', marginBottom: advisor.recommendation ? '6px' : '0', lineHeight: 1.5 }}>
+                      {advisor.message}
+                    </div>
+                    {advisor.recommendation && (
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                        💡 <strong>Advisor Tip:</strong> {advisor.recommendation}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <table className="conn-table">
+                <thead>
+                  <tr style={{ fontSize: '11px', color: 'var(--text-muted)', textAlign: 'left', borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ padding: '8px 12px' }}>Interface</th>
+                    <th style={{ padding: '8px 12px' }}>Network / Subnet</th>
+                    <th style={{ padding: '8px 12px' }}>Speed (Throughput)</th>
+                    <th style={{ padding: '8px 12px', textAlign: 'right' }}>Controls</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {renderedInterfaces.map((iface) => (
-                    <tr className="conn-row" key={iface.ip_address}>
-                      <td>
-                        <div className="conn-name">
-                          <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces).dot }} />
-                          {iface.name || iface.ip_address}
-                          <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
-                        </div>
-                      </td>
-                      <td style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace', paddingRight: '16px' }}>
-                        {iface.ip_address}
-                      </td>
-                      <td className="conn-speed">
-                        {iface.speed_mb_s ? `${iface.speed_mb_s.toFixed(2)} MB/s` : '0.00 MB/s'}
-                      </td>
-                      <td>
-                        <div className="conn-actions">
-                          {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
-                          <button className="btn-small" onClick={() => {
-                            setPromptData({
-                              title: "Set bandwidth limit (MB/s)",
-                              hint: "Enter 0 to remove the limit (unlimited).",
-                              ip: iface.ip_address,
-                              value: bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024).toString() : ""
-                            });
-                          }}>Set limit (MB/s)</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {renderedInterfaces.map((iface) => {
+                    const isSelected = selectedIps.includes(iface.ip_address);
+                    const mbpsVal = iface.speed_mbps ? iface.speed_mbps.toFixed(1) : (iface.speed_mb_s ? (iface.speed_mb_s * 8).toFixed(1) : "0.0");
+                    const mbsVal = iface.speed_mb_s ? iface.speed_mb_s.toFixed(2) : "0.00";
+                    return (
+                      <tr className="conn-row" key={iface.ip_address} style={{ opacity: isSelected ? 1 : 0.6 }}>
+                        <td>
+                          <div className="conn-name" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleInterfaceSelection(iface.ip_address)}
+                              style={{ cursor: 'pointer', accentColor: 'var(--accent)' }}
+                              title={isSelected ? "Enabled for downloads" : "Disabled"}
+                            />
+                            <div className="conn-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: toneFor(shortName(iface.name, iface.interface_type), iface.ip_address, renderedInterfaces).dot }} />
+                            <div>
+                              <div style={{ fontWeight: 500 }}>{iface.name || iface.ip_address}</div>
+                              <span className="conn-type">{shortName(iface.name, iface.interface_type)}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace', paddingRight: '16px' }}>
+                          <div>{iface.ip_address}</div>
+                          {iface.subnet && <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Subnet: {iface.subnet}</div>}
+                          {iface.gateway && <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Gateway: {iface.gateway}</div>}
+                        </td>
+                        <td className="conn-speed">
+                          <div style={{ fontWeight: 600, color: 'var(--accent)' }}>{mbpsVal} Mbps</div>
+                          <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{mbsVal} MB/s {iface.ping_ms ? `• ${iface.ping_ms} ms ping` : ''}</div>
+                        </td>
+                        <td>
+                          <div className="conn-actions" style={{ justifyContent: 'flex-end' }}>
+                            {bandwidthLimits[iface.ip_address] && <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '8px' }}>Limit: {(bandwidthLimits[iface.ip_address] / 1024 / 1024).toFixed(1)} MB/s</span>}
+                            <button className="btn-small" onClick={() => {
+                              setPromptData({
+                                title: "Set bandwidth limit (MB/s)",
+                                hint: "Enter 0 to remove the limit (unlimited).",
+                                ip: iface.ip_address,
+                                value: bandwidthLimits[iface.ip_address] ? (bandwidthLimits[iface.ip_address] / 1024 / 1024).toString() : ""
+                              });
+                            }}>Set limit</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

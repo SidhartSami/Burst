@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 import os
 
 from downloader import DownloadManager, analyze_url
-from interfaces import get_active_interfaces_dict
+from interfaces import get_active_interfaces_dict, get_active_interfaces, analyze_interface_topology
 from torrent import start_torrent_download, active_torrents
 from speedtest import benchmark_interfaces
 import config
@@ -565,26 +565,47 @@ def _interfaces_by_ip() -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 @app.get("/interfaces")
 async def interfaces(benchmark: bool = False) -> Dict[str, Any]:
-    base = get_active_interfaces_dict()
+    active_objs = get_active_interfaces()
+    base = [item.to_dict() for item in active_objs]
+    topology = analyze_interface_topology(active_objs)
     if benchmark:
         speed_data = await benchmark_interfaces(base)
         by_ip = {str(item["ip_address"]): item for item in speed_data}
         for interface in base:
             matched = by_ip.get(str(interface["ip_address"]))
-            interface["speed_mb_s"] = matched.get("speed_mb_s", 0.0) if matched else 0.0
-            interface["speedtest_error"] = matched.get("error") if matched else None
+            if matched:
+                interface["speed_mb_s"] = matched.get("speed_mb_s", 0.0)
+                interface["speed_mbps"] = matched.get("speed_mbps", 0.0)
+                interface["ping_ms"] = matched.get("ping_ms")
+                interface["speedtest_error"] = matched.get("error")
+            else:
+                interface["speed_mb_s"] = 0.0
+                interface["speed_mbps"] = 0.0
+                interface["ping_ms"] = None
+                interface["speedtest_error"] = None
     else:
         for interface in base:
             interface["speed_mb_s"] = 0.0
+            interface["speed_mbps"] = 0.0
+            interface["ping_ms"] = None
             interface["speedtest_error"] = None
-    return {"interfaces": base, "count": len(base)}
+    return {"interfaces": base, "count": len(base), "advisor": topology}
 
 
 @app.post("/speedtest")
 async def speedtest() -> Dict[str, Any]:
-    interfaces_data = get_active_interfaces_dict()
-    results = await benchmark_interfaces(interfaces_data)
-    return {"results": results}
+    active_objs = get_active_interfaces()
+    base = [item.to_dict() for item in active_objs]
+    results = await benchmark_interfaces(base)
+    topology = analyze_interface_topology(active_objs)
+    total_mb_s = sum(float(r.get("speed_mb_s", 0.0)) for r in results if not r.get("error"))
+    total_mbps = sum(float(r.get("speed_mbps", 0.0)) for r in results if not r.get("error"))
+    return {
+        "results": results,
+        "combined_speed_mb_s": round(total_mb_s, 2),
+        "combined_speed_mbps": round(total_mbps, 2),
+        "advisor": topology,
+    }
 
 
 # ---------------------------------------------------------------------------
