@@ -108,3 +108,20 @@ def test_topology_optimal_multi_wan():
     assert result["can_bond"] is True
     assert result["severity"] == "success"
     assert len(result["colliding_interfaces"]) == 0
+
+
+def test_open_folder_api(tmp_path):
+    import asyncio
+    import main
+    from unittest.mock import patch
+
+    test_file = tmp_path / "sample.zip"
+    test_file.write_text("dummy")
+
+    with patch("subprocess.Popen") as mock_popen:
+        req = main.OpenFolderRequest(path=str(test_file))
+        res = asyncio.run(main.open_folder(req))
+        assert res["status"] == "success"
+        assert mock_popen.called
+
+

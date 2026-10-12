@@ -299,7 +299,7 @@ function InfoTooltip({ text }) {
   );
 }
 
-function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, allUsedIps, isExpanded, onToggleExpand, showHint }) {
+function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, onPause, onResume, onSchedule, allUsedIps, isExpanded, onToggleExpand, showHint }) {
   if (!status) return null;
 
   const currentInterfacesProgress = status.type === "torrent"
@@ -509,6 +509,15 @@ function DownloadCard({ jid, status, availableInterfaces, onToggle, onCancel, on
                   style={{ color: status.boosted ? 'var(--accent)' : 'var(--text-muted)' }}
                 >
                   <Zap size={15} fill={status.boosted ? 'var(--accent)' : 'none'} />
+                </button>
+              )}
+              {onSchedule && (status.url || status.magnet_uri) && (
+                <button
+                  className="action-btn"
+                  onClick={() => onSchedule(status)}
+                  title="Schedule this download for later"
+                >
+                  <Clock size={15} />
                 </button>
               )}
               <button className="action-btn" onClick={handleCancelClick} title="Dismiss"><X size={15} /></button>
@@ -1704,6 +1713,51 @@ export default function App() {
     });
   };
 
+  const handleResumeFromHistory = async (item) => {
+    const targetUrl = item.url || "";
+    if (!targetUrl) {
+      setToast("Original download URL is not available for this item.");
+      return;
+    }
+    setToast(`Resuming ${item.filename || 'download'}...`);
+    if (isTorrentSource(targetUrl)) {
+      await handleOpenTorrentModal(targetUrl, item.path);
+    } else {
+      await startDownload(targetUrl, item.path);
+    }
+  };
+
+  const handleScheduleActiveJob = (status) => {
+    const jobUrl = status.url || status.magnet_uri || "";
+    if (jobUrl) {
+      setScheduleUrl(jobUrl);
+    }
+    if (status.output_path) {
+      setSchedulePath(status.output_path);
+    }
+    setActiveTab("schedule");
+    setToast("Pre-filled in Scheduler. Select a time to schedule.");
+  };
+
+  const handleOpenFolder = async (filePath) => {
+    try {
+      const resp = await fetch(`${API_BASE}/open-folder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: filePath })
+      });
+      if (resp.ok) {
+        setToast("Opened destination folder.");
+        return;
+      }
+    } catch { }
+    try {
+      await navigator.clipboard.writeText(filePath);
+      setToast("Copied file path to clipboard.");
+    } catch { }
+  };
+
+
   const isValidHash = (str) => {
     const clean = str.trim();
     if (!/^[0-9a-fA-F]+$/.test(clean)) return false;
@@ -2485,6 +2539,55 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    {renderedInterfaces.length > 0 && (
+                      <div style={{ marginTop: '14px', paddingTop: '10px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <Zap size={13} color="var(--accent)" />
+                          Pinned Networks ({selectedIps.length}/{renderedInterfaces.length}):
+                        </span>
+                        {renderedInterfaces.map((iface) => {
+                          const isSelected = selectedIps.includes(iface.ip_address);
+                          return (
+                            <button
+                              key={iface.ip_address}
+                              type="button"
+                              onClick={() => toggleInterfaceSelection(iface.ip_address)}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '3px 9px',
+                                borderRadius: '12px',
+                                fontSize: '11px',
+                                fontWeight: 500,
+                                border: isSelected ? '1px solid var(--accent)' : '1px solid var(--border)',
+                                background: isSelected ? 'rgba(255, 107, 0, 0.12)' : 'var(--surface-2)',
+                                color: isSelected ? 'var(--accent)' : 'var(--text-muted)',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s ease'
+                              }}
+                              title={`Click to ${isSelected ? 'exclude from' : 'include in'} this download`}
+                            >
+                              <span style={{
+                                width: '6px',
+                                height: '6px',
+                                borderRadius: '50%',
+                                background: isSelected ? 'var(--accent)' : 'var(--text-muted)'
+                              }} />
+                              {iface.name || iface.ip_address}
+                              {iface.speed_mbps ? ` (${iface.speed_mbps.toFixed(0)} Mbps)` : ''}
+                            </button>
+                          );
+                        })}
+                        {advisor && advisor.status === 'COLLISION_DETECTED' && (
+                          <span style={{ fontSize: '11px', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px', marginLeft: 'auto' }} title={advisor.message}>
+                            <AlertTriangle size={13} color="#f59e0b" />
+                            Shared router detected
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="content-body">
@@ -2515,6 +2618,7 @@ export default function App() {
                           isExpanded={!!expandedGraphs[jid]}
                           onToggleExpand={() => setExpandedGraphs(prev => ({ ...prev, [jid]: !prev[jid] }))}
                           showHint={showHint}
+                          onSchedule={handleScheduleActiveJob}
                           onToggle={async (ip, selected) => {
                             const endpoint = selected ? 'remove_interface' : 'add_interface';
                             return fetch(`${API_BASE}/download/${jid}/${endpoint}`, {
@@ -2549,10 +2653,10 @@ export default function App() {
                         {history
                           .slice(0, 3)
                           .map(item => (
-                            <div className="completed-row mini" key={item.id}>
+                            <div className="completed-row mini" key={item.id} style={{ display: 'flex', alignItems: 'center' }}>
                               {item.status === 'failed' ? <AlertCircle size={14} color="var(--danger)" /> : <CheckCircle2 size={14} color="var(--success)" />}
-                              <div className="completed-filename">{item.filename}</div>
-                              <div className="completed-meta">
+                              <div className="completed-filename" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.filename}</div>
+                              <div className="completed-meta" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <span style={{
                                   display: 'inline-block',
                                   background: 'var(--surface-raised, var(--surface))',
@@ -2563,6 +2667,22 @@ export default function App() {
                                   fontVariantNumeric: 'tabular-nums',
                                   color: 'var(--text-muted)'
                                 }}>{formatBytes(item.size)}</span>
+                                {item.url && (
+                                  <button
+                                    onClick={() => handleResumeFromHistory(item)}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', padding: '2px', display: 'flex', alignItems: 'center' }}
+                                    title="Re-download / Resume"
+                                  >
+                                    <Play size={12} />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleOpenFolder(item.path)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px', display: 'flex', alignItems: 'center' }}
+                                  title="Open download folder"
+                                >
+                                  <FolderOpen size={12} />
+                                </button>
                               </div>
                             </div>
                           ))
@@ -2608,6 +2728,46 @@ export default function App() {
                         </div>
                         {item.time_saved > 0 && <div className="completed-saved">Saved {formatETA(item.time_saved)}</div>}
                         
+                        {item.url && (
+                          <button
+                            onClick={() => handleResumeFromHistory(item)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              color: 'var(--accent)',
+                              padding: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              alignSelf: 'center',
+                              transition: 'color 0.2s ease',
+                              marginLeft: '8px'
+                            }}
+                            title="Re-download / Resume with Burst"
+                          >
+                            <Play size={18} />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleOpenFolder(item.path)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: 'var(--text-muted)',
+                            padding: '6px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            alignSelf: 'center',
+                            transition: 'color 0.2s ease',
+                            marginLeft: '4px'
+                          }}
+                          title="Open destination folder"
+                        >
+                          <FolderOpen size={18} />
+                        </button>
                         {item.status !== 'failed' && (
                           <button
                             onClick={() => {
@@ -2628,7 +2788,7 @@ export default function App() {
                               justifyContent: 'center',
                               alignSelf: 'center',
                               transition: 'color 0.2s ease',
-                              marginLeft: '12px'
+                              marginLeft: '4px'
                             }}
                             title="Verify Checksum"
                           >

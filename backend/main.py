@@ -6,6 +6,7 @@ import time
 import sys
 import os
 import platform
+import subprocess
 import ctypes
 
 # Set explicit AppUserModelID so Windows groups notifications under "Burst" and displays the correct name
@@ -878,6 +879,36 @@ async def clear_history_api():
     from history_manager import clear_history
     clear_history()
     return {"status": "success"}
+
+
+class OpenFolderRequest(BaseModel):
+    path: str
+
+
+@app.post("/open-folder")
+async def open_folder(payload: OpenFolderRequest) -> Dict[str, Any]:
+    """Opens the directory containing the downloaded file in the native file explorer."""
+    try:
+        target = Path(payload.path)
+        folder = target.parent if (target.is_file() or "." in target.name) else target
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+        system = platform.system()
+        if system == "Windows":
+            if target.exists() and target.is_file():
+                subprocess.Popen(f'explorer /select,"{str(target)}"', shell=True)
+            else:
+                subprocess.Popen(f'explorer "{str(folder)}"', shell=True)
+        elif system == "Darwin":
+            if target.exists():
+                subprocess.Popen(["open", "-R", str(target)])
+            else:
+                subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
+        return {"status": "success", "folder": str(folder)}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
