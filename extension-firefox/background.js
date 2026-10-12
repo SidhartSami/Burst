@@ -296,8 +296,66 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ── Turbo Stream Proxy Controller ─────────────────────────────────────────────
 
 function enableTurboStreamProxy(mode = "video") {
-  if (!chrome.proxy || !chrome.proxy.settings) return;
+  const proxyApi = (typeof browser !== "undefined" && browser.proxy) ? browser.proxy : chrome.proxy;
+  if (!proxyApi || !proxyApi.settings) {
+    console.warn("[BURST PROXY] proxy.settings API not available in this browser.");
+    return;
+  }
 
+  // Detect Firefox / Zen Browser
+  const isFirefox = (typeof browser !== "undefined" && browser.proxy && browser.proxy.settings && (typeof window === "undefined" || !window.chrome)) ||
+                    (typeof navigator !== "undefined" && /firefox|zen/i.test(navigator.userAgent || ""));
+
+  if (isFirefox) {
+    let ffValue;
+    if (mode === "all") {
+      ffValue = {
+        proxyType: "manual",
+        http: "http://127.0.0.1:59285",
+        ssl: "http://127.0.0.1:59285",
+        passthrough: "127.0.0.1, localhost, 127.0.0.1:59284"
+      };
+    } else {
+      const pacData = `function FindProxyForURL(url, host) {
+        if (
+          dnsDomainIs(host, ".googlevideo.com") || host === "googlevideo.com" ||
+          dnsDomainIs(host, ".youtube.com") || host === "youtube.com" ||
+          dnsDomainIs(host, ".ytimg.com") || host === "ytimg.com" ||
+          dnsDomainIs(host, ".ggpht.com") || host === "ggpht.com" ||
+          dnsDomainIs(host, ".twitch.tv") || host === "twitch.tv" ||
+          dnsDomainIs(host, ".ttvnw.net") || host === "ttvnw.net" ||
+          dnsDomainIs(host, ".netflix.com") || host === "netflix.com" ||
+          dnsDomainIs(host, ".nflxvideo.net") || host === "nflxvideo.net" ||
+          shExpMatch(url, "*videoplayback*") ||
+          shExpMatch(url, "*.m3u8*") ||
+          shExpMatch(url, "*.mpd*")
+        ) {
+          return "PROXY 127.0.0.1:59285; DIRECT";
+        }
+        return "DIRECT";
+      }`;
+      const pacDataUri = "data:application/x-ns-proxy-autoconfig;base64," + btoa(pacData);
+      ffValue = {
+        proxyType: "autoConfig",
+        autoConfigUrl: pacDataUri
+      };
+    }
+
+    proxyApi.settings.set({ value: ffValue }).then(() => {
+      console.log(`[BURST PROXY] Turbo Stream Proxy active (Firefox/Zen, ${mode}) on 127.0.0.1:59285`);
+      chrome.storage.local.remove(["proxyError"]);
+      if (actionApi && actionApi.setBadgeText) {
+        actionApi.setBadgeText({ text: mode === "all" ? "⚡ALL" : "⚡ON" });
+        actionApi.setBadgeBackgroundColor({ color: "#ff8800" });
+      }
+    }).catch((err) => {
+      console.error("[BURST PROXY] Error setting proxy in Firefox/Zen:", err);
+      chrome.storage.local.set({ proxyError: err.message || String(err) });
+    });
+    return;
+  }
+
+  // Chromium / Chrome
   let proxyConfig;
   if (mode === "all") {
     proxyConfig = {
@@ -383,19 +441,29 @@ function enableTurboStreamProxy(mode = "video") {
 }
 
 function disableTurboStreamProxy() {
-  if (!chrome.proxy || !chrome.proxy.settings) return;
-  chrome.proxy.settings.clear({ scope: "regular" }, () => {
-    console.log("[BURST PROXY] Turbo Stream Proxy cleared.");
-    if (actionApi && actionApi.setBadgeText) {
-      actionApi.setBadgeText({ text: "" });
-    }
-  });
+  const proxyApi = (typeof browser !== "undefined" && browser.proxy) ? browser.proxy : chrome.proxy;
+  if (!proxyApi || !proxyApi.settings) return;
+
+  const isFirefox = (typeof browser !== "undefined" && browser.proxy && browser.proxy.settings && (typeof window === "undefined" || !window.chrome)) ||
+                    (typeof navigator !== "undefined" && /firefox|zen/i.test(navigator.userAgent || ""));
+
+  if (isFirefox) {
+    proxyApi.settings.set({ value: { proxyType: "system" } }).catch(() => {});
+  } else {
+    chrome.proxy.settings.clear({ scope: "regular" }, () => {});
+  }
+
+  if (actionApi && actionApi.setBadgeText) {
+    actionApi.setBadgeText({ text: "" });
+  }
 
   if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
     chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: [59285]
     }).catch(() => {});
   }
+
+  chrome.storage.local.remove(["proxyError"]);
 
   fetch(`${API_BASE}/proxy/toggle`, {
     method: "POST",
