@@ -381,7 +381,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown: Clean up if needed
     try:
-        from proxy import turbo_proxy
+        from proxy import turbo_proxy, set_windows_system_proxy
+        set_windows_system_proxy(False)
         await turbo_proxy.stop()
     except Exception:
         pass
@@ -1002,13 +1003,19 @@ def get_proxy_status() -> Dict[str, Any]:
 
 @app.post("/proxy/toggle")
 async def toggle_proxy(req: ProxyToggleRequest) -> Dict[str, Any]:
-    from proxy import turbo_proxy
-    if req.enabled and not turbo_proxy.is_running:
-        turbo_proxy.set_interfaces_provider(_interfaces_by_ip)
-        await turbo_proxy.start()
-    elif not req.enabled and turbo_proxy.is_running:
-        await turbo_proxy.stop()
-    return turbo_proxy.get_status()
+    from proxy import turbo_proxy, set_windows_system_proxy
+    if req.enabled:
+        if not turbo_proxy.is_running:
+            turbo_proxy.set_interfaces_provider(_interfaces_by_ip)
+            await turbo_proxy.start()
+        set_windows_system_proxy(True, f"127.0.0.1:{turbo_proxy.port}")
+    else:
+        set_windows_system_proxy(False)
+        if turbo_proxy.is_running:
+            await turbo_proxy.stop()
+    status = turbo_proxy.get_status()
+    status["system_proxy_enabled"] = req.enabled
+    return status
 
 
 

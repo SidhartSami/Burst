@@ -746,7 +746,7 @@ export default function App() {
   const [activeJobs, setActiveJobs] = useState([]);
   const [expandedGraphs, setExpandedGraphs] = useState({});
   const hasShownGraphHintRef = useRef(false);
-
+  const [turboStreamActive, setTurboStreamActive] = useState(false);
 
   // Schedule state
   const [scheduleUrl, setScheduleUrl] = useState("");
@@ -879,6 +879,13 @@ export default function App() {
           }
         })
         .catch(() => null);
+
+      fetch(`${API_BASE}/proxy/status`)
+        .then(r => r.json())
+        .then(data => {
+          if (data) setTurboStreamActive(!!(data.running && data.system_proxy_enabled));
+        })
+        .catch(() => null);
     }
   }, [activeTab]);
 
@@ -897,8 +904,12 @@ export default function App() {
       fetch(`${API_BASE}/history`).then(r => r.json()).catch(() => null),
       fetch(`${API_BASE}/schedules`).then(r => r.json()).catch(() => null),
       fetch(`${API_BASE}/schedules/missed`).then(r => r.json()).catch(() => null),
+      fetch(`${API_BASE}/proxy/status`).then(r => r.json()).catch(() => null),
     ])
-      .then(([settingsData, activeJobsData, historyData, schedulesData, missedData]) => {
+      .then(([settingsData, activeJobsData, historyData, schedulesData, missedData, proxyData]) => {
+        if (proxyData) {
+          setTurboStreamActive(!!(proxyData.running && proxyData.system_proxy_enabled));
+        }
         // Handle settings
         if (settingsData && settingsData.settings) {
           setAppSettings(settingsData.settings);
@@ -2920,6 +2931,46 @@ export default function App() {
                   })}
 
                   <div className="settings-section-title">Network Adapters & Speed Limits</div>
+
+                  <label className="setting-row">
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      ⚡ Turbo Multi-Network Stream
+                      <InfoTooltip text="Bonds Wi-Fi, Ethernet & Mobile Tethering for all browser video streaming & downloads across the PC" />
+                    </span>
+                    <div className="setting-input-wrap">
+                      <div
+                        onClick={() => {
+                          const nextState = !turboStreamActive;
+                          setTurboStreamActive(nextState);
+                          fetch(`${API_BASE}/proxy/toggle`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ enabled: nextState })
+                          })
+                            .then(r => r.json())
+                            .then(() => {
+                              setToast(nextState ? "Turbo Stream Enabled: All browser traffic bonded across adapters!" : "Turbo Stream Disabled.");
+                            })
+                            .catch(() => setToast("Failed to toggle Turbo Stream"));
+                        }}
+                        style={{
+                          width: '40px', height: '22px', borderRadius: '11px', cursor: 'pointer',
+                          background: turboStreamActive ? 'var(--accent)' : 'var(--border)',
+                          position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: '16px', height: '16px', borderRadius: '50%', background: '#fff',
+                            position: 'absolute', top: '3px',
+                            left: turboStreamActive ? '21px' : '3px',
+                            transition: 'left 0.2s',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </label>
 
                   {renderedInterfaces.length === 0 ? (
                     <div className="setting-row" style={{ color: 'var(--text-muted)' }}>

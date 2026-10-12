@@ -329,3 +329,36 @@ class TurboStreamProxy:
 
 # Global singleton
 turbo_proxy = TurboStreamProxy()
+
+
+def set_windows_system_proxy(enable: bool, server: str = "127.0.0.1:59285"):
+    """Toggles Windows system proxy in HKCU so all browsers (Zen, Chrome, Edge, etc.) route through Burst."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        import ctypes
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            0,
+            winreg.KEY_SET_VALUE
+        )
+        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1 if enable else 0)
+        if enable:
+            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "<local>;127.0.0.1;localhost;127.0.0.1:59284;127.0.0.1:5173")
+        winreg.CloseKey(key)
+
+        INTERNET_OPTION_SETTINGS_CHANGED = 39
+        INTERNET_OPTION_REFRESH = 37
+        ctypes.windll.Wininet.InternetSetOptionW(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
+        ctypes.windll.Wininet.InternetSetOptionW(0, INTERNET_OPTION_REFRESH, 0, 0)
+        logger.info(f"[PROXY] Windows system proxy {'enabled' if enable else 'disabled'} ({server})")
+    except Exception as e:
+        logger.debug(f"[PROXY] Could not update Windows system proxy: {e}")
+
+
+import atexit
+atexit.register(set_windows_system_proxy, False)
