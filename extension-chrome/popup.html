@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Burst Download Manager</title>
+  <style>
+    :root {
+      --bg: #121214;
+      --surface: #1a1a1e;
+      --surface-2: #24242a;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --accent: #ff8800;
+      --accent-glow: rgba(255, 136, 0, 0.25);
+      --success: #10b981;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      user-select: none;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-bolt {
+      width: 24px;
+      height: 24px;
+      background: linear-gradient(135deg, #ff8800, #ff5500);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 14px;
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+
+    .brand-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--surface);
+      padding: 3px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #71717a;
+    }
+
+    .status-dot.online {
+      background: var(--success);
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+    }
+
+    /* Turbo Stream Card */
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+      transition: all 0.2s ease;
+    }
+
+    .feature-card.active {
+      border-color: rgba(255, 136, 0, 0.4);
+      background: linear-gradient(180deg, rgba(255, 136, 0, 0.08) 0%, var(--surface) 100%);
+      box-shadow: 0 0 14px rgba(255, 136, 0, 0.12);
+    }
+
+    .card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+
+    .card-title-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .card-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    /* Modern Toggle Switch */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: var(--surface-2);
+      border: 1px solid var(--border);
+      transition: 0.2s;
+      border-radius: 22px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 2px;
+      bottom: 2px;
+      background-color: #fff;
+      transition: 0.2s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(18px);
+    }
+
+    /* Live Networks */
+    .networks-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+
+    .networks-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .network-pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .net-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: var(--surface-2);
+      font-size: 10px;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .net-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    /* Action Buttons */
+    .btn-open {
+      display: block;
+      width: 100%;
+      text-align: center;
+      padding: 8px 12px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .btn-open:hover {
+      background: var(--surface);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <div class="logo-bolt">⚡</div>
+      <div class="brand-title">Burst</div>
+    </div>
+    <div class="status-badge">
+      <div id="statusDot" class="status-dot"></div>
+      <span id="statusText">Connecting...</span>
+    </div>
+  </div>
+
+  <div id="turboCard" class="feature-card">
+    <div class="card-top">
+      <div class="card-title-group">
+        <span style="color: var(--accent); font-size: 13px;">⚡</span>
+        <span class="card-title">Turbo Video Stream</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="turboToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="card-subtitle">
+      Bonds Wi-Fi & 5G Hotspot for lag-free 4K/8K YouTube, Twitch & streaming video.
+    </div>
+  </div>
+
+  <div class="networks-box">
+    <div class="networks-label">
+      <span>Bonded Connections</span>
+      <span id="netCount" style="color: var(--accent); font-weight: 600;">0 active</span>
+    </div>
+    <div id="networkList" class="network-pill-list">
+      <span style="font-size: 10px; color: var(--text-muted);">Detecting network interfaces...</span>
+    </div>
+  </div>
+
+  <button id="btnOpenApp" class="btn-open">
+    Open Burst Download Manager
+  </button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

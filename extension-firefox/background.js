@@ -267,4 +267,66 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     checkBurstStatus().then((alive) => sendResponse({ alive }));
     return true;
   }
+
+  if (msg.type === "SET_TURBO_STREAM") {
+    if (msg.enabled) {
+      enableTurboStreamProxy();
+    } else {
+      disableTurboStreamProxy();
+    }
+    sendResponse({ success: true, enabled: msg.enabled });
+    return true;
+  }
+
+  if (msg.type === "OPEN_BURST_APP") {
+    chrome.tabs.create({ url: API_BASE });
+    return true;
+  }
 });
+
+// ── Turbo Stream Proxy Controller ─────────────────────────────────────────────
+
+function enableTurboStreamProxy() {
+  const proxyApi = chrome.proxy || (typeof browser !== "undefined" && browser.proxy);
+  if (!proxyApi || !proxyApi.settings) return;
+  const pacData = `
+    function FindProxyForURL(url, host) {
+      if (shExpMatch(host, "*.googlevideo.com") || host === "googlevideo.com" ||
+          shExpMatch(host, "*.ttvnw.net") || shExpMatch(host, "*.twitch.tv") ||
+          shExpMatch(host, "*.nflxvideo.net")) {
+        return "PROXY 127.0.0.1:59285; DIRECT";
+      }
+      return "DIRECT";
+    }
+  `;
+  proxyApi.settings.set(
+    { value: { mode: "pac_script", pacScript: { data: pacData } }, scope: "regular" },
+    () => {
+      console.log("[BURST PROXY] Turbo Stream Proxy active on 127.0.0.1:59285");
+      if (actionApi && actionApi.setBadgeText) {
+        actionApi.setBadgeText({ text: "⚡ON" });
+        actionApi.setBadgeBackgroundColor({ color: "#ff8800" });
+      }
+    }
+  );
+}
+
+function disableTurboStreamProxy() {
+  const proxyApi = chrome.proxy || (typeof browser !== "undefined" && browser.proxy);
+  if (!proxyApi || !proxyApi.settings) return;
+  proxyApi.settings.clear({ scope: "regular" }, () => {
+    console.log("[BURST PROXY] Turbo Stream Proxy cleared.");
+    if (actionApi && actionApi.setBadgeText) {
+      actionApi.setBadgeText({ text: "" });
+    }
+  });
+}
+
+// Restore proxy status on browser startup if user had enabled it
+if (chrome.storage && chrome.storage.local) {
+  chrome.storage.local.get(["turboStreamEnabled"], (res) => {
+    if (res && res.turboStreamEnabled) {
+      enableTurboStreamProxy();
+    }
+  });
+}

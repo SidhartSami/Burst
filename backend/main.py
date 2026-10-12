@@ -370,6 +370,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SCHEDULER] Failed to start scheduler: {e}")
 
+    # Start Turbo Stream Dispatcher Proxy
+    try:
+        from proxy import turbo_proxy
+        turbo_proxy.set_interfaces_provider(_interfaces_by_ip)
+        await turbo_proxy.start()
+    except Exception as e:
+        print(f"[PROXY] Failed to start Turbo Stream Proxy: {e}")
+
     # Start polling loops
     task = asyncio.create_task(interface_polling_loop())
     state_task = asyncio.create_task(save_state_loop())
@@ -377,6 +385,11 @@ async def lifespan(app: FastAPI):
     taskbar_task = asyncio.create_task(taskbar_update_loop())
     yield
     # Shutdown: Clean up if needed
+    try:
+        from proxy import turbo_proxy
+        await turbo_proxy.stop()
+    except Exception:
+        pass
     if not clipboard_stop.is_set():
         clipboard_stop.set()
     try:
@@ -979,6 +992,29 @@ async def set_clipboard_monitor(enabled: bool) -> Dict[str, Any]:
         updated["CLIPBOARD_MONITOR_REASON"] = reason
 
     return {"supported": supported, "enabled": enabled, "settings": updated, "reason": reason}
+
+
+# ---------------------------------------------------------------------------
+# Turbo Stream Proxy endpoints
+# ---------------------------------------------------------------------------
+class ProxyToggleRequest(BaseModel):
+    enabled: bool
+
+@app.get("/proxy/status")
+def get_proxy_status() -> Dict[str, Any]:
+    from proxy import turbo_proxy
+    return turbo_proxy.get_status()
+
+@app.post("/proxy/toggle")
+async def toggle_proxy(req: ProxyToggleRequest) -> Dict[str, Any]:
+    from proxy import turbo_proxy
+    if req.enabled and not turbo_proxy.is_running:
+        turbo_proxy.set_interfaces_provider(_interfaces_by_ip)
+        await turbo_proxy.start()
+    elif not req.enabled and turbo_proxy.is_running:
+        await turbo_proxy.stop()
+    return turbo_proxy.get_status()
+
 
 
 def _calculate_hash(file_path: str, expected: str, algorithm: Optional[str] = None) -> dict:
