@@ -90,22 +90,51 @@ if (actionApi && actionApi.onClicked) {
   });
 }
 
-// ── Native Messaging ──────────────────────────────────────────────────────────
+// ── Native Messaging & HTTP Fallback ──────────────────────────────────────────
 
-function sendToBurst(url) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendNativeMessage(
-      NATIVE_HOST,
-      { url },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          reject(chrome.runtime.lastError.message);
-        } else {
-          resolve(response);
+async function sendToBurst(url) {
+  // 1. Try Native Messaging host
+  try {
+    const nativeRes = await new Promise((resolve, reject) => {
+      chrome.runtime.sendNativeMessage(
+        NATIVE_HOST,
+        { url },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError.message);
+          } else {
+            resolve(response);
+          }
         }
-      }
-    );
+      );
+    });
+    if (nativeRes && nativeRes.success) {
+      return nativeRes;
+    }
+  } catch (err) {
+    // Native messaging host not found or not registered — fallback to HTTP API
+  }
+
+  // 2. Direct HTTP API Fallback (Port 59284)
+  const isTorrent = url.startsWith("magnet:") || url.includes(".torrent");
+  const endpoint = isTorrent ? `${API_BASE}/torrent/add` : `${API_BASE}/download`;
+  const body = isTorrent
+    ? { source: url, output_path: "C:/Burst-Downloads/" }
+    : { url, output_path: "C:/Burst-Downloads/", interface_ips: [] };
+
+  const resp = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+
+  if (resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    return { success: true, ...data };
+  } else {
+    const errText = await resp.text().catch(() => "Server error");
+    throw new Error(`Burst API responded ${resp.status}: ${errText}`);
+  }
 }
 
 // ── Download Interception (Torrent & Magnet ONLY) ─────────────────────────────
