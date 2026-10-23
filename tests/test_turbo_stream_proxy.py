@@ -82,6 +82,24 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(status["recent_targets"]), 1)
         self.assertEqual(status["recent_targets"][0]["port"], self.target_port)
 
+    async def test_https_connect_host_classification(self):
+        """Test host-based classification for encrypted HTTPS CONNECT tunnels."""
+        # YouTube CDN chunk domain -> bulk
+        self.assertEqual(
+            self.proxy.classify_request("rr1---sn-4g5ednkk.googlevideo.com:443", "rr1---sn-4g5ednkk.googlevideo.com:443", is_connect=True),
+            "bulk"
+        )
+        # Twitch video chunk CDN -> bulk
+        self.assertEqual(
+            self.proxy.classify_request("video-edge-123.ttvnw.net:443", "video-edge-123.ttvnw.net:443", is_connect=True),
+            "bulk"
+        )
+        # YouTube API / navigation -> latency
+        self.assertEqual(
+            self.proxy.classify_request("www.youtube.com:443", "www.youtube.com:443", is_connect=True),
+            "latency"
+        )
+
     async def test_weighted_assignment_best_finish_time(self):
         """Test weighted assignment prefers high throughput link (Wi-Fi 100Mbps vs 4G 10Mbps)."""
         wifi_ip = "192.168.1.100"
@@ -91,10 +109,12 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         m_wifi = self.proxy._get_metric(wifi_ip)
         m_wifi.ewma_throughput_mbps = 100.0
         m_wifi.ewma_rtt_ms = 15.0
+        m_wifi.has_real_samples = True
 
         m_lte = self.proxy._get_metric(lte_ip)
         m_lte.ewma_throughput_mbps = 10.0
         m_lte.ewma_rtt_ms = 65.0
+        m_lte.has_real_samples = True
 
         # For a bulk segment (e.g. 2MB), Wi-Fi must be chosen
         selected = await self.proxy.select_interface_for_request(
@@ -111,32 +131,49 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         m_low = self.proxy._get_metric(link_low_rtt)
         m_low.ewma_rtt_ms = 12.0
         m_low.ewma_throughput_mbps = 30.0
+        m_low.has_real_samples = True
 
         m_high = self.proxy._get_metric(link_high_rtt)
         m_high.ewma_rtt_ms = 95.0
         m_high.ewma_throughput_mbps = 90.0  # Even if faster, higher latency
+        m_high.has_real_samples = True
 
         # Manifest / API route
         selected = await self.proxy.select_interface_for_request(request_type="latency")
         self.assertEqual(selected, link_low_rtt)
 
-    async def test_fast_failover_and_quarantine(self):
-        """Test that failing links are quarantined and bypassed."""
-        link_a = "192.168.1.100"
-        link_b = "192.168.43.50"
-        self.proxy.set_interfaces_provider(lambda: [link_a, link_b])
+    async def test_exponential_backoff_quarantine(self):
+        """Test exponential quarantine backoff (15s -> 30s -> 60s) on consecutive failures."""
+        link = "192.168.1.100"
+        m = self.proxy._get_metric(link)
 
-        m_a = self.proxy._get_metric(link_a)
-        m_b = self.proxy._get_metric(link_b)
+        # 1st failure - still healthy
+        m.record_failure()
+        self.assertTrue(m.is_healthy)
+        self.assertEqual(m.consecutive_failures, 1)
 
-        # Mark Link A with 2 consecutive failures
-        m_a.record_failure()
-        m_a.record_failure()
-        self.assertFalse(m_a.is_healthy)
+        # 2nd failure - 1st quarantine (~15s)
+        now = time.time()
+        m.record_failure()
+        self.assertFalse(m.is_healthy)
+        self.assertGreater(m.quarantined_until, now + 14.0)
+        self.assertLessEqual(m.quarantined_until, now + 16.0)
 
-        # Link B should now be selected even if A was faster
-        selected = await self.proxy.select_interface_for_request(request_type="bulk")
-        self.assertEqual(selected, link_b)
+        # Reset quarantine timestamp to simulate timer expiration
+        m.quarantined_until = now - 1.0
+        self.assertTrue(m.is_healthy)
+
+        # 3rd failure - 2nd quarantine backoff (~30s)
+        m.record_failure()
+        self.assertFalse(m.is_healthy)
+        self.assertGreater(m.quarantined_until, now + 28.0)
+        self.assertLessEqual(m.quarantined_until, now + 32.0)
+
+        # Success clears failures and quarantine state
+        m.record_success(bytes_transferred=50000)
+        self.assertTrue(m.is_healthy)
+        self.assertEqual(m.consecutive_failures, 0)
+        self.assertEqual(m.quarantine_count, 0)
 
     async def test_plain_http_forwarding(self):
         """Test plain HTTP GET request forwarding through the proxy."""

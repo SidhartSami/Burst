@@ -6,10 +6,11 @@ through this proxy, each streaming connection is intelligently scheduled across 
 network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
 
 Key Scheduling Capabilities:
-1. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
-2. Fast failover with in-flight retry (<1.5s circuit breaker, retry on healthy link).
-3. Latency-aware routing (manifests/APIs -> lowest RTT link; bulk media -> max throughput link).
-4. Segment-aware scheduling (pipelined chunk tracking and connection pooling/warming).
+1. Host- & Path-aware request classification (works inside HTTPS CONNECT tunnels).
+2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
+3. Fast failover (<1.8s setup retry) and mid-stream quarantine to direct player retries to healthy links.
+4. Exponential backoff quarantine (15s -> 30s -> 60s) for flaky mobile hotspots.
+5. Conservative cold-start seeding & fixed chunk estimates (1 MB default for video tunnels).
 """
 
 from __future__ import annotations
@@ -28,14 +29,26 @@ logger = logging.getLogger("burst.proxy")
 DEFAULT_PROXY_PORT = 59285
 BUFFER_SIZE = 65536
 CONNECT_TIMEOUT = 1.8  # Fast failover connection deadline (<2s)
-QUARANTINE_DURATION = 15.0  # Seconds to quarantine a link after consecutive failures
 
-# Regular expressions for request classification
-RE_LOW_LATENCY = re.compile(
+# Fixed chunk size estimate for HTTPS video tunnels (where content-length is encrypted)
+DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES = 1_200_000  # ~1.2 MB per media segment
+
+# Regex patterns for host-based classification (CRUCIAL for HTTPS CONNECT tunnels)
+RE_BULK_HOST = re.compile(
+    r"(googlevideo\.com|ttvnw\.net|nflxvideo\.net|vimeocdn\.com|dailymotion\.com|video\.|cdn\.)",
+    re.IGNORECASE,
+)
+RE_LATENCY_HOST = re.compile(
+    r"(youtube\.com|ytimg\.com|ggpht\.com|twitch\.tv|jtvnw\.net|netflix\.com)",
+    re.IGNORECASE,
+)
+
+# Regex patterns for plain HTTP path-based classification
+RE_LOW_LATENCY_PATH = re.compile(
     r"(\.m3u8|\.mpd|\.json|/api/|/youtubei/|/init\.mp4|\.xml|videoplayback.*&(?:itag=140|live=1)|\.key)",
     re.IGNORECASE,
 )
-RE_BULK_SEGMENT = re.compile(
+RE_BULK_SEGMENT_PATH = re.compile(
     r"(\.ts|\.m4s|\.m4v|\.mp4|\.webm|videoplayback|\.dash|range=|\.fmp4)",
     re.IGNORECASE,
 )
@@ -46,9 +59,12 @@ class InterfaceMetrics:
     """Rolling performance and health metrics for a specific network interface."""
 
     ip: str
-    ewma_throughput_mbps: float = 25.0  # Sensible optimistic default
-    ewma_rtt_ms: float = 40.0  # Default latency in milliseconds
+    # Cold-start defaults: conservative 15 Mbps throughput, 45 ms RTT
+    ewma_throughput_mbps: float = 15.0
+    ewma_rtt_ms: float = 45.0
+    has_real_samples: bool = False
     consecutive_failures: int = 0
+    quarantine_count: int = 0
     quarantined_until: float = 0.0
     active_requests: int = 0
     total_bytes: int = 0
@@ -64,7 +80,10 @@ class InterfaceMetrics:
     def record_rtt(self, rtt_ms: float) -> None:
         """Update RTT using Exponential Weighted Moving Average (alpha = 0.25)."""
         rtt_ms = max(1.0, min(rtt_ms, 3000.0))
-        self.ewma_rtt_ms = (0.75 * self.ewma_rtt_ms) + (0.25 * rtt_ms)
+        if not self.has_real_samples:
+            self.ewma_rtt_ms = rtt_ms
+        else:
+            self.ewma_rtt_ms = (0.75 * self.ewma_rtt_ms) + (0.25 * rtt_ms)
 
     def record_throughput(self, bytes_transferred: int, duration_sec: float) -> None:
         """Update throughput using EWMA (alpha = 0.20) for non-trivial transfers."""
@@ -72,31 +91,45 @@ class InterfaceMetrics:
             return
         mbps = (bytes_transferred * 8.0) / (duration_sec * 1_000_000.0)
         mbps = max(0.5, min(mbps, 5000.0))
-        self.ewma_throughput_mbps = (0.80 * self.ewma_throughput_mbps) + (0.20 * mbps)
+        if not self.has_real_samples:
+            self.ewma_throughput_mbps = mbps
+            self.has_real_samples = True
+        else:
+            self.ewma_throughput_mbps = (0.80 * self.ewma_throughput_mbps) + (0.20 * mbps)
 
     def record_success(self, bytes_transferred: int = 0) -> None:
         self.consecutive_failures = 0
+        self.quarantine_count = 0
         self.quarantined_until = 0.0
         self.total_bytes += bytes_transferred
+        self.total_requests += 1
         self.last_success_ts = time.time()
 
     def record_failure(self) -> None:
+        """Records a link failure with exponential quarantine backoff (15s -> 30s -> 60s)."""
         self.consecutive_failures += 1
         if self.consecutive_failures >= 2:
-            self.quarantined_until = time.time() + QUARANTINE_DURATION
+            self.quarantine_count += 1
+            # Exponential backoff: 15s * (2 ^ (count - 1)), max 120s
+            backoff_sec = min(120.0, 15.0 * (2 ** max(0, self.quarantine_count - 1)))
+            self.quarantined_until = time.time() + backoff_sec
             logger.warning(
-                f"[PROXY] Interface {self.ip} marked DOWN (quarantined for {QUARANTINE_DURATION}s after {self.consecutive_failures} failures)"
+                f"[PROXY] Interface {self.ip} marked DOWN (quarantined for {backoff_sec:.0f}s, consecutive failures={self.consecutive_failures})"
             )
 
     def expected_finish_time(self, estimated_bytes: int) -> float:
         """Calculates expected completion time in seconds:
         T = (RTT / 1000) + (Bytes / Bandwidth) * (1 + 0.35 * active_requests)
+        Cold-start penalty applied slightly if interface has never completed a real transfer.
         """
         rtt_sec = self.ewma_rtt_ms / 1000.0
         bw_bytes_sec = (self.ewma_throughput_mbps * 1_000_000.0) / 8.0
         transfer_sec = estimated_bytes / max(bw_bytes_sec, 10000.0)
         concurrency_penalty = 1.0 + (0.35 * self.active_requests)
-        return rtt_sec + (transfer_sec * concurrency_penalty)
+
+        # Mild cold-start dampener to avoid dumping all initial bursts into an unmeasured link
+        cold_penalty = 1.2 if not self.has_real_samples else 1.0
+        return (rtt_sec + (transfer_sec * concurrency_penalty)) * cold_penalty
 
 
 class TurboStreamProxy:
@@ -107,7 +140,6 @@ class TurboStreamProxy:
         self.port = port
         self.server: Optional[asyncio.Server] = None
         self._is_running = False
-        self._round_robin_idx = 0
         self._lock = asyncio.Lock()
 
         # Telemetry & stats
@@ -150,31 +182,52 @@ class TurboStreamProxy:
             logger.debug(f"[PROXY] Error getting interface IPs: {e}")
             return []
 
-    def classify_request(self, host: str, target: str) -> str:
-        """Classifies incoming request into 'latency', 'bulk', or 'standard'."""
-        path_host = f"{host}{target}"
-        if RE_LOW_LATENCY.search(path_host):
+    def classify_request(self, host: str, target: str, is_connect: bool = False) -> str:
+        """Classifies incoming request into 'latency', 'bulk', or 'standard'.
+        For HTTPS CONNECT tunnels (where path is encrypted), host regex is used.
+        """
+        host_clean = host.split(":")[0].lower()
+
+        if is_connect:
+            # HTTPS tunnel: examine host domain
+            if RE_BULK_HOST.search(host_clean):
+                return "bulk"
+            if RE_LATENCY_HOST.search(host_clean):
+                return "latency"
+            return "standard"
+
+        # Plain HTTP: examine both host and path
+        path_host = f"{host_clean}{target}"
+        if RE_LOW_LATENCY_PATH.search(path_host):
             return "latency"
-        if RE_BULK_SEGMENT.search(path_host):
+        if RE_BULK_SEGMENT_PATH.search(path_host):
             return "bulk"
+        if RE_BULK_HOST.search(host_clean):
+            return "bulk"
+        if RE_LATENCY_HOST.search(host_clean):
+            return "latency"
         return "standard"
 
     async def select_interface_for_request(
         self,
         request_type: str = "standard",
-        estimated_bytes: int = 1_500_000,
+        estimated_bytes: Optional[int] = None,
         exclude_ips: Optional[Set[str]] = None,
     ) -> Optional[str]:
         """Selects the best interface using weighted scoring based on request type and link health."""
+        if estimated_bytes is None:
+            estimated_bytes = (
+                DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES if request_type == "bulk" else 64_000
+            )
+
         available = self._get_available_ips()
         if not available:
             return None
 
         if exclude_ips:
-            available = [ip for ip in available if ip not in exclude_ips]
-            if not available:
-                # If all were excluded, fall back to any available
-                available = self._get_available_ips()
+            filtered = [ip for ip in available if ip not in exclude_ips]
+            if filtered:
+                available = filtered
 
         async with self._lock:
             # Filter healthy candidates first
@@ -202,10 +255,10 @@ class TurboStreamProxy:
                 return best_ip
 
             else:
-                # Balanced finish time with default chunk estimate (1MB)
+                # Balanced finish time
                 best_ip = min(
                     candidates,
-                    key=lambda ip: self._get_metric(ip).expected_finish_time(1_000_000),
+                    key=lambda ip: self._get_metric(ip).expected_finish_time(estimated_bytes),
                 )
                 return best_ip
 
@@ -257,7 +310,9 @@ class TurboStreamProxy:
                 "ewma_throughput_mbps": round(m.ewma_throughput_mbps, 2),
                 "ewma_rtt_ms": round(m.ewma_rtt_ms, 1),
                 "healthy": m.is_healthy,
+                "has_real_samples": m.has_real_samples,
                 "consecutive_failures": m.consecutive_failures,
+                "quarantine_count": m.quarantine_count,
                 "active_requests": m.active_requests,
                 "total_bytes": m.total_bytes,
             }
@@ -320,7 +375,8 @@ class TurboStreamProxy:
                 else:
                     host, port = target, 443
 
-                req_type = self.classify_request(host, target)
+                # HOST-BASED CLASSIFICATION for HTTPS tunnels
+                req_type = self.classify_request(host, target, is_connect=True)
                 remote_reader, remote_writer, bound_ip = await self._connect_with_retry(
                     host=host,
                     port=port,
@@ -366,7 +422,7 @@ class TurboStreamProxy:
                     client_writer.close()
                     return
 
-                req_type = self.classify_request(target_host, path)
+                req_type = self.classify_request(target_host, path, is_connect=False)
                 remote_reader, remote_writer, bound_ip = await self._connect_with_retry(
                     host=target_host,
                     port=port,
@@ -455,7 +511,7 @@ class TurboStreamProxy:
                     metric.record_failure()
                     excluded.add(selected_ip)
                     logger.debug(
-                        f"[PROXY] Failover triggered: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative..."
+                        f"[PROXY] Setup failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
                     )
                 else:
                     break
@@ -491,35 +547,54 @@ class TurboStreamProxy:
         remote_writer: asyncio.StreamWriter,
         interface_ip: Optional[str],
     ) -> None:
-        """Pipes data bi-directionally between browser client and remote server,
-        recording bytes and updating rolling EWMA throughput.
+        """Pipes data bi-directionally between browser client and remote server.
+        Handles mid-stream drops: marks interface with failure and quarantine backoff
+        so player retry is routed to a healthy link.
         """
         metric = self._get_metric(interface_ip) if interface_ip else None
         transferred_bytes = 0
         tunnel_start = time.perf_counter()
+        encountered_remote_error = False
 
-        async def forward(src: asyncio.StreamReader, dst: asyncio.StreamWriter, is_download: bool):
-            nonlocal transferred_bytes
+        async def client_to_remote():
             try:
                 while self._is_running:
-                    data = await src.read(BUFFER_SIZE)
+                    data = await client_reader.read(BUFFER_SIZE)
                     if not data:
                         break
-                    dst.write(data)
-                    await dst.drain()
-
-                    if is_download:
-                        transferred_bytes += len(data)
-            except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+                    remote_writer.write(data)
+                    await remote_writer.drain()
+            except Exception:
                 pass
             finally:
                 try:
-                    dst.close()
+                    remote_writer.close()
                 except Exception:
                     pass
 
-        t1 = asyncio.create_task(forward(client_reader, remote_writer, is_download=False))
-        t2 = asyncio.create_task(forward(remote_reader, client_writer, is_download=True))
+        async def remote_to_client():
+            nonlocal transferred_bytes, encountered_remote_error
+            try:
+                while self._is_running:
+                    data = await remote_reader.read(BUFFER_SIZE)
+                    if not data:
+                        break
+                    client_writer.write(data)
+                    await client_writer.drain()
+                    transferred_bytes += len(data)
+            except (ConnectionResetError, BrokenPipeError, asyncio.TimeoutError) as e:
+                encountered_remote_error = True
+                logger.debug(f"[PROXY] Mid-stream socket drop on link {interface_ip}: {e}")
+            except Exception:
+                pass
+            finally:
+                try:
+                    client_writer.close()
+                except Exception:
+                    pass
+
+        t1 = asyncio.create_task(client_to_remote())
+        t2 = asyncio.create_task(remote_to_client())
 
         done, pending = await asyncio.wait(
             [t1, t2],
@@ -537,8 +612,12 @@ class TurboStreamProxy:
 
         duration = time.perf_counter() - tunnel_start
         if metric:
-            metric.record_success(transferred_bytes)
-            metric.record_throughput(transferred_bytes, duration)
+            if encountered_remote_error:
+                # Mid-stream drop: quarantine backoff so the player's immediate segment retry lands on a healthy link
+                metric.record_failure()
+            else:
+                metric.record_success(transferred_bytes)
+                metric.record_throughput(transferred_bytes, duration)
 
 
 # Global singleton
