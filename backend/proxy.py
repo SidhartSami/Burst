@@ -8,15 +8,17 @@ network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
 Key Scheduling Capabilities:
 1. Host- & Path-aware request classification (works inside HTTPS CONNECT tunnels).
 2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
-3. Fast failover (<1.8s setup retry) and two-strike mid-stream drop protection.
-4. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
-5. Idle tunnel harvesting (12s idle timeout) to break sticky HTTP/2 keepalive tunnels and allow dynamic rebalancing.
-6. Conservative cold-start seeding & declared 1.2 MB chunk estimate for video tunnels.
+3. Fast failover (<1.8s setup retry) with strict local vs. remote error differentiation.
+4. Two-strike mid-stream drop protection (local errors only; remote resets / throttles excluded).
+5. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
+6. Idle tunnel harvesting (15s bidirectional quiescence only, safe for H2 multiplexing).
+7. Conservative cold-start seeding & declared 1.2 MB chunk estimate for video tunnels.
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import re
 import socket
@@ -30,11 +32,21 @@ logger = logging.getLogger("burst.proxy")
 DEFAULT_PROXY_PORT = 59285
 BUFFER_SIZE = 65536
 CONNECT_TIMEOUT = 1.8  # Fast failover connection deadline (<2s)
-IDLE_TUNNEL_TIMEOUT = 12.0  # Max idle seconds before closing tunnel to force rebalance
+IDLE_TUNNEL_TIMEOUT = 15.0  # Max seconds of zero bidirectional traffic before harvesting keepalive tunnel
 SUSTAINED_RESET_BYTES = 1_000_000  # 1 MB clean transfer required to fully reset backoff
 
 # Fixed chunk size estimate for HTTPS video tunnels (where content-length is encrypted)
 DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES = 1_200_000  # ~1.2 MB per media segment
+
+# Local interface / routing errno codes that point at the local interface hardware/stack
+LOCAL_INTERFACE_ERRNOS = {
+    getattr(errno, "ENETUNREACH", 10051),
+    getattr(errno, "EHOSTUNREACH", 10065),
+    getattr(errno, "EADDRNOTAVAIL", 10049),
+    getattr(errno, "ENETDOWN", 10050),
+    getattr(errno, "ENETRESET", 10052),
+    getattr(errno, "EHOSTDOWN", 10064),
+}
 
 # Regex patterns for host-based classification (CRUCIAL for HTTPS CONNECT tunnels)
 RE_BULK_HOST = re.compile(
@@ -55,6 +67,34 @@ RE_BULK_SEGMENT_PATH = re.compile(
     r"(\.ts|\.m4s|\.m4v|\.mp4|\.webm|videoplayback|\.dash|range=|\.fmp4)",
     re.IGNORECASE,
 )
+
+
+def is_local_interface_error(exc: BaseException) -> bool:
+    """Returns True if the error originates from the local network interface or binding,
+    and False if it is a remote server error (connection refused, remote reset, DNS, HTTP throttle).
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        # Bound socket connect timeout indicates local link stalled / dropped packets
+        return True
+
+    # Check for gaierror (DNS resolution failure is a remote/target issue, not adapter-specific)
+    if isinstance(exc, socket.gaierror):
+        return False
+
+    # ConnectionRefusedError is sent by remote target rejecting the port
+    if isinstance(exc, ConnectionRefusedError):
+        return False
+
+    if isinstance(exc, OSError):
+        err_num = getattr(exc, "errno", None)
+        if err_num in LOCAL_INTERFACE_ERRNOS:
+            return True
+        # Check error message strings for interface / binding problems
+        msg = str(exc).lower()
+        if "bind" in msg or "network is unreachable" in msg or "host is unreachable" in msg:
+            return True
+
+    return False
 
 
 @dataclass
@@ -114,7 +154,7 @@ class InterfaceMetrics:
             self.quarantine_count = 0
 
     def record_failure(self) -> None:
-        """Records a local/interface link failure with two-strike exponential backoff."""
+        """Records a verified local link failure with two-strike exponential backoff."""
         self.consecutive_failures += 1
         self.bytes_since_last_failure = 0
         if self.consecutive_failures >= 2:
@@ -477,8 +517,10 @@ class TurboStreamProxy:
         port: int,
         req_type: str = "standard",
     ) -> Tuple[Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter], Optional[str]]:
-        """Fast failover connect: attempts preferred link; on local/setup failure (<1.8s),
-        records a strike on the interface and immediately retries on alternative interface.
+        """Fast failover connect: attempts preferred link.
+        Differentiates strictly between local interface errors (timeouts, bind failures, unreachables)
+        and remote errors (refused connections, DNS errors, server resets).
+        Only local interface faults penalize the link strike count.
         """
         excluded: Set[str] = set()
         max_attempts = 3
@@ -519,12 +561,16 @@ class TurboStreamProxy:
                     metric = self._get_metric(selected_ip)
                     metric.active_requests = max(0, metric.active_requests - 1)
 
-                    # Only count true local/link errors (e.g. timeout, refused, unreachable, invalid local_addr)
-                    if isinstance(e, (asyncio.TimeoutError, OSError, ConnectionRefusedError)):
+                    # Only penalize interface if the failure is verified local to the adapter
+                    if is_local_interface_error(e):
                         metric.record_failure()
                         excluded.add(selected_ip)
                         logger.debug(
-                            f"[PROXY] Setup failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
+                            f"[PROXY] Local interface failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
+                        )
+                    else:
+                        logger.debug(
+                            f"[PROXY] Remote server error for {host}:{port} ({e}). Interface {selected_ip} not penalized."
                         )
                 else:
                     break
@@ -561,66 +607,89 @@ class TurboStreamProxy:
         interface_ip: Optional[str],
     ) -> None:
         """Pipes data bi-directionally between browser client and remote server.
-        - Enforces idle timeout (12s) to harvest sticky keepalive tunnels and allow dynamic rebalancing.
-        - Applies the two-strike rule on mid-stream drops without penalizing links for server-side rate-limits.
+        - True idle harvesting: Only harvests when NEITHER direction has seen bytes for IDLE_TUNNEL_TIMEOUT (15s).
+          Remote timeouts during slow server responses never trigger idle close.
+        - Two-strike mid-stream rule: Only local socket unreachables/drops count as interface strikes.
+          Remote resets, throttles, and client tab closes are strictly ignored.
         """
         metric = self._get_metric(interface_ip) if interface_ip else None
         transferred_bytes = 0
         tunnel_start = time.perf_counter()
         encountered_local_drop = False
+        last_activity_ts = time.time()
+        transfer_done = asyncio.Event()
 
         async def client_to_remote():
+            nonlocal last_activity_ts
             try:
-                while self._is_running:
-                    # If browser is idle for >12s, close tunnel so next segment gets scheduled anew
-                    data = await asyncio.wait_for(client_reader.read(BUFFER_SIZE), timeout=IDLE_TUNNEL_TIMEOUT)
+                while self._is_running and not transfer_done.is_set():
+                    data = await client_reader.read(BUFFER_SIZE)
                     if not data:
                         break
+                    last_activity_ts = time.time()
                     remote_writer.write(data)
                     await remote_writer.drain()
-            except asyncio.TimeoutError:
-                logger.debug(f"[PROXY] Idle tunnel harvested on {interface_ip} to allow rebalancing")
             except Exception:
                 pass
             finally:
+                transfer_done.set()
                 try:
                     remote_writer.close()
                 except Exception:
                     pass
 
         async def remote_to_client():
-            nonlocal transferred_bytes, encountered_local_drop
+            nonlocal transferred_bytes, encountered_local_drop, last_activity_ts
             try:
-                while self._is_running:
-                    data = await asyncio.wait_for(remote_reader.read(BUFFER_SIZE), timeout=IDLE_TUNNEL_TIMEOUT)
+                while self._is_running and not transfer_done.is_set():
+                    data = await remote_reader.read(BUFFER_SIZE)
                     if not data:
                         break
+                    last_activity_ts = time.time()
                     client_writer.write(data)
                     await client_writer.drain()
                     transferred_bytes += len(data)
-            except asyncio.TimeoutError:
-                pass
-            except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                encountered_local_drop = True
-                logger.debug(f"[PROXY] Mid-stream socket drop on link {interface_ip}: {e}")
+            except OSError as e:
+                # Distinguish local hardware/adapter faults from remote resets
+                if is_local_interface_error(e):
+                    encountered_local_drop = True
+                    logger.debug(f"[PROXY] Local interface drop on {interface_ip}: {e}")
+                else:
+                    logger.debug(f"[PROXY] Remote server disconnect/reset on {interface_ip}: {e} (not penalized)")
             except Exception:
                 pass
             finally:
+                transfer_done.set()
                 try:
                     client_writer.close()
                 except Exception:
                     pass
 
+        async def idle_watcher():
+            """Closes tunnel ONLY when bidirectional traffic has ceased entirely for IDLE_TUNNEL_TIMEOUT seconds."""
+            try:
+                while self._is_running and not transfer_done.is_set():
+                    await asyncio.sleep(2.0)
+                    idle_sec = time.time() - last_activity_ts
+                    if idle_sec >= IDLE_TUNNEL_TIMEOUT:
+                        logger.debug(
+                            f"[PROXY] Idle tunnel harvested on {interface_ip} after {idle_sec:.1f}s quiescence to allow rebalancing"
+                        )
+                        break
+            except asyncio.CancelledError:
+                pass
+            finally:
+                transfer_done.set()
+
         t1 = asyncio.create_task(client_to_remote())
         t2 = asyncio.create_task(remote_to_client())
+        t3 = asyncio.create_task(idle_watcher())
 
-        done, pending = await asyncio.wait(
-            [t1, t2],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        # Wait until transfer finishes or idle watcher triggers quiescence close
+        await transfer_done.wait()
 
-        for task in pending:
-            task.cancel()
+        for t in [t1, t2, t3]:
+            t.cancel()
 
         try:
             remote_writer.close()
@@ -628,10 +697,16 @@ class TurboStreamProxy:
         except Exception:
             pass
 
+        try:
+            client_writer.close()
+            await client_writer.wait_closed()
+        except Exception:
+            pass
+
         duration = time.perf_counter() - tunnel_start
         if metric:
             if encountered_local_drop:
-                # Two-strike rule: records strike, quarantines only on 2 consecutive local failures
+                # Local drop verified: apply two-strike rule
                 metric.record_failure()
             else:
                 metric.record_success(transferred_bytes)

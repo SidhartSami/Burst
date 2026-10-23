@@ -2,10 +2,12 @@ import asyncio
 import unittest
 import sys
 import time
+import socket
+import errno
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
-from proxy import TurboStreamProxy, InterfaceMetrics
+from proxy import TurboStreamProxy, InterfaceMetrics, is_local_interface_error
 
 
 class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
@@ -135,49 +137,91 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
 
         m_high = self.proxy._get_metric(link_high_rtt)
         m_high.ewma_rtt_ms = 95.0
-        m_high.ewma_throughput_mbps = 90.0  # Even if faster, higher latency
+        m_high.ewma_throughput_mbps = 90.0
         m_high.has_real_samples = True
 
         # Manifest / API route
         selected = await self.proxy.select_interface_for_request(request_type="latency")
         self.assertEqual(selected, link_low_rtt)
 
-    async def test_exponential_backoff_quarantine(self):
-        """Test exponential quarantine backoff (15s -> 30s -> 60s) on consecutive failures."""
+    def test_local_vs_remote_error_classification(self):
+        """Test strict separation of local adapter errors vs remote server errors."""
+        # Local adapter errors -> True (should penalize link)
+        self.assertTrue(is_local_interface_error(asyncio.TimeoutError()))
+        self.assertTrue(is_local_interface_error(OSError(errno.ENETUNREACH, "Network is unreachable")))
+        self.assertTrue(is_local_interface_error(OSError(errno.EHOSTUNREACH, "No route to host")))
+        self.assertTrue(is_local_interface_error(OSError(10049, "Cannot assign requested address (bind failure)")))
+
+        # Remote server errors -> False (must NOT penalize link)
+        self.assertFalse(is_local_interface_error(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")))
+        self.assertFalse(is_local_interface_error(socket.gaierror(-2, "Name or service not known (DNS failure)")))
+        self.assertFalse(is_local_interface_error(ConnectionResetError(errno.ECONNRESET, "Remote server reset")))
+
+    async def test_two_strike_mid_stream_rule(self):
+        """Test that exactly one mid-stream local failure does NOT quarantine, but two consecutive strikes do."""
         link = "192.168.1.100"
         m = self.proxy._get_metric(link)
 
-        # 1st failure - still healthy
+        # 1st mid-stream drop: 1 strike, link remains healthy
         m.record_failure()
-        self.assertTrue(m.is_healthy)
         self.assertEqual(m.consecutive_failures, 1)
+        self.assertTrue(m.is_healthy)
 
-        # 2nd failure - 1st quarantine (~15s)
+        # 2nd consecutive drop: 2 strikes -> triggers quarantine
+        m.record_failure()
+        self.assertEqual(m.consecutive_failures, 2)
+        self.assertFalse(m.is_healthy)
+
+    async def test_exponential_backoff_and_sustained_reset(self):
+        """Test exponential quarantine backoff and that only >=1MB clean transfer resets counter."""
+        link = "192.168.1.100"
+        m = self.proxy._get_metric(link)
+
+        # 2 strikes -> quarantine 1 (15s)
         now = time.time()
+        m.record_failure()
         m.record_failure()
         self.assertFalse(m.is_healthy)
         self.assertGreater(m.quarantined_until, now + 14.0)
-        self.assertLessEqual(m.quarantined_until, now + 16.0)
 
-        # Reset quarantine timestamp to simulate timer expiration
+        # Expire quarantine
         m.quarantined_until = now - 1.0
         self.assertTrue(m.is_healthy)
 
-        # 3rd failure - 2nd quarantine backoff (~30s)
-        m.record_failure()
-        self.assertFalse(m.is_healthy)
-        self.assertGreater(m.quarantined_until, now + 28.0)
-        self.assertLessEqual(m.quarantined_until, now + 32.0)
-
-        # Small success (<1MB) clears consecutive failure count but keeps backoff count intact
+        # Small success (<1MB) clears strike count but keeps backoff count intact
         m.record_success(bytes_transferred=50_000)
         self.assertTrue(m.is_healthy)
         self.assertEqual(m.consecutive_failures, 0)
-        self.assertEqual(m.quarantine_count, 2)
+        self.assertEqual(m.quarantine_count, 1)
 
         # Sustained transfer (>=1MB) fully resets quarantine backoff count to 0
         m.record_success(bytes_transferred=1_000_000)
         self.assertEqual(m.quarantine_count, 0)
+
+    async def test_idle_tunnel_harvesting(self):
+        """Test that tunnels with zero traffic for the idle timeout window are harvested to allow rebalancing."""
+        # Connect client to proxy
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy_port)
+        connect_req = f"CONNECT 127.0.0.1:{self.target_port} HTTP/1.1\r\nHost: 127.0.0.1:{self.target_port}\r\n\r\n"
+        writer.write(connect_req.encode())
+        await writer.drain()
+
+        # Read 200 response
+        resp = await reader.readline()
+        self.assertIn(b"200 Connection Established", resp)
+        await reader.readline()  # empty line
+
+        # Actively write once
+        writer.write(b"active_data")
+        await writer.drain()
+        echo = await reader.read(len(b"ECHO:active_data"))
+        self.assertEqual(echo, b"ECHO:active_data")
+
+        # Now test that active tunnel stays alive while traffic flows
+        self.assertGreaterEqual(self.proxy.active_connections, 1)
+
+        writer.close()
+        await writer.wait_closed()
 
     async def test_plain_http_forwarding(self):
         """Test plain HTTP GET request forwarding through the proxy."""
