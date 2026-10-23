@@ -227,6 +227,7 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         socket.socket.getsockname = mock_getsockname
         loop.sock_connect = differential_connect
 
+        writer = None
         try:
             reader, writer, bound_ip = await self.proxy._connect_with_retry("127.0.0.1", self.target_port, req_type="bulk")
 
@@ -243,6 +244,54 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
             if writer:
                 writer.close()
                 await writer.wait_closed()
+
+    async def test_host_timeout_cache_skips_failed_link_on_new_connection(self):
+        """Verify that when Link A times out for a host, subsequent connections to that host skip Link A (Option A)."""
+        ip_a = "192.168.1.100"
+        ip_b = "192.168.43.50"
+        self.proxy.set_interfaces_provider(lambda: [ip_a, ip_b])
+        m_a = self.proxy._get_metric(ip_a)
+        m_b = self.proxy._get_metric(ip_b)
+        m_a.ewma_throughput_mbps = 80.0
+        m_b.ewma_throughput_mbps = 20.0
+
+        # Simulate host timeout cache on ip_a for video host
+        self.proxy.host_timeouts[("videoplayback.googlevideo.com", ip_a)] = time.time() + 10.0
+
+        # Next connection for this host should skip ip_a directly and select ip_b without paying 1.8s timeout
+        selected = await self.proxy.select_interface_for_request(
+            request_type="bulk",
+            target_host="videoplayback.googlevideo.com"
+        )
+        self.assertEqual(selected, ip_b)
+
+    async def test_single_link_fallback_failure_attribution(self):
+        """Verify Option A: in a single-link setup, fallback failure on the same route counts as a local strike."""
+        single_ip = "10.0.0.50"
+        self.proxy.set_interfaces_provider(lambda: [single_ip])
+        m = self.proxy._get_metric(single_ip)
+        self.assertEqual(m.consecutive_failures, 0)
+
+        # Mock bind to allow 10.0.0.50 on loopback test environment
+        original_bind = socket.socket.bind
+        def mock_bind(s, addr):
+            return original_bind(s, ("127.0.0.1", 0))
+
+        # Mock connect to timeout across bound socket and default route
+        loop = asyncio.get_running_loop()
+        original_sock_connect = loop.sock_connect
+        async def mock_all_fail(sock, address):
+            raise asyncio.TimeoutError()
+
+        socket.socket.bind = mock_bind
+        loop.sock_connect = mock_all_fail
+        try:
+            reader, writer, bound_ip = await self.proxy._connect_with_retry("127.0.0.1", 12345, req_type="standard")
+            # In single-link setup, fallback failure attributes strike to the single link
+            self.assertEqual(m.consecutive_failures, 1)
+        finally:
+            socket.socket.bind = original_bind
+            loop.sock_connect = original_sock_connect
 
     async def test_two_strike_mid_stream_rule(self):
         """Test that exactly one mid-stream local failure does NOT quarantine, but two consecutive strikes do."""

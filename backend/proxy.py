@@ -10,7 +10,9 @@ Key Scheduling Capabilities:
 2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
 3. Fast failover (<1.8s setup retry) with differential post-hoc timeout attribution:
    - If link A times out connecting to a host, but link B succeeds, link A is attributed with a local strike.
-   - If every link times out, the remote host is deemed unreachable/silent, and no link is penalized.
+   - If ALL links time out, the remote host is deemed unreachable/silent, and no link is penalized.
+   - Host-level timeout cache (10s window): Avoids repeating the 1.8s timeout penalty on dead links for new connections.
+   - Single-link setups: Fallback failures using the same route count as a local failure strike.
 4. Two-strike mid-stream drop protection (local errors only; remote resets / throttles excluded).
 5. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
 6. Bidirectional idle harvesting (15s bidirectional quiescence only, safe for H2 multiplexing).
@@ -36,6 +38,7 @@ BUFFER_SIZE = 65536
 CONNECT_TIMEOUT = 1.8  # Fast failover connection deadline (<2s)
 IDLE_TUNNEL_TIMEOUT = 15.0  # Max seconds of zero bidirectional traffic before harvesting keepalive tunnel
 SUSTAINED_RESET_BYTES = 1_000_000  # 1 MB clean transfer required to fully reset backoff
+HOST_TIMEOUT_CACHE_SEC = 10.0  # Window to skip a timed-out link on new connections to the same host
 
 # Fixed chunk size estimate for HTTPS video tunnels (where content-length is encrypted)
 DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES = 1_200_000  # ~1.2 MB per media segment
@@ -186,6 +189,9 @@ class TurboStreamProxy:
         # Metrics per interface IP
         self.metrics: Dict[str, InterfaceMetrics] = {}
 
+        # Host-level timeout cache: (host, interface_ip) -> expiry_ts (Option A)
+        self.host_timeouts: Dict[Tuple[str, str], float] = {}
+
     def set_interfaces_provider(self, fn: Callable[[], any]):
         """Set a callable that returns list of active interface IP strings or interface dicts."""
         self._interfaces_fn = fn
@@ -211,7 +217,6 @@ class TurboStreamProxy:
                         ips.append(item["ip_address"])
                     elif hasattr(item, "ip_address"):
                         ips.append(getattr(item, "ip_address"))
-            # Filter out loopback and empty
             return [ip for ip in ips if ip and not ip.startswith("127.")]
         except Exception as e:
             logger.debug(f"[PROXY] Error getting interface IPs: {e}")
@@ -244,8 +249,11 @@ class TurboStreamProxy:
         request_type: str = "standard",
         estimated_bytes: Optional[int] = None,
         exclude_ips: Optional[Set[str]] = None,
+        target_host: Optional[str] = None,
     ) -> Optional[str]:
-        """Selects the best interface using weighted scoring based on request type and link health."""
+        """Selects the best interface using weighted scoring based on request type and link health.
+        Skips links currently in the 10s host-level timeout cache for this target host (Option A).
+        """
         if estimated_bytes is None:
             estimated_bytes = (
                 DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES if request_type == "bulk" else 64_000
@@ -255,8 +263,20 @@ class TurboStreamProxy:
         if not available:
             return None
 
-        if exclude_ips:
-            filtered = [ip for ip in available if ip not in exclude_ips]
+        # Clean expired host-timeout cache entries
+        now = time.time()
+        self.host_timeouts = {k: v for k, v in self.host_timeouts.items() if v > now}
+
+        # Combine caller-excluded IPs with cached host timeouts
+        combined_excluded = set(exclude_ips) if exclude_ips else set()
+        if target_host:
+            host_clean = target_host.split(":")[0].lower()
+            for ip in available:
+                if self.host_timeouts.get((host_clean, ip), 0.0) > now:
+                    combined_excluded.add(ip)
+
+        if combined_excluded:
+            filtered = [ip for ip in available if ip not in combined_excluded]
             if filtered:
                 available = filtered
 
@@ -490,17 +510,23 @@ class TurboStreamProxy:
         """Fast failover connect with differential post-hoc timeout attribution:
         - If Link A times out on a host, but Link B succeeds on the same host, Link A was dead
           and is attributed a local strike.
-        - If ALL links time out on that host, the remote destination is down/unresponsive, so
-          NO link is penalized.
+        - Host timeout cache (Option A): Remembers timeouts per host for HOST_TIMEOUT_CACHE_SEC (10s)
+          to skip the timed-out link on new connections to that host without paying the 1.8s penalty.
+        - Single-link setups (Option A): If the default route fallback also fails on the same route as
+          the only link, counts as a local strike.
         """
         excluded: Set[str] = set()
         timed_out_interfaces: List[str] = []
+        host_clean = host.split(":")[0].lower()
+        available_ips = self._get_available_ips()
+        is_single_link = len(available_ips) == 1
         max_attempts = 3
 
         for attempt in range(max_attempts):
             selected_ip = await self.select_interface_for_request(
                 request_type=req_type,
                 exclude_ips=excluded if excluded else None,
+                target_host=host,
             )
 
             sock: Optional[socket.socket] = None
@@ -537,13 +563,15 @@ class TurboStreamProxy:
                     rtt_ms = (time.perf_counter() - start_t) * 1000.0
                     metric.record_rtt(rtt_ms)
 
-                    # DIFFERENTIAL ATTRIBUTION: Because this link succeeded, any earlier links
-                    # that timed out on this identical host were local packet-drop faults!
+                    # DIFFERENTIAL ATTRIBUTION: Earlier links that timed out on this identical host
+                    # were dead/packet-dropped!
                     for dropped_ip in timed_out_interfaces:
                         dropped_m = self._get_metric(dropped_ip)
                         dropped_m.record_failure()
+                        # Remember in 10s host-timeout cache so new connections skip dropped link
+                        self.host_timeouts[(host_clean, dropped_ip)] = time.time() + HOST_TIMEOUT_CACHE_SEC
                         logger.warning(
-                            f"[PROXY] Interface {dropped_ip} timed out while {selected_ip} succeeded for {host}:{port}. Attributed local strike to {dropped_ip}."
+                            f"[PROXY] Interface {dropped_ip} timed out while {selected_ip} succeeded for {host}:{port}. Attributed strike & cached 10s skip for {dropped_ip}."
                         )
 
                     return reader, writer, selected_ip
@@ -552,9 +580,11 @@ class TurboStreamProxy:
                     metric.active_requests = max(0, metric.active_requests - 1)
                     excluded.add(selected_ip)
                     timed_out_interfaces.append(selected_ip)
+                    # Cache timeout for this host so next connection avoids paying 1.8s penalty
+                    self.host_timeouts[(host_clean, selected_ip)] = time.time() + HOST_TIMEOUT_CACHE_SEC
                     sock.close()
                     logger.debug(
-                        f"[PROXY] Connect timed out on {selected_ip} for {host}:{port}. Deferred attribution pending alternative link trial."
+                        f"[PROXY] Connect timed out on {selected_ip} for {host}:{port}. Cached 10s skip."
                     )
                 except Exception as remote_err:
                     metric.active_requests = max(0, metric.active_requests - 1)
@@ -571,7 +601,6 @@ class TurboStreamProxy:
                         asyncio.open_connection(host, port),
                         timeout=CONNECT_TIMEOUT,
                     )
-                    # If default route succeeded, attribute timeout strikes to failed interfaces
                     for dropped_ip in timed_out_interfaces:
                         self._get_metric(dropped_ip).record_failure()
                     return reader, writer, None
@@ -588,8 +617,14 @@ class TurboStreamProxy:
                 self._get_metric(dropped_ip).record_failure()
             return reader, writer, None
         except Exception as e:
-            # All links and default route timed out / failed: remote host is down, no link penalized
-            logger.debug(f"[PROXY] Destination {host}:{port} unreachable across all links ({e}). No interface penalized.")
+            # Single-link setup Option A: If default fallback also failed on the same route as the single link,
+            # attribute local strike to that link
+            if is_single_link and timed_out_interfaces:
+                single_ip = timed_out_interfaces[0]
+                self._get_metric(single_ip).record_failure()
+                logger.debug(f"[PROXY] Single-link failure attributed to {single_ip} after default route failure.")
+            else:
+                logger.debug(f"[PROXY] Destination {host}:{port} unreachable across all links ({e}). No interface penalized.")
             return None, None, None
 
     def _record_target(self, host: str, port: int, bound_ip: Optional[str], req_type: str = "standard"):
