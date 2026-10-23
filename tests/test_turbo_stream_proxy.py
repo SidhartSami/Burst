@@ -1,10 +1,11 @@
 import asyncio
 import unittest
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
-from proxy import TurboStreamProxy
+from proxy import TurboStreamProxy, InterfaceMetrics
 
 
 class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
@@ -26,7 +27,7 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         await self.target_server.wait_closed()
 
     async def _handle_target(self, reader, writer):
-        # Target server just echoes back received data
+        # Target server echoes back received data
         try:
             while True:
                 data = await reader.read(1024)
@@ -48,7 +49,6 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
 
     async def test_connect_tunneling(self):
         """Test HTTP CONNECT request through the proxy to target server."""
-        # Connect to proxy
         reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy_port)
 
         # Send CONNECT request to target server
@@ -82,20 +82,61 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(status["recent_targets"]), 1)
         self.assertEqual(status["recent_targets"][0]["port"], self.target_port)
 
-    async def test_interface_round_robin_selection(self):
-        """Test that proxy round-robins across available interfaces."""
-        mock_interfaces = ["192.168.1.100", "192.168.43.50"]
-        self.proxy.set_interfaces_provider(lambda: mock_interfaces)
+    async def test_weighted_assignment_best_finish_time(self):
+        """Test weighted assignment prefers high throughput link (Wi-Fi 100Mbps vs 4G 10Mbps)."""
+        wifi_ip = "192.168.1.100"
+        lte_ip = "192.168.43.50"
+        self.proxy.set_interfaces_provider(lambda: [wifi_ip, lte_ip])
 
-        selected_1 = await self.proxy._select_next_interface()
-        selected_2 = await self.proxy._select_next_interface()
-        selected_3 = await self.proxy._select_next_interface()
+        m_wifi = self.proxy._get_metric(wifi_ip)
+        m_wifi.ewma_throughput_mbps = 100.0
+        m_wifi.ewma_rtt_ms = 15.0
 
-        # Should cycle through mock interfaces
-        self.assertIn(selected_1, mock_interfaces)
-        self.assertIn(selected_2, mock_interfaces)
-        self.assertEqual(selected_1, selected_3)
-        self.assertNotEqual(selected_1, selected_2)
+        m_lte = self.proxy._get_metric(lte_ip)
+        m_lte.ewma_throughput_mbps = 10.0
+        m_lte.ewma_rtt_ms = 65.0
+
+        # For a bulk segment (e.g. 2MB), Wi-Fi must be chosen
+        selected = await self.proxy.select_interface_for_request(
+            request_type="bulk", estimated_bytes=2_000_000
+        )
+        self.assertEqual(selected, wifi_ip)
+
+    async def test_latency_aware_routing_for_manifests(self):
+        """Test low latency links are prioritized for manifests / playlists."""
+        link_low_rtt = "192.168.1.100"
+        link_high_rtt = "192.168.43.50"
+        self.proxy.set_interfaces_provider(lambda: [link_low_rtt, link_high_rtt])
+
+        m_low = self.proxy._get_metric(link_low_rtt)
+        m_low.ewma_rtt_ms = 12.0
+        m_low.ewma_throughput_mbps = 30.0
+
+        m_high = self.proxy._get_metric(link_high_rtt)
+        m_high.ewma_rtt_ms = 95.0
+        m_high.ewma_throughput_mbps = 90.0  # Even if faster, higher latency
+
+        # Manifest / API route
+        selected = await self.proxy.select_interface_for_request(request_type="latency")
+        self.assertEqual(selected, link_low_rtt)
+
+    async def test_fast_failover_and_quarantine(self):
+        """Test that failing links are quarantined and bypassed."""
+        link_a = "192.168.1.100"
+        link_b = "192.168.43.50"
+        self.proxy.set_interfaces_provider(lambda: [link_a, link_b])
+
+        m_a = self.proxy._get_metric(link_a)
+        m_b = self.proxy._get_metric(link_b)
+
+        # Mark Link A with 2 consecutive failures
+        m_a.record_failure()
+        m_a.record_failure()
+        self.assertFalse(m_a.is_healthy)
+
+        # Link B should now be selected even if A was faster
+        selected = await self.proxy.select_interface_for_request(request_type="bulk")
+        self.assertEqual(selected, link_b)
 
     async def test_plain_http_forwarding(self):
         """Test plain HTTP GET request forwarding through the proxy."""
@@ -114,4 +155,3 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

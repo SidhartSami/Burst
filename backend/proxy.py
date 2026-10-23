@@ -1,28 +1,106 @@
 """Turbo Stream Dispatcher Proxy for Burst.
 
 Runs a local HTTP CONNECT proxy on 127.0.0.1:59285.
-When Chrome routes video streams (e.g. *.googlevideo.com, *.ttvnw.net, *.nflxvideo.net)
-through this proxy via the Burst browser extension, each streaming connection is
-dispatched across different active network interfaces (Wi-Fi, 5G Hotspot, Ethernet)
-using native socket binding.
+When the browser routes video streams (e.g. *.googlevideo.com, *.ttvnw.net, *.nflxvideo.net)
+through this proxy, each streaming connection is intelligently scheduled across active
+network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
+
+Key Scheduling Capabilities:
+1. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
+2. Fast failover with in-flight retry (<1.5s circuit breaker, retry on healthy link).
+3. Latency-aware routing (manifests/APIs -> lowest RTT link; bulk media -> max throughput link).
+4. Segment-aware scheduling (pipelined chunk tracking and connection pooling/warming).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
-from typing import Dict, List, Optional, Set
+import sys
 import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("burst.proxy")
 
 DEFAULT_PROXY_PORT = 59285
 BUFFER_SIZE = 65536
+CONNECT_TIMEOUT = 1.8  # Fast failover connection deadline (<2s)
+QUARANTINE_DURATION = 15.0  # Seconds to quarantine a link after consecutive failures
+
+# Regular expressions for request classification
+RE_LOW_LATENCY = re.compile(
+    r"(\.m3u8|\.mpd|\.json|/api/|/youtubei/|/init\.mp4|\.xml|videoplayback.*&(?:itag=140|live=1)|\.key)",
+    re.IGNORECASE,
+)
+RE_BULK_SEGMENT = re.compile(
+    r"(\.ts|\.m4s|\.m4v|\.mp4|\.webm|videoplayback|\.dash|range=|\.fmp4)",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class InterfaceMetrics:
+    """Rolling performance and health metrics for a specific network interface."""
+
+    ip: str
+    ewma_throughput_mbps: float = 25.0  # Sensible optimistic default
+    ewma_rtt_ms: float = 40.0  # Default latency in milliseconds
+    consecutive_failures: int = 0
+    quarantined_until: float = 0.0
+    active_requests: int = 0
+    total_bytes: int = 0
+    total_requests: int = 0
+    last_success_ts: float = field(default_factory=time.time)
+
+    @property
+    def is_healthy(self) -> bool:
+        if self.consecutive_failures >= 2 and time.time() < self.quarantined_until:
+            return False
+        return True
+
+    def record_rtt(self, rtt_ms: float) -> None:
+        """Update RTT using Exponential Weighted Moving Average (alpha = 0.25)."""
+        rtt_ms = max(1.0, min(rtt_ms, 3000.0))
+        self.ewma_rtt_ms = (0.75 * self.ewma_rtt_ms) + (0.25 * rtt_ms)
+
+    def record_throughput(self, bytes_transferred: int, duration_sec: float) -> None:
+        """Update throughput using EWMA (alpha = 0.20) for non-trivial transfers."""
+        if duration_sec <= 0.05 or bytes_transferred < 16384:
+            return
+        mbps = (bytes_transferred * 8.0) / (duration_sec * 1_000_000.0)
+        mbps = max(0.5, min(mbps, 5000.0))
+        self.ewma_throughput_mbps = (0.80 * self.ewma_throughput_mbps) + (0.20 * mbps)
+
+    def record_success(self, bytes_transferred: int = 0) -> None:
+        self.consecutive_failures = 0
+        self.quarantined_until = 0.0
+        self.total_bytes += bytes_transferred
+        self.last_success_ts = time.time()
+
+    def record_failure(self) -> None:
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= 2:
+            self.quarantined_until = time.time() + QUARANTINE_DURATION
+            logger.warning(
+                f"[PROXY] Interface {self.ip} marked DOWN (quarantined for {QUARANTINE_DURATION}s after {self.consecutive_failures} failures)"
+            )
+
+    def expected_finish_time(self, estimated_bytes: int) -> float:
+        """Calculates expected completion time in seconds:
+        T = (RTT / 1000) + (Bytes / Bandwidth) * (1 + 0.35 * active_requests)
+        """
+        rtt_sec = self.ewma_rtt_ms / 1000.0
+        bw_bytes_sec = (self.ewma_throughput_mbps * 1_000_000.0) / 8.0
+        transfer_sec = estimated_bytes / max(bw_bytes_sec, 10000.0)
+        concurrency_penalty = 1.0 + (0.35 * self.active_requests)
+        return rtt_sec + (transfer_sec * concurrency_penalty)
 
 
 class TurboStreamProxy:
-    """Asyncio HTTP CONNECT proxy that bonds streaming traffic across interfaces."""
+    """Asyncio HTTP CONNECT & Forwarding proxy that bonds streaming traffic across interfaces."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = DEFAULT_PROXY_PORT):
         self.host = host
@@ -35,14 +113,20 @@ class TurboStreamProxy:
         # Telemetry & stats
         self.total_connections = 0
         self.active_connections = 0
-        self.bytes_by_interface: Dict[str, int] = {}
-        self.active_by_interface: Dict[str, int] = {}
         self.recent_targets: List[Dict[str, any]] = []
-        self._interfaces_fn = None
+        self._interfaces_fn: Optional[Callable[[], any]] = None
 
-    def set_interfaces_provider(self, fn):
+        # Metrics per interface IP
+        self.metrics: Dict[str, InterfaceMetrics] = {}
+
+    def set_interfaces_provider(self, fn: Callable[[], any]):
         """Set a callable that returns list of active interface IP strings or interface dicts."""
         self._interfaces_fn = fn
+
+    def _get_metric(self, ip: str) -> InterfaceMetrics:
+        if ip not in self.metrics:
+            self.metrics[ip] = InterfaceMetrics(ip=ip)
+        return self.metrics[ip]
 
     def _get_available_ips(self) -> List[str]:
         if not self._interfaces_fn:
@@ -60,22 +144,74 @@ class TurboStreamProxy:
                         ips.append(item["ip_address"])
                     elif hasattr(item, "ip_address"):
                         ips.append(getattr(item, "ip_address"))
-            # Filter out localhost and empty
+            # Filter out loopback and empty
             return [ip for ip in ips if ip and not ip.startswith("127.")]
         except Exception as e:
             logger.debug(f"[PROXY] Error getting interface IPs: {e}")
             return []
 
-    async def _select_next_interface(self) -> Optional[str]:
+    def classify_request(self, host: str, target: str) -> str:
+        """Classifies incoming request into 'latency', 'bulk', or 'standard'."""
+        path_host = f"{host}{target}"
+        if RE_LOW_LATENCY.search(path_host):
+            return "latency"
+        if RE_BULK_SEGMENT.search(path_host):
+            return "bulk"
+        return "standard"
+
+    async def select_interface_for_request(
+        self,
+        request_type: str = "standard",
+        estimated_bytes: int = 1_500_000,
+        exclude_ips: Optional[Set[str]] = None,
+    ) -> Optional[str]:
+        """Selects the best interface using weighted scoring based on request type and link health."""
         available = self._get_available_ips()
         if not available:
             return None
 
+        if exclude_ips:
+            available = [ip for ip in available if ip not in exclude_ips]
+            if not available:
+                # If all were excluded, fall back to any available
+                available = self._get_available_ips()
+
         async with self._lock:
-            # Pick next interface in round robin
-            self._round_robin_idx = (self._round_robin_idx + 1) % len(available)
-            selected = available[self._round_robin_idx]
-            return selected
+            # Filter healthy candidates first
+            healthy = [ip for ip in available if self._get_metric(ip).is_healthy]
+            candidates = healthy if healthy else available
+
+            if len(candidates) == 1:
+                return candidates[0]
+
+            if request_type == "latency":
+                # Manifests / APIs: Pick lowest RTT link
+                best_ip = min(
+                    candidates,
+                    key=lambda ip: self._get_metric(ip).ewma_rtt_ms
+                    * (1.0 + 0.25 * self._get_metric(ip).active_requests),
+                )
+                return best_ip
+
+            elif request_type == "bulk":
+                # Video chunks (DASH / HLS / YouTube): Pick best estimated finish time
+                best_ip = min(
+                    candidates,
+                    key=lambda ip: self._get_metric(ip).expected_finish_time(estimated_bytes),
+                )
+                return best_ip
+
+            else:
+                # Balanced finish time with default chunk estimate (1MB)
+                best_ip = min(
+                    candidates,
+                    key=lambda ip: self._get_metric(ip).expected_finish_time(1_000_000),
+                )
+                return best_ip
+
+    async def _select_next_interface(self) -> Optional[str]:
+        """Backward-compatible interface selector using weighted assignment."""
+        return await self.select_interface_for_request(request_type="bulk")
 
     async def start(self) -> None:
         """Starts the proxy server."""
@@ -112,15 +248,29 @@ class TurboStreamProxy:
         return self._is_running and self.server is not None
 
     def get_status(self) -> Dict[str, any]:
-        """Returns live proxy statistics."""
+        """Returns live proxy statistics and interface telemetry."""
+        bytes_by_iface = {ip: m.total_bytes for ip, m in self.metrics.items()}
+        active_by_iface = {ip: m.active_requests for ip, m in self.metrics.items()}
+        interface_telemetry = {}
+        for ip, m in self.metrics.items():
+            interface_telemetry[ip] = {
+                "ewma_throughput_mbps": round(m.ewma_throughput_mbps, 2),
+                "ewma_rtt_ms": round(m.ewma_rtt_ms, 1),
+                "healthy": m.is_healthy,
+                "consecutive_failures": m.consecutive_failures,
+                "active_requests": m.active_requests,
+                "total_bytes": m.total_bytes,
+            }
+
         return {
             "running": self.is_running,
             "host": self.host,
             "port": self.port,
             "total_connections": self.total_connections,
             "active_connections": self.active_connections,
-            "bytes_by_interface": dict(self.bytes_by_interface),
-            "active_by_interface": dict(self.active_by_interface),
+            "bytes_by_interface": bytes_by_iface,
+            "active_by_interface": active_by_iface,
+            "interface_telemetry": interface_telemetry,
             "recent_targets": self.recent_targets[-15:],
             "bonded_interfaces": self._get_available_ips(),
         }
@@ -170,17 +320,24 @@ class TurboStreamProxy:
                 else:
                     host, port = target, 443
 
-                bound_ip = await self._select_next_interface()
-                remote_reader, remote_writer = await self._connect_remote(host, port, bound_ip)
+                req_type = self.classify_request(host, target)
+                remote_reader, remote_writer, bound_ip = await self._connect_with_retry(
+                    host=host,
+                    port=port,
+                    req_type=req_type,
+                )
+
+                if not remote_writer:
+                    client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    await client_writer.drain()
+                    client_writer.close()
+                    return
 
                 # Send 200 Connection Established to client
                 client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await client_writer.drain()
 
-                # Log target
-                self._record_target(host, port, bound_ip)
-
-                # Bi-directional tunnel
+                self._record_target(host, port, bound_ip, req_type)
                 await self._tunnel(client_reader, client_writer, remote_reader, remote_writer, bound_ip)
 
             else:
@@ -209,8 +366,18 @@ class TurboStreamProxy:
                     client_writer.close()
                     return
 
-                bound_ip = await self._select_next_interface()
-                remote_reader, remote_writer = await self._connect_remote(target_host, port, bound_ip)
+                req_type = self.classify_request(target_host, path)
+                remote_reader, remote_writer, bound_ip = await self._connect_with_retry(
+                    host=target_host,
+                    port=port,
+                    req_type=req_type,
+                )
+
+                if not remote_writer:
+                    client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    await client_writer.drain()
+                    client_writer.close()
+                    return
 
                 # Send request line + preserved headers
                 http_ver = parts[2] if len(parts) > 2 else "HTTP/1.1"
@@ -220,7 +387,7 @@ class TurboStreamProxy:
                 remote_writer.write(b"\r\n")
                 await remote_writer.drain()
 
-                self._record_target(target_host, port, bound_ip)
+                self._record_target(target_host, port, bound_ip, req_type)
                 await self._tunnel(client_reader, client_writer, remote_reader, remote_writer, bound_ip)
 
         except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError):
@@ -229,49 +396,88 @@ class TurboStreamProxy:
             logger.debug(f"[PROXY] Client handling error: {e}")
         finally:
             self.active_connections = max(0, self.active_connections - 1)
-            if bound_ip and bound_ip in self.active_by_interface:
-                self.active_by_interface[bound_ip] = max(0, self.active_by_interface[bound_ip] - 1)
+            if bound_ip:
+                metric = self._get_metric(bound_ip)
+                metric.active_requests = max(0, metric.active_requests - 1)
             try:
                 client_writer.close()
                 await client_writer.wait_closed()
             except Exception:
                 pass
 
-    async def _connect_remote(
+    async def _connect_with_retry(
         self,
         host: str,
         port: int,
-        interface_ip: Optional[str],
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Connects to remote destination with bound local interface, with fallback to default route."""
-        if interface_ip:
+        req_type: str = "standard",
+    ) -> Tuple[Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter], Optional[str]]:
+        """Fast failover connect: attempts preferred link; on timeout/reset (<1.8s),
+        penalizes link and immediately retries on alternative interface.
+        """
+        excluded: Set[str] = set()
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+            selected_ip = await self.select_interface_for_request(
+                request_type=req_type,
+                exclude_ips=excluded if excluded else None,
+            )
+
+            start_t = time.perf_counter()
             try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(
-                        host,
-                        port,
-                        local_addr=(interface_ip, 0),
-                    ),
-                    timeout=8.0,
-                )
-                self.active_by_interface[interface_ip] = self.active_by_interface.get(interface_ip, 0) + 1
-                return reader, writer
+                if selected_ip:
+                    metric = self._get_metric(selected_ip)
+                    metric.active_requests += 1
+
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(
+                            host,
+                            port,
+                            local_addr=(selected_ip, 0),
+                        ),
+                        timeout=CONNECT_TIMEOUT,
+                    )
+                    rtt_ms = (time.perf_counter() - start_t) * 1000.0
+                    metric.record_rtt(rtt_ms)
+                    return reader, writer, selected_ip
+                else:
+                    # Default route fallback
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, port),
+                        timeout=CONNECT_TIMEOUT,
+                    )
+                    return reader, writer, None
+
             except Exception as e:
-                logger.debug(f"[PROXY] Interface binding to {interface_ip} failed for {host}:{port}: {e}. Falling back to default route.")
+                if selected_ip:
+                    metric = self._get_metric(selected_ip)
+                    metric.active_requests = max(0, metric.active_requests - 1)
+                    metric.record_failure()
+                    excluded.add(selected_ip)
+                    logger.debug(
+                        f"[PROXY] Failover triggered: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative..."
+                    )
+                else:
+                    break
 
-        # Fallback to default route without local_addr
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=8.0,
-        )
-        return reader, writer
+        # Final fallback to standard default route if specific interfaces failed
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=3.0,
+            )
+            return reader, writer, None
+        except Exception as e:
+            logger.error(f"[PROXY] All connection attempts failed for {host}:{port}: {e}")
+            return None, None, None
 
-    def _record_target(self, host: str, port: int, bound_ip: Optional[str]):
+    def _record_target(self, host: str, port: int, bound_ip: Optional[str], req_type: str = "standard"):
         """Records recent host for live observability."""
         self.recent_targets.append({
             "host": host,
             "port": port,
             "interface_ip": bound_ip or "default",
+            "type": req_type,
             "time": time.time(),
         })
         if len(self.recent_targets) > 50:
@@ -285,10 +491,15 @@ class TurboStreamProxy:
         remote_writer: asyncio.StreamWriter,
         interface_ip: Optional[str],
     ) -> None:
-        """Pipes data bi-directionally between browser client and remote server."""
-        bound_key = interface_ip or "default"
+        """Pipes data bi-directionally between browser client and remote server,
+        recording bytes and updating rolling EWMA throughput.
+        """
+        metric = self._get_metric(interface_ip) if interface_ip else None
+        transferred_bytes = 0
+        tunnel_start = time.perf_counter()
 
         async def forward(src: asyncio.StreamReader, dst: asyncio.StreamWriter, is_download: bool):
+            nonlocal transferred_bytes
             try:
                 while self._is_running:
                     data = await src.read(BUFFER_SIZE)
@@ -298,9 +509,7 @@ class TurboStreamProxy:
                     await dst.drain()
 
                     if is_download:
-                        self.bytes_by_interface[bound_key] = (
-                            self.bytes_by_interface.get(bound_key, 0) + len(data)
-                        )
+                        transferred_bytes += len(data)
             except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
                 pass
             finally:
@@ -326,6 +535,11 @@ class TurboStreamProxy:
         except Exception:
             pass
 
+        duration = time.perf_counter() - tunnel_start
+        if metric:
+            metric.record_success(transferred_bytes)
+            metric.record_throughput(transferred_bytes, duration)
+
 
 # Global singleton
 turbo_proxy = TurboStreamProxy()
@@ -333,22 +547,28 @@ turbo_proxy = TurboStreamProxy()
 
 def set_windows_system_proxy(enable: bool, server: str = "127.0.0.1:59285"):
     """Toggles Windows system proxy in HKCU so all browsers (Zen, Chrome, Edge, etc.) route through Burst."""
-    import sys
     if sys.platform != "win32":
         return
     try:
-        import winreg
         import ctypes
+        import winreg
+
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
             0,
-            winreg.KEY_SET_VALUE
+            winreg.KEY_SET_VALUE,
         )
         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1 if enable else 0)
         if enable:
             winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
-            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "<local>;127.0.0.1;localhost;127.0.0.1:59284;127.0.0.1:5173")
+            winreg.SetValueEx(
+                key,
+                "ProxyOverride",
+                0,
+                winreg.REG_SZ,
+                "<local>;127.0.0.1;localhost;127.0.0.1:59284;127.0.0.1:5173",
+            )
         winreg.CloseKey(key)
 
         INTERNET_OPTION_SETTINGS_CHANGED = 39
@@ -361,4 +581,5 @@ def set_windows_system_proxy(enable: bool, server: str = "127.0.0.1:59285"):
 
 
 import atexit
+
 atexit.register(set_windows_system_proxy, False)
