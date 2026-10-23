@@ -8,9 +8,10 @@ network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
 Key Scheduling Capabilities:
 1. Host- & Path-aware request classification (works inside HTTPS CONNECT tunnels).
 2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
-3. Fast failover (<1.8s setup retry) and mid-stream quarantine to direct player retries to healthy links.
-4. Exponential backoff quarantine (15s -> 30s -> 60s) for flaky mobile hotspots.
-5. Conservative cold-start seeding & fixed chunk estimates (1 MB default for video tunnels).
+3. Fast failover (<1.8s setup retry) and two-strike mid-stream drop protection.
+4. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
+5. Idle tunnel harvesting (12s idle timeout) to break sticky HTTP/2 keepalive tunnels and allow dynamic rebalancing.
+6. Conservative cold-start seeding & declared 1.2 MB chunk estimate for video tunnels.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ logger = logging.getLogger("burst.proxy")
 DEFAULT_PROXY_PORT = 59285
 BUFFER_SIZE = 65536
 CONNECT_TIMEOUT = 1.8  # Fast failover connection deadline (<2s)
+IDLE_TUNNEL_TIMEOUT = 12.0  # Max idle seconds before closing tunnel to force rebalance
+SUSTAINED_RESET_BYTES = 1_000_000  # 1 MB clean transfer required to fully reset backoff
 
 # Fixed chunk size estimate for HTTPS video tunnels (where content-length is encrypted)
 DEFAULT_TUNNEL_CHUNK_ESTIMATE_BYTES = 1_200_000  # ~1.2 MB per media segment
@@ -69,6 +72,7 @@ class InterfaceMetrics:
     active_requests: int = 0
     total_bytes: int = 0
     total_requests: int = 0
+    bytes_since_last_failure: int = 0
     last_success_ts: float = field(default_factory=time.time)
 
     @property
@@ -99,22 +103,27 @@ class InterfaceMetrics:
 
     def record_success(self, bytes_transferred: int = 0) -> None:
         self.consecutive_failures = 0
-        self.quarantine_count = 0
         self.quarantined_until = 0.0
         self.total_bytes += bytes_transferred
+        self.bytes_since_last_failure += bytes_transferred
         self.total_requests += 1
         self.last_success_ts = time.time()
 
+        # Reset exponential backoff count only after a sustained window (>1 MB)
+        if self.bytes_since_last_failure >= SUSTAINED_RESET_BYTES:
+            self.quarantine_count = 0
+
     def record_failure(self) -> None:
-        """Records a link failure with exponential quarantine backoff (15s -> 30s -> 60s)."""
+        """Records a local/interface link failure with two-strike exponential backoff."""
         self.consecutive_failures += 1
+        self.bytes_since_last_failure = 0
         if self.consecutive_failures >= 2:
             self.quarantine_count += 1
             # Exponential backoff: 15s * (2 ^ (count - 1)), max 120s
             backoff_sec = min(120.0, 15.0 * (2 ** max(0, self.quarantine_count - 1)))
             self.quarantined_until = time.time() + backoff_sec
             logger.warning(
-                f"[PROXY] Interface {self.ip} marked DOWN (quarantined for {backoff_sec:.0f}s, consecutive failures={self.consecutive_failures})"
+                f"[PROXY] Interface {self.ip} quarantined for {backoff_sec:.0f}s (strike {self.consecutive_failures}, count {self.quarantine_count})"
             )
 
     def expected_finish_time(self, estimated_bytes: int) -> float:
@@ -313,6 +322,7 @@ class TurboStreamProxy:
                 "has_real_samples": m.has_real_samples,
                 "consecutive_failures": m.consecutive_failures,
                 "quarantine_count": m.quarantine_count,
+                "bytes_since_last_failure": m.bytes_since_last_failure,
                 "active_requests": m.active_requests,
                 "total_bytes": m.total_bytes,
             }
@@ -467,8 +477,8 @@ class TurboStreamProxy:
         port: int,
         req_type: str = "standard",
     ) -> Tuple[Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter], Optional[str]]:
-        """Fast failover connect: attempts preferred link; on timeout/reset (<1.8s),
-        penalizes link and immediately retries on alternative interface.
+        """Fast failover connect: attempts preferred link; on local/setup failure (<1.8s),
+        records a strike on the interface and immediately retries on alternative interface.
         """
         excluded: Set[str] = set()
         max_attempts = 3
@@ -508,11 +518,14 @@ class TurboStreamProxy:
                 if selected_ip:
                     metric = self._get_metric(selected_ip)
                     metric.active_requests = max(0, metric.active_requests - 1)
-                    metric.record_failure()
-                    excluded.add(selected_ip)
-                    logger.debug(
-                        f"[PROXY] Setup failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
-                    )
+
+                    # Only count true local/link errors (e.g. timeout, refused, unreachable, invalid local_addr)
+                    if isinstance(e, (asyncio.TimeoutError, OSError, ConnectionRefusedError)):
+                        metric.record_failure()
+                        excluded.add(selected_ip)
+                        logger.debug(
+                            f"[PROXY] Setup failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
+                        )
                 else:
                     break
 
@@ -548,22 +561,25 @@ class TurboStreamProxy:
         interface_ip: Optional[str],
     ) -> None:
         """Pipes data bi-directionally between browser client and remote server.
-        Handles mid-stream drops: marks interface with failure and quarantine backoff
-        so player retry is routed to a healthy link.
+        - Enforces idle timeout (12s) to harvest sticky keepalive tunnels and allow dynamic rebalancing.
+        - Applies the two-strike rule on mid-stream drops without penalizing links for server-side rate-limits.
         """
         metric = self._get_metric(interface_ip) if interface_ip else None
         transferred_bytes = 0
         tunnel_start = time.perf_counter()
-        encountered_remote_error = False
+        encountered_local_drop = False
 
         async def client_to_remote():
             try:
                 while self._is_running:
-                    data = await client_reader.read(BUFFER_SIZE)
+                    # If browser is idle for >12s, close tunnel so next segment gets scheduled anew
+                    data = await asyncio.wait_for(client_reader.read(BUFFER_SIZE), timeout=IDLE_TUNNEL_TIMEOUT)
                     if not data:
                         break
                     remote_writer.write(data)
                     await remote_writer.drain()
+            except asyncio.TimeoutError:
+                logger.debug(f"[PROXY] Idle tunnel harvested on {interface_ip} to allow rebalancing")
             except Exception:
                 pass
             finally:
@@ -573,17 +589,19 @@ class TurboStreamProxy:
                     pass
 
         async def remote_to_client():
-            nonlocal transferred_bytes, encountered_remote_error
+            nonlocal transferred_bytes, encountered_local_drop
             try:
                 while self._is_running:
-                    data = await remote_reader.read(BUFFER_SIZE)
+                    data = await asyncio.wait_for(remote_reader.read(BUFFER_SIZE), timeout=IDLE_TUNNEL_TIMEOUT)
                     if not data:
                         break
                     client_writer.write(data)
                     await client_writer.drain()
                     transferred_bytes += len(data)
-            except (ConnectionResetError, BrokenPipeError, asyncio.TimeoutError) as e:
-                encountered_remote_error = True
+            except asyncio.TimeoutError:
+                pass
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                encountered_local_drop = True
                 logger.debug(f"[PROXY] Mid-stream socket drop on link {interface_ip}: {e}")
             except Exception:
                 pass
@@ -612,8 +630,8 @@ class TurboStreamProxy:
 
         duration = time.perf_counter() - tunnel_start
         if metric:
-            if encountered_remote_error:
-                # Mid-stream drop: quarantine backoff so the player's immediate segment retry lands on a healthy link
+            if encountered_local_drop:
+                # Two-strike rule: records strike, quarantines only on 2 consecutive local failures
                 metric.record_failure()
             else:
                 metric.record_success(transferred_bytes)

@@ -169,10 +169,14 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(m.quarantined_until, now + 28.0)
         self.assertLessEqual(m.quarantined_until, now + 32.0)
 
-        # Success clears failures and quarantine state
-        m.record_success(bytes_transferred=50000)
+        # Small success (<1MB) clears consecutive failure count but keeps backoff count intact
+        m.record_success(bytes_transferred=50_000)
         self.assertTrue(m.is_healthy)
         self.assertEqual(m.consecutive_failures, 0)
+        self.assertEqual(m.quarantine_count, 2)
+
+        # Sustained transfer (>=1MB) fully resets quarantine backoff count to 0
+        m.record_success(bytes_transferred=1_000_000)
         self.assertEqual(m.quarantine_count, 0)
 
     async def test_plain_http_forwarding(self):
