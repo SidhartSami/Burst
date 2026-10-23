@@ -8,9 +8,9 @@ network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
 Key Scheduling Capabilities:
 1. Host- & Path-aware request classification (works inside HTTPS CONNECT tunnels).
 2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
-3. Fast failover (<1.8s setup retry) with strict separation of local adapter errors vs remote server errors.
-   - Connect timeouts on non-responsive remote servers do NOT penalize the local network link.
-   - Only local bind failures, invalid local addresses, and hardware unreachables trigger interface strikes.
+3. Fast failover (<1.8s setup retry) with differential post-hoc timeout attribution:
+   - If link A times out connecting to a host, but link B succeeds, link A is attributed with a local strike.
+   - If every link times out, the remote host is deemed unreachable/silent, and no link is penalized.
 4. Two-strike mid-stream drop protection (local errors only; remote resets / throttles excluded).
 5. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
 6. Bidirectional idle harvesting (15s bidirectional quiescence only, safe for H2 multiplexing).
@@ -73,29 +73,15 @@ RE_BULK_SEGMENT_PATH = re.compile(
 
 def is_local_interface_error(exc: BaseException) -> bool:
     """Returns True if the error originates from the local network interface or binding,
-    and False if it is a remote server error (connection refused, remote reset, DNS, HTTP throttle,
-    or connect timeout to a silent/unresponsive remote host).
+    and False if it is a remote server error (connection refused, remote reset, DNS, HTTP throttle).
     """
-    # A connect timeout to a remote host that doesn't answer is a REMOTE issue, not an adapter fault.
-    if isinstance(exc, asyncio.TimeoutError):
-        return False
-
-    # Check for gaierror (DNS resolution failure is a remote/target issue, not adapter-specific)
-    if isinstance(exc, socket.gaierror):
-        return False
-
-    # ConnectionRefusedError is sent by remote target rejecting the port
-    if isinstance(exc, ConnectionRefusedError):
-        return False
-
-    if isinstance(exc, ConnectionResetError):
+    if isinstance(exc, (asyncio.TimeoutError, socket.gaierror, ConnectionRefusedError, ConnectionResetError)):
         return False
 
     if isinstance(exc, OSError):
         err_num = getattr(exc, "errno", None)
         if err_num in LOCAL_INTERFACE_ERRNOS:
             return True
-        # Check error message strings for interface / binding problems
         msg = str(exc).lower()
         if "bind" in msg or "address is not valid" in msg or "cannot assign requested address" in msg:
             return True
@@ -108,7 +94,6 @@ class InterfaceMetrics:
     """Rolling performance and health metrics for a specific network interface."""
 
     ip: str
-    # Cold-start defaults: conservative 15 Mbps throughput, 45 ms RTT
     ewma_throughput_mbps: float = 15.0
     ewma_rtt_ms: float = 45.0
     has_real_samples: bool = False
@@ -155,7 +140,6 @@ class InterfaceMetrics:
         self.total_requests += 1
         self.last_success_ts = time.time()
 
-        # Reset exponential backoff count only after a sustained window (>1 MB)
         if self.bytes_since_last_failure >= SUSTAINED_RESET_BYTES:
             self.quarantine_count = 0
 
@@ -165,7 +149,6 @@ class InterfaceMetrics:
         self.bytes_since_last_failure = 0
         if self.consecutive_failures >= 2:
             self.quarantine_count += 1
-            # Exponential backoff: 15s * (2 ^ (count - 1)), max 120s
             backoff_sec = min(120.0, 15.0 * (2 ** max(0, self.quarantine_count - 1)))
             self.quarantined_until = time.time() + backoff_sec
             logger.warning(
@@ -175,14 +158,11 @@ class InterfaceMetrics:
     def expected_finish_time(self, estimated_bytes: int) -> float:
         """Calculates expected completion time in seconds:
         T = (RTT / 1000) + (Bytes / Bandwidth) * (1 + 0.35 * active_requests)
-        Cold-start penalty applied slightly if interface has never completed a real transfer.
         """
         rtt_sec = self.ewma_rtt_ms / 1000.0
         bw_bytes_sec = (self.ewma_throughput_mbps * 1_000_000.0) / 8.0
         transfer_sec = estimated_bytes / max(bw_bytes_sec, 10000.0)
         concurrency_penalty = 1.0 + (0.35 * self.active_requests)
-
-        # Mild cold-start dampener to avoid dumping all initial bursts into an unmeasured link
         cold_penalty = 1.2 if not self.has_real_samples else 1.0
         return (rtt_sec + (transfer_sec * concurrency_penalty)) * cold_penalty
 
@@ -238,20 +218,16 @@ class TurboStreamProxy:
             return []
 
     def classify_request(self, host: str, target: str, is_connect: bool = False) -> str:
-        """Classifies incoming request into 'latency', 'bulk', or 'standard'.
-        For HTTPS CONNECT tunnels (where path is encrypted), host regex is used.
-        """
+        """Classifies incoming request into 'latency', 'bulk', or 'standard'."""
         host_clean = host.split(":")[0].lower()
 
         if is_connect:
-            # HTTPS tunnel: examine host domain
             if RE_BULK_HOST.search(host_clean):
                 return "bulk"
             if RE_LATENCY_HOST.search(host_clean):
                 return "latency"
             return "standard"
 
-        # Plain HTTP: examine both host and path
         path_host = f"{host_clean}{target}"
         if RE_LOW_LATENCY_PATH.search(path_host):
             return "latency"
@@ -285,7 +261,6 @@ class TurboStreamProxy:
                 available = filtered
 
         async with self._lock:
-            # Filter healthy candidates first
             healthy = [ip for ip in available if self._get_metric(ip).is_healthy]
             candidates = healthy if healthy else available
 
@@ -293,7 +268,6 @@ class TurboStreamProxy:
                 return candidates[0]
 
             if request_type == "latency":
-                # Manifests / APIs: Pick lowest RTT link
                 best_ip = min(
                     candidates,
                     key=lambda ip: self._get_metric(ip).ewma_rtt_ms
@@ -302,7 +276,6 @@ class TurboStreamProxy:
                 return best_ip
 
             elif request_type == "bulk":
-                # Video chunks (DASH / HLS / YouTube): Pick best estimated finish time
                 best_ip = min(
                     candidates,
                     key=lambda ip: self._get_metric(ip).expected_finish_time(estimated_bytes),
@@ -310,7 +283,6 @@ class TurboStreamProxy:
                 return best_ip
 
             else:
-                # Balanced finish time
                 best_ip = min(
                     candidates,
                     key=lambda ip: self._get_metric(ip).expected_finish_time(estimated_bytes),
@@ -318,7 +290,6 @@ class TurboStreamProxy:
                 return best_ip
 
     async def _select_next_interface(self) -> Optional[str]:
-        """Backward-compatible interface selector using weighted assignment."""
         return await self.select_interface_for_request(request_type="bulk")
 
     async def start(self) -> None:
@@ -397,7 +368,6 @@ class TurboStreamProxy:
         bound_ip = None
 
         try:
-            # Read request line (e.g. CONNECT host:port HTTP/1.1)
             request_line_bytes = await asyncio.wait_for(client_reader.readline(), timeout=10.0)
             if not request_line_bytes:
                 client_writer.close()
@@ -411,7 +381,6 @@ class TurboStreamProxy:
 
             method, target = parts[0].upper(), parts[1]
 
-            # Read headers
             headers_list = []
             host_header = ""
             while True:
@@ -424,14 +393,12 @@ class TurboStreamProxy:
                     host_header = decoded_line.split(":", 1)[1].strip()
 
             if method == "CONNECT":
-                # Handle HTTPS CONNECT tunneling
                 if ":" in target:
                     host, port_str = target.rsplit(":", 1)
                     port = int(port_str)
                 else:
                     host, port = target, 443
 
-                # HOST-BASED CLASSIFICATION for HTTPS tunnels
                 req_type = self.classify_request(host, target, is_connect=True)
                 remote_reader, remote_writer, bound_ip = await self._connect_with_retry(
                     host=host,
@@ -445,7 +412,6 @@ class TurboStreamProxy:
                     client_writer.close()
                     return
 
-                # Send 200 Connection Established to client
                 client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await client_writer.drain()
 
@@ -453,7 +419,6 @@ class TurboStreamProxy:
                 await self._tunnel(client_reader, client_writer, remote_reader, remote_writer, bound_ip)
 
             else:
-                # Handle plain HTTP forwarding (GET http://... or GET /path with Host)
                 target_host = host_header
                 port = 80
                 path = target
@@ -491,7 +456,6 @@ class TurboStreamProxy:
                     client_writer.close()
                     return
 
-                # Send request line + preserved headers
                 http_ver = parts[2] if len(parts) > 2 else "HTTP/1.1"
                 remote_writer.write(f"{method} {path} {http_ver}\r\n".encode("latin1"))
                 for h in headers_list:
@@ -523,12 +487,14 @@ class TurboStreamProxy:
         port: int,
         req_type: str = "standard",
     ) -> Tuple[Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter], Optional[str]]:
-        """Fast failover connect: attempts preferred link.
-        - Two-step socket connection:
-          1. Local interface socket creation & bind: failures here are verified local adapter faults.
-          2. Remote handshake: timeouts/refusals to destination are remote issues and do NOT penalize the adapter.
+        """Fast failover connect with differential post-hoc timeout attribution:
+        - If Link A times out on a host, but Link B succeeds on the same host, Link A was dead
+          and is attributed a local strike.
+        - If ALL links time out on that host, the remote destination is down/unresponsive, so
+          NO link is penalized.
         """
         excluded: Set[str] = set()
+        timed_out_interfaces: List[str] = []
         max_attempts = 3
 
         for attempt in range(max_attempts):
@@ -542,25 +508,24 @@ class TurboStreamProxy:
                 metric = self._get_metric(selected_ip)
                 metric.active_requests += 1
 
-                # STEP 1: Local socket creation and bind to selected interface IP
+                # STEP 1: Local socket creation and binding
                 try:
                     family = socket.AF_INET6 if ":" in selected_ip else socket.AF_INET
                     sock = socket.socket(family, socket.SOCK_STREAM)
                     sock.bind((selected_ip, 0))
                     sock.setblocking(False)
                 except Exception as bind_err:
-                    # Bind failed on local adapter: verified local hardware/stack fault
                     metric.active_requests = max(0, metric.active_requests - 1)
                     metric.record_failure()
                     excluded.add(selected_ip)
                     if sock:
                         sock.close()
                     logger.warning(
-                        f"[PROXY] Local interface bind failed for {selected_ip}: {bind_err}. Penalizing and switching link..."
+                        f"[PROXY] Local interface bind failed for {selected_ip}: {bind_err}."
                     )
                     continue
 
-                # STEP 2: Connect to remote host through bound socket
+                # STEP 2: Remote connect handshake
                 start_t = time.perf_counter()
                 try:
                     loop = asyncio.get_running_loop()
@@ -571,14 +536,25 @@ class TurboStreamProxy:
                     reader, writer = await asyncio.open_connection(sock=sock)
                     rtt_ms = (time.perf_counter() - start_t) * 1000.0
                     metric.record_rtt(rtt_ms)
+
+                    # DIFFERENTIAL ATTRIBUTION: Because this link succeeded, any earlier links
+                    # that timed out on this identical host were local packet-drop faults!
+                    for dropped_ip in timed_out_interfaces:
+                        dropped_m = self._get_metric(dropped_ip)
+                        dropped_m.record_failure()
+                        logger.warning(
+                            f"[PROXY] Interface {dropped_ip} timed out while {selected_ip} succeeded for {host}:{port}. Attributed local strike to {dropped_ip}."
+                        )
+
                     return reader, writer, selected_ip
+
                 except asyncio.TimeoutError:
-                    # Remote destination did not answer within deadline: remote fault, NOT interface fault
                     metric.active_requests = max(0, metric.active_requests - 1)
                     excluded.add(selected_ip)
+                    timed_out_interfaces.append(selected_ip)
                     sock.close()
                     logger.debug(
-                        f"[PROXY] Remote connection to {host}:{port} timed out (remote unresponsive). Interface {selected_ip} not penalized."
+                        f"[PROXY] Connect timed out on {selected_ip} for {host}:{port}. Deferred attribution pending alternative link trial."
                     )
                 except Exception as remote_err:
                     metric.active_requests = max(0, metric.active_requests - 1)
@@ -586,35 +562,34 @@ class TurboStreamProxy:
                     if is_local_interface_error(remote_err):
                         metric.record_failure()
                         excluded.add(selected_ip)
-                        logger.debug(
-                            f"[PROXY] Local route/interface fault during connect ({selected_ip}): {remote_err}"
-                        )
                     else:
                         excluded.add(selected_ip)
-                        logger.debug(
-                            f"[PROXY] Remote error connecting to {host}:{port}: {remote_err} (not penalized)"
-                        )
             else:
-                # Default route fallback without local_addr
+                # Default route fallback
                 try:
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(host, port),
                         timeout=CONNECT_TIMEOUT,
                     )
+                    # If default route succeeded, attribute timeout strikes to failed interfaces
+                    for dropped_ip in timed_out_interfaces:
+                        self._get_metric(dropped_ip).record_failure()
                     return reader, writer, None
-                except Exception as e:
-                    logger.debug(f"[PROXY] Default route connection failed for {host}:{port}: {e}")
+                except Exception:
                     break
 
-        # Final fallback to standard default route if specific interfaces failed
+        # Final fallback to standard default route
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
                 timeout=3.0,
             )
+            for dropped_ip in timed_out_interfaces:
+                self._get_metric(dropped_ip).record_failure()
             return reader, writer, None
         except Exception as e:
-            logger.error(f"[PROXY] All connection attempts failed for {host}:{port}: {e}")
+            # All links and default route timed out / failed: remote host is down, no link penalized
+            logger.debug(f"[PROXY] Destination {host}:{port} unreachable across all links ({e}). No interface penalized.")
             return None, None, None
 
     def _record_target(self, host: str, port: int, bound_ip: Optional[str], req_type: str = "standard"):
@@ -639,9 +614,7 @@ class TurboStreamProxy:
     ) -> None:
         """Pipes data bi-directionally between browser client and remote server.
         - True idle harvesting: Only harvests when NEITHER direction has seen bytes for IDLE_TUNNEL_TIMEOUT (15s).
-          Remote timeouts during slow server responses never trigger idle close.
         - Two-strike mid-stream rule: Only local socket unreachables/drops count as interface strikes.
-          Remote resets, throttles, and client tab closes are strictly ignored.
         """
         metric = self._get_metric(interface_ip) if interface_ip else None
         transferred_bytes = 0
@@ -681,7 +654,6 @@ class TurboStreamProxy:
                     await client_writer.drain()
                     transferred_bytes += len(data)
             except OSError as e:
-                # Distinguish local hardware/adapter faults from remote resets
                 if is_local_interface_error(e):
                     encountered_local_drop = True
                     logger.debug(f"[PROXY] Local interface drop on {interface_ip}: {e}")
@@ -716,7 +688,6 @@ class TurboStreamProxy:
         t2 = asyncio.create_task(remote_to_client())
         t3 = asyncio.create_task(idle_watcher())
 
-        # Wait until transfer finishes or idle watcher triggers quiescence close
         await transfer_done.wait()
 
         for t in [t1, t2, t3]:
@@ -737,7 +708,6 @@ class TurboStreamProxy:
         duration = time.perf_counter() - tunnel_start
         if metric:
             if encountered_local_drop:
-                # Local drop verified: apply two-strike rule
                 metric.record_failure()
             else:
                 metric.record_success(transferred_bytes)

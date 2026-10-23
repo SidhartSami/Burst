@@ -159,18 +159,90 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_local_interface_error(ConnectionResetError(errno.ECONNRESET, "Remote server reset")))
 
     async def test_remote_connect_timeout_does_not_penalize_interface(self):
-        """Verify that when a remote destination times out, the local interface strike count is NOT incremented."""
+        """Verify that when a remote destination times out across all links, no interface is penalized."""
         test_ip = "127.0.0.1"
         m = self.proxy._get_metric(test_ip)
         initial_failures = m.consecutive_failures
 
-        # Connect to a non-responsive IP/port with short timeout
-        self.proxy.set_interfaces_provider(lambda: [test_ip])
-        reader, writer, bound_ip = await self.proxy._connect_with_retry("10.255.255.1", 81, req_type="standard")
+        # Create a silent local server that never answers connections to simulate remote timeout
+        silent_srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+        silent_port = silent_srv.sockets[0].getsockname()[1]
+        silent_srv.close()  # Closed server on localhost will refuse connection
 
-        # Interface should not have been penalized
-        self.assertEqual(m.consecutive_failures, initial_failures)
-        self.assertTrue(m.is_healthy)
+        # Mock loop.sock_connect to timeout deterministically without network dependency
+        original_sock_connect = asyncio.get_running_loop().sock_connect
+
+        async def mock_timeout(sock, address):
+            raise asyncio.TimeoutError()
+
+        loop = asyncio.get_running_loop()
+        loop.sock_connect = mock_timeout
+
+        try:
+            self.proxy.set_interfaces_provider(lambda: [test_ip])
+            reader, writer, bound_ip = await self.proxy._connect_with_retry("127.0.0.1", silent_port, req_type="standard")
+
+            # All links timed out on this target -> remote destination down -> interface NOT penalized
+            self.assertEqual(m.consecutive_failures, initial_failures)
+            self.assertTrue(m.is_healthy)
+        finally:
+            loop.sock_connect = original_sock_connect
+
+    async def test_differential_timeout_attribution(self):
+        """Verify that if Link A times out on a host but Link B succeeds, Link A gets penalized."""
+        ip_a = "192.168.1.100"
+        ip_b = "192.168.43.50"
+        self.proxy.set_interfaces_provider(lambda: [ip_a, ip_b])
+
+        m_a = self.proxy._get_metric(ip_a)
+        m_b = self.proxy._get_metric(ip_b)
+        m_a.ewma_throughput_mbps = 50.0
+        m_b.ewma_throughput_mbps = 20.0  # Link A chosen first
+
+        loop = asyncio.get_running_loop()
+        original_sock_connect = loop.sock_connect
+
+        async def differential_connect(sock, address):
+            # If bound to ip_a, simulate dropped packets / timeout
+            local_ip = sock.getsockname()[0]
+            if local_ip == ip_a:
+                raise asyncio.TimeoutError()
+            # If bound to ip_b, connect to target server
+            return await original_sock_connect(sock, address)
+
+        # Mock socket bind to allow mock IPs on local test environment
+        original_bind = socket.socket.bind
+        ip_by_fileno = {}
+        def mock_bind(s, addr):
+            ip_by_fileno[s.fileno()] = addr[0]
+            return original_bind(s, ("127.0.0.1", 0))
+
+        original_getsockname = socket.socket.getsockname
+        def mock_getsockname(s):
+            if s.fileno() in ip_by_fileno:
+                return (ip_by_fileno[s.fileno()], 12345)
+            return original_getsockname(s)
+
+        socket.socket.bind = mock_bind
+        socket.socket.getsockname = mock_getsockname
+        loop.sock_connect = differential_connect
+
+        try:
+            reader, writer, bound_ip = await self.proxy._connect_with_retry("127.0.0.1", self.target_port, req_type="bulk")
+
+            # Link B should have succeeded
+            self.assertEqual(bound_ip, ip_b)
+            # Link A should have been attributed a local strike because B succeeded for the same target!
+            self.assertEqual(m_a.consecutive_failures, 1)
+            # Link B should have zero failures
+            self.assertEqual(m_b.consecutive_failures, 0)
+        finally:
+            socket.socket.bind = original_bind
+            socket.socket.getsockname = original_getsockname
+            loop.sock_connect = original_sock_connect
+            if writer:
+                writer.close()
+                await writer.wait_closed()
 
     async def test_two_strike_mid_stream_rule(self):
         """Test that exactly one mid-stream local failure does NOT quarantine, but two consecutive strikes do."""
