@@ -8,10 +8,12 @@ network interfaces (Wi-Fi, 5G Hotspot, Ethernet) using native socket binding.
 Key Scheduling Capabilities:
 1. Host- & Path-aware request classification (works inside HTTPS CONNECT tunnels).
 2. Weighted assignment (Best Finish Time) based on rolling EWMA throughput & RTT.
-3. Fast failover (<1.8s setup retry) with strict local vs. remote error differentiation.
+3. Fast failover (<1.8s setup retry) with strict separation of local adapter errors vs remote server errors.
+   - Connect timeouts on non-responsive remote servers do NOT penalize the local network link.
+   - Only local bind failures, invalid local addresses, and hardware unreachables trigger interface strikes.
 4. Two-strike mid-stream drop protection (local errors only; remote resets / throttles excluded).
 5. Exponential backoff quarantine (15s -> 30s -> 60s) with 1 MB sustained byte-window reset.
-6. Idle tunnel harvesting (15s bidirectional quiescence only, safe for H2 multiplexing).
+6. Bidirectional idle harvesting (15s bidirectional quiescence only, safe for H2 multiplexing).
 7. Conservative cold-start seeding & declared 1.2 MB chunk estimate for video tunnels.
 """
 
@@ -71,11 +73,12 @@ RE_BULK_SEGMENT_PATH = re.compile(
 
 def is_local_interface_error(exc: BaseException) -> bool:
     """Returns True if the error originates from the local network interface or binding,
-    and False if it is a remote server error (connection refused, remote reset, DNS, HTTP throttle).
+    and False if it is a remote server error (connection refused, remote reset, DNS, HTTP throttle,
+    or connect timeout to a silent/unresponsive remote host).
     """
+    # A connect timeout to a remote host that doesn't answer is a REMOTE issue, not an adapter fault.
     if isinstance(exc, asyncio.TimeoutError):
-        # Bound socket connect timeout indicates local link stalled / dropped packets
-        return True
+        return False
 
     # Check for gaierror (DNS resolution failure is a remote/target issue, not adapter-specific)
     if isinstance(exc, socket.gaierror):
@@ -85,13 +88,16 @@ def is_local_interface_error(exc: BaseException) -> bool:
     if isinstance(exc, ConnectionRefusedError):
         return False
 
+    if isinstance(exc, ConnectionResetError):
+        return False
+
     if isinstance(exc, OSError):
         err_num = getattr(exc, "errno", None)
         if err_num in LOCAL_INTERFACE_ERRNOS:
             return True
         # Check error message strings for interface / binding problems
         msg = str(exc).lower()
-        if "bind" in msg or "network is unreachable" in msg or "host is unreachable" in msg:
+        if "bind" in msg or "address is not valid" in msg or "cannot assign requested address" in msg:
             return True
 
     return False
@@ -518,9 +524,9 @@ class TurboStreamProxy:
         req_type: str = "standard",
     ) -> Tuple[Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter], Optional[str]]:
         """Fast failover connect: attempts preferred link.
-        Differentiates strictly between local interface errors (timeouts, bind failures, unreachables)
-        and remote errors (refused connections, DNS errors, server resets).
-        Only local interface faults penalize the link strike count.
+        - Two-step socket connection:
+          1. Local interface socket creation & bind: failures here are verified local adapter faults.
+          2. Remote handshake: timeouts/refusals to destination are remote issues and do NOT penalize the adapter.
         """
         excluded: Set[str] = set()
         max_attempts = 3
@@ -531,48 +537,73 @@ class TurboStreamProxy:
                 exclude_ips=excluded if excluded else None,
             )
 
-            start_t = time.perf_counter()
-            try:
-                if selected_ip:
-                    metric = self._get_metric(selected_ip)
-                    metric.active_requests += 1
+            sock: Optional[socket.socket] = None
+            if selected_ip:
+                metric = self._get_metric(selected_ip)
+                metric.active_requests += 1
 
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(
-                            host,
-                            port,
-                            local_addr=(selected_ip, 0),
-                        ),
+                # STEP 1: Local socket creation and bind to selected interface IP
+                try:
+                    family = socket.AF_INET6 if ":" in selected_ip else socket.AF_INET
+                    sock = socket.socket(family, socket.SOCK_STREAM)
+                    sock.bind((selected_ip, 0))
+                    sock.setblocking(False)
+                except Exception as bind_err:
+                    # Bind failed on local adapter: verified local hardware/stack fault
+                    metric.active_requests = max(0, metric.active_requests - 1)
+                    metric.record_failure()
+                    excluded.add(selected_ip)
+                    if sock:
+                        sock.close()
+                    logger.warning(
+                        f"[PROXY] Local interface bind failed for {selected_ip}: {bind_err}. Penalizing and switching link..."
+                    )
+                    continue
+
+                # STEP 2: Connect to remote host through bound socket
+                start_t = time.perf_counter()
+                try:
+                    loop = asyncio.get_running_loop()
+                    await asyncio.wait_for(
+                        loop.sock_connect(sock, (host, port)),
                         timeout=CONNECT_TIMEOUT,
                     )
+                    reader, writer = await asyncio.open_connection(sock=sock)
                     rtt_ms = (time.perf_counter() - start_t) * 1000.0
                     metric.record_rtt(rtt_ms)
                     return reader, writer, selected_ip
-                else:
-                    # Default route fallback
+                except asyncio.TimeoutError:
+                    # Remote destination did not answer within deadline: remote fault, NOT interface fault
+                    metric.active_requests = max(0, metric.active_requests - 1)
+                    excluded.add(selected_ip)
+                    sock.close()
+                    logger.debug(
+                        f"[PROXY] Remote connection to {host}:{port} timed out (remote unresponsive). Interface {selected_ip} not penalized."
+                    )
+                except Exception as remote_err:
+                    metric.active_requests = max(0, metric.active_requests - 1)
+                    sock.close()
+                    if is_local_interface_error(remote_err):
+                        metric.record_failure()
+                        excluded.add(selected_ip)
+                        logger.debug(
+                            f"[PROXY] Local route/interface fault during connect ({selected_ip}): {remote_err}"
+                        )
+                    else:
+                        excluded.add(selected_ip)
+                        logger.debug(
+                            f"[PROXY] Remote error connecting to {host}:{port}: {remote_err} (not penalized)"
+                        )
+            else:
+                # Default route fallback without local_addr
+                try:
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(host, port),
                         timeout=CONNECT_TIMEOUT,
                     )
                     return reader, writer, None
-
-            except Exception as e:
-                if selected_ip:
-                    metric = self._get_metric(selected_ip)
-                    metric.active_requests = max(0, metric.active_requests - 1)
-
-                    # Only penalize interface if the failure is verified local to the adapter
-                    if is_local_interface_error(e):
-                        metric.record_failure()
-                        excluded.add(selected_ip)
-                        logger.debug(
-                            f"[PROXY] Local interface failover: Link {selected_ip} failed for {host}:{port} ({e}). Retrying on alternative link..."
-                        )
-                    else:
-                        logger.debug(
-                            f"[PROXY] Remote server error for {host}:{port} ({e}). Interface {selected_ip} not penalized."
-                        )
-                else:
+                except Exception as e:
+                    logger.debug(f"[PROXY] Default route connection failed for {host}:{port}: {e}")
                     break
 
         # Final fallback to standard default route if specific interfaces failed

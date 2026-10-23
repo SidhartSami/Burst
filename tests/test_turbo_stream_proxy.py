@@ -147,15 +147,30 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
     def test_local_vs_remote_error_classification(self):
         """Test strict separation of local adapter errors vs remote server errors."""
         # Local adapter errors -> True (should penalize link)
-        self.assertTrue(is_local_interface_error(asyncio.TimeoutError()))
         self.assertTrue(is_local_interface_error(OSError(errno.ENETUNREACH, "Network is unreachable")))
         self.assertTrue(is_local_interface_error(OSError(errno.EHOSTUNREACH, "No route to host")))
         self.assertTrue(is_local_interface_error(OSError(10049, "Cannot assign requested address (bind failure)")))
 
         # Remote server errors -> False (must NOT penalize link)
+        # Connect timeout to an unresponsive remote server is a remote issue, NOT an adapter fault
+        self.assertFalse(is_local_interface_error(asyncio.TimeoutError()))
         self.assertFalse(is_local_interface_error(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")))
         self.assertFalse(is_local_interface_error(socket.gaierror(-2, "Name or service not known (DNS failure)")))
         self.assertFalse(is_local_interface_error(ConnectionResetError(errno.ECONNRESET, "Remote server reset")))
+
+    async def test_remote_connect_timeout_does_not_penalize_interface(self):
+        """Verify that when a remote destination times out, the local interface strike count is NOT incremented."""
+        test_ip = "127.0.0.1"
+        m = self.proxy._get_metric(test_ip)
+        initial_failures = m.consecutive_failures
+
+        # Connect to a non-responsive IP/port with short timeout
+        self.proxy.set_interfaces_provider(lambda: [test_ip])
+        reader, writer, bound_ip = await self.proxy._connect_with_retry("10.255.255.1", 81, req_type="standard")
+
+        # Interface should not have been penalized
+        self.assertEqual(m.consecutive_failures, initial_failures)
+        self.assertTrue(m.is_healthy)
 
     async def test_two_strike_mid_stream_rule(self):
         """Test that exactly one mid-stream local failure does NOT quarantine, but two consecutive strikes do."""
