@@ -309,11 +309,15 @@ function enableTurboStreamProxy(mode = "video") {
   if (isFirefox) {
     let ffValue;
     if (mode === "all") {
+      const pacAll = `function FindProxyForURL(url, host) {
+        if (shExpMatch(host, "127.0.0.1") || shExpMatch(host, "localhost") || shExpMatch(url, "*:59284*") || isPlainHostName(host)) {
+          return "DIRECT";
+        }
+        return "PROXY 127.0.0.1:59285; DIRECT";
+      }`;
       ffValue = {
-        proxyType: "manual",
-        http: "http://127.0.0.1:59285",
-        ssl: "http://127.0.0.1:59285",
-        passthrough: "127.0.0.1, localhost, 127.0.0.1:59284"
+        proxyType: "autoConfig",
+        autoConfigUrl: "data:application/x-ns-proxy-autoconfig;base64," + btoa(pacAll)
       };
     } else {
       const pacData = `function FindProxyForURL(url, host) {
@@ -358,16 +362,17 @@ function enableTurboStreamProxy(mode = "video") {
   // Chromium / Chrome
   let proxyConfig;
   if (mode === "all") {
-    proxyConfig = {
-      mode: "fixed_servers",
-      rules: {
-        singleProxy: {
-          scheme: "http",
-          host: "127.0.0.1",
-          port: 59285
-        },
-        bypassList: ["<local>", "127.0.0.1:59284", "localhost:59284"]
+    const pacAll = `
+      function FindProxyForURL(url, host) {
+        if (shExpMatch(host, "127.0.0.1") || shExpMatch(host, "localhost") || shExpMatch(url, "*:59284*") || isPlainHostName(host)) {
+          return "DIRECT";
+        }
+        return "PROXY 127.0.0.1:59285; DIRECT";
       }
+    `;
+    proxyConfig = {
+      mode: "pac_script",
+      pacScript: { data: pacAll }
     };
   } else {
     const pacData = `

@@ -40,6 +40,7 @@ Output/
 *.exe
 
 # App Data / Runtime-generated files
+backend/session.token
 backend/burst_*.json
 burst_active_jobs.json
 backend/dht_state.dat
@@ -66,3 +67,4 @@ implementation_plan.md
 # Editor & Local Session Files
 .claude/
 burst_history.json
+
