@@ -246,24 +246,58 @@ class TestTurboStreamProxy(unittest.IsolatedAsyncioTestCase):
                 await writer.wait_closed()
 
     async def test_host_timeout_cache_skips_failed_link_on_new_connection(self):
-        """Verify that when Link A times out for a host, subsequent connections to that host skip Link A (Option A)."""
+        """Verify full end-to-end path: a real connect timeout populates the cache and the next selection skips Link A."""
         ip_a = "192.168.1.100"
         ip_b = "192.168.43.50"
         self.proxy.set_interfaces_provider(lambda: [ip_a, ip_b])
         m_a = self.proxy._get_metric(ip_a)
         m_b = self.proxy._get_metric(ip_b)
         m_a.ewma_throughput_mbps = 80.0
-        m_b.ewma_throughput_mbps = 20.0
+        m_b.ewma_throughput_mbps = 20.0  # Link A has priority initially
 
-        # Simulate host timeout cache on ip_a for video host
-        self.proxy.host_timeouts[("videoplayback.googlevideo.com", ip_a)] = time.time() + 10.0
+        loop = asyncio.get_running_loop()
+        original_sock_connect = loop.sock_connect
 
-        # Next connection for this host should skip ip_a directly and select ip_b without paying 1.8s timeout
-        selected = await self.proxy.select_interface_for_request(
-            request_type="bulk",
-            target_host="videoplayback.googlevideo.com"
-        )
-        self.assertEqual(selected, ip_b)
+        # Simulate timeout on ip_a during _connect_with_retry, while ip_b succeeds
+        ip_by_fileno = {}
+        original_bind = socket.socket.bind
+        def mock_bind(s, addr):
+            ip_by_fileno[s.fileno()] = addr[0]
+            return original_bind(s, ("127.0.0.1", 0))
+
+        async def differential_connect(sock, address):
+            bound = ip_by_fileno.get(sock.fileno())
+            if bound == ip_a:
+                raise asyncio.TimeoutError()
+            # For ip_b, connect to target_server on 127.0.0.1
+            return await original_sock_connect(sock, ("127.0.0.1", self.target_port))
+
+        socket.socket.bind = mock_bind
+        loop.sock_connect = differential_connect
+        writer = None
+
+        try:
+            # 1. First connection to host: ip_a times out, fallback to ip_b succeeds
+            test_host = "videoplayback.googlevideo.com"
+            reader, writer, bound_ip = await self.proxy._connect_with_retry(test_host, self.target_port, req_type="bulk")
+            self.assertEqual(bound_ip, ip_b)
+
+            # Confirm that the connect timeout filled the host_timeouts cache
+            self.assertIn((test_host, ip_a), self.proxy.host_timeouts)
+            self.assertGreater(self.proxy.host_timeouts[(test_host, ip_a)], time.time())
+
+            # 2. Next request for this host: selection immediately skips ip_a without paying timeout penalty
+            next_selected = await self.proxy.select_interface_for_request(
+                request_type="bulk",
+                target_host=test_host
+            )
+            self.assertEqual(next_selected, ip_b)
+        finally:
+            socket.socket.bind = original_bind
+            loop.sock_connect = original_sock_connect
+            if writer:
+                writer.close()
+                await writer.wait_closed()
 
     async def test_single_link_fallback_failure_attribution(self):
         """Verify Option A: in a single-link setup, fallback failure on the same route counts as a local strike."""
